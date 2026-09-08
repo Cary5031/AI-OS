@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="void">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The renderer will eventually display fetched pages and mail bodies, so it
+     is locked down now rather than later: no remote code, no inline scripts,
+     and the only network destination is the local model host.
+
+     frame-src names two schemes, both answered only by the main process and
+     only for a random token it just handed out:
+
+       aios-app:  a generated program, sandboxed without allow-same-origin so it
+                  lands in an opaque origin, carrying its own default-src 'none'.
+                  Generated code was previously inlined via srcdoc, which quietly
+                  did not work: a srcdoc document inherits this policy, and
+                  script-src 'self' blocked the app's own bootstrap.
+       aios-pdf:  the pdf.js viewer, which draws one PDF's pages. Sandboxed too,
+                  but deliberately *with* allow-same-origin: an opaque origin
+                  breaks its own fetches and its worker, and it does not need one
+                  -- its origin is aios-pdf:// and this document is file://, so
+                  it still cannot reach in here. It is isolated by being a
+                  separate origin with no preload, a policy handed down by the
+                  main process, and a connect-src that reaches nothing but its
+                  own token.
+
+     Neither is a hole in the rest of the policy: this document still cannot be
+     reached from either frame, and neither frame can reach the network. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self' 'unsafe-inline';
+               img-src 'self' data:;
+               font-src 'self';
+               frame-src aios-app: aios-pdf:;
+               connect-src http://127.0.0.1:* http://localhost:*;
+               form-action 'none';
+               base-uri 'none'">
+<title>AI-OS // 意圖核心</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0e17'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%234fd6ff'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="os.css">
+</head>
+<body>
+
+<!-- ####################################################################
+     BOOT SEQUENCE
+     Real checks against the local llama-server, printed like a POST log.
+     #################################################################### -->
+<div class="boot" id="boot">
+  <div class="boot-inner">
+    <div class="boot-mark" aria-hidden="true">
+      <span class="boot-glyph">◈</span>
+      <div class="boot-id">
+        <b>AI&#8209;OS</b>
+        <small>INTENT KERNEL / rev 0.9</small>
+      </div>
+    </div>
+    <pre class="boot-log" id="boot-log" role="log" aria-live="polite" aria-label="開機訊息"></pre>
+    <div class="boot-meter" aria-hidden="true"><i id="boot-fill"></i></div>
+    <div class="boot-foot">
+      <span id="boot-status">POST</span>
+      <button class="boot-skip" id="boot-skip" type="button" data-i18n="boot.skip">跳過 &rsaquo;</button>
+    </div>
+  </div>
+  <div class="boot-grid" aria-hidden="true"></div>
+</div>
+
+<!-- ####################################################################
+     MENU BAR
+     #################################################################### -->
+<header class="menubar" id="menubar">
+  <div class="mb-left">
+    <span class="mb-logo" aria-hidden="true">◈</span>
+    <nav class="mb-menus" aria-label="系統選單" data-i18n-aria="mb.menus">
+      <button class="mb-item" type="button" data-menu="system" data-i18n="mb.system">系統</button>
+      <button class="mb-item" type="button" data-menu="view" data-i18n="mb.view">檢視</button>
+      <button class="mb-item" type="button" data-menu="theme" data-i18n="mb.theme">主題</button>
+      <button class="mb-item" type="button" data-menu="help" data-i18n="mb.help">說明</button>
+    </nav>
+  </div>
+
+  <!-- Frameless window: this strip is the drag handle. -->
+  <div class="mb-drag" aria-hidden="true"></div>
+
+  <div class="mb-right">
+    <div class="gauge" id="g-ctx" title="context 使用量 / 預算" data-i18n-title="mb.ctx">
+      <span class="gauge-k">CTX</span>
+      <span class="gauge-track"><i></i></span>
+      <span class="gauge-v">—</span>
+    </div>
+    <span class="mb-stat" id="s-decode" title="上一次推論的解碼速度" data-i18n-title="mb.decode">DEC <b>—</b></span>
+    <span class="mb-stat" id="s-prefill" title="上一次推論的 prefill 速度" data-i18n-title="mb.prefill">PRE <b>—</b></span>
+    <!--累計用量。點一下歸零。Hidden until something has actually been spent,
+         so a local core never shows a meter it does not need. -->
+    <button class="mb-stat mb-spend" id="s-spend" type="button" hidden>TOK <b>—</b></button>
+    <button class="mb-stat mb-spend mb-forge" id="s-forge" type="button" hidden aria-live="polite">⚒ <b>—</b></button>
+    <span class="mb-stat mb-model" id="s-model" title="目前載入的模型" data-i18n-title="mb.model">—</span>
+    <button class="mb-led" id="led" type="button" aria-live="polite">
+      <i></i><span>OFFLINE</span>
+    </button>
+    <time class="mb-clock" id="clock">--:--:--</time>
+    <div class="mb-wc">
+      <button class="wc" id="wc-min" type="button" aria-label="最小化視窗" data-i18n-aria="mb.min">&#8211;</button>
+      <button class="wc" id="wc-full" type="button" aria-label="切換全螢幕" data-i18n-aria="mb.full">&#9744;</button>
+      <button class="wc wc-x" id="wc-close" type="button" aria-label="關閉 AI-OS" data-i18n-aria="mb.close">&#10005;</button>
+    </div>
+  </div>
+
+  <!-- drop-downs -->
+  <div class="mb-drop" id="drop-system" hidden>
+    <button type="button" data-act="import" data-i18n="sys.import">從作業系統匯入檔案…</button>
+    <button type="button" data-act="reveal" data-i18n="sys.reveal">在檔案總管開啟沙箱</button>
+    <button type="button" data-act="trash" data-i18n="sys.trash">沙箱回收桶</button>
+    <hr>
+    <button type="button" data-act="reconnect" data-i18n="sys.reconnect">重新連線核心</button>
+    <button type="button" data-act="endpoint" data-i18n="sys.endpoint">核心模型…</button>
+    <button type="button" data-act="cleartaint" data-i18n="sys.cleartaint">清除汙染標記</button>
+    <hr>
+    <!-- The language, in each language's own name: a person who cannot read
+         the current one still has to be able to find theirs. The check mark
+         is painted by boot.js from the saved preference. -->
+    <span class="mb-drop-label" data-i18n="sys.lang">語言 / Language</span>
+    <button type="button" data-act="lang-zh-TW" data-pref="lang" data-value="zh-TW" role="menuitemradio">繁體中文</button>
+    <button type="button" data-act="lang-en" data-pref="lang" data-value="en" role="menuitemradio">English</button>
+    <hr>
+    <button type="button" data-act="version" data-i18n="sys.version">版本說明…</button>
+    <hr>
+    <button type="button" data-act="reset" data-i18n="sys.reset">清空工作階段</button>
+    <button type="button" data-act="reboot" data-i18n="sys.reboot">重新開機</button>
+    <button type="button" data-act="shutdown" data-i18n="sys.shutdown">關機</button>
+  </div>
+  <div class="mb-drop" id="drop-view" hidden>
+    <button type="button" data-act="toggle-left" data-i18n="view.left">注意力 / 能力 HUD</button>
+    <button type="button" data-act="toggle-right" data-i18n="view.right">核心軌跡 HUD</button>
+    <button type="button" data-act="toggle-chips" data-i18n="view.chips">意圖列的建議詞</button>
+    <hr>
+    <!-- Page zoom, kept by the main process across sessions. 115% is the
+         default: the type shipped one step too small to read comfortably. -->
+    <span class="mb-drop-label" data-i18n="view.size">文字大小</span>
+    <button type="button" data-act="zoom-1" data-pref="zoom" data-value="1" role="menuitemradio" data-i18n="view.size1">標準（100%）</button>
+    <button type="button" data-act="zoom-1.15" data-pref="zoom" data-value="1.15" role="menuitemradio" data-i18n="view.size115">大（115%）</button>
+    <button type="button" data-act="zoom-1.3" data-pref="zoom" data-value="1.3" role="menuitemradio" data-i18n="view.size130">特大（130%）</button>
+    <button type="button" data-act="zoom-1.5" data-pref="zoom" data-value="1.5" role="menuitemradio" data-i18n="view.size150">最大（150%）</button>
+    <hr>
+    <button type="button" data-act="tile" data-i18n="view.tile">重排視窗</button>
+    <button type="button" data-act="closeall" data-i18n="view.closeall">關閉所有視窗</button>
+  </div>
+  <!-- Filled from AIOS.themes at boot: the list of themes lives in one place
+       (shell.js) and the palettes in os.css, so adding one is two edits rather
+       than four. -->
+  <div class="mb-drop mb-drop-theme" id="drop-theme" hidden></div>
+  <div class="mb-drop" id="drop-help" hidden>
+    <button type="button" data-act="about" data-i18n="help.about">關於這台機器</button>
+    <button type="button" data-act="injection" data-i18n="help.injection">示範：提示注入攻擊</button>
+  </div>
+</header>
+
+<!-- ####################################################################
+     DESKTOP
+     #################################################################### -->
+<main class="desktop" id="desktop">
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <div class="wallmark" aria-hidden="true">
+    <span class="wm-1">AI&#8209;OS</span>
+    <span class="wm-2" data-i18n="wm.tagline">意圖即系統呼叫</span>
+  </div>
+
+  <!-- window layer -->
+  <div class="winlayer" id="winlayer" aria-label="視窗" data-i18n-aria="winlayer"></div>
+
+  <!-- ---------------- HUD: left (resource manager) ---------------- -->
+  <aside class="hud hud-left" id="hud-left" aria-label="核心資源" data-i18n-aria="hud.left">
+    <div class="hud-bracket" aria-hidden="true"></div>
+
+    <section class="hpanel">
+      <h2 class="hp-title">
+        <span data-i18n="hud.sched">注意力排程器</span>
+        <em title="這一層管理的稀缺資源不是 CPU 時間，而是 context window。" data-i18n-title="hud.schedInfo">i</em>
+      </h2>
+
+      <div class="ring-row">
+        <svg class="ring" viewBox="0 0 44 44" aria-hidden="true">
+          <circle class="ring-bg" cx="22" cy="22" r="18"></circle>
+          <circle class="ring-fg" id="ring-fg" cx="22" cy="22" r="18"></circle>
+        </svg>
+        <div class="ring-meta">
+          <b id="ctx-used">0</b>
+          <span id="ctx-budget">/ 0 tok</span>
+          <small id="ctx-pct">0%</small>
+        </div>
+      </div>
+
+      <div class="bar" id="budget-bar" role="img" aria-label="context 分頁組成" data-i18n-aria="hud.composition" aria-describedby="ctx-used"></div>
+
+      <label class="slide" for="budget-slider">
+        <span data-i18n="hud.budget">預算</span>
+        <input id="budget-slider" type="range" min="640" max="32768" step="256" value="8192">
+        <output id="budget-out" for="budget-slider">8192</output>
+      </label>
+      <p class="hp-note" data-i18n="hud.budgetNote">把預算調低，看核心驅逐分頁 &mdash; 模型會當場忘記東西。</p>
+
+      <ul class="pages" id="pages" aria-label="常駐 context 分頁" data-i18n-aria="hud.pages"></ul>
+    </section>
+
+    <section class="hpanel">
+      <h2 class="hp-title">
+        <span data-i18n="hud.sandbox">沙箱</span>
+        <em title="核心只看得到這個目錄。作業系統上的檔案永遠不受影響，刪除只會移進沙箱回收桶。" data-i18n-title="hud.sandboxInfo">i</em>
+      </h2>
+      <p class="sb-root" id="sb-root">（未掛載）</p>
+      <div class="gauge-track sb-bar" id="sb-bar" role="img" aria-label="沙箱用量" data-i18n-aria="hud.sandboxUsage"><i></i></div>
+      <p class="sb-text" id="sb-text">—</p>
+      <p class="sb-taint" id="sb-taint" hidden>
+        <span></span>
+        <button type="button" id="sb-taint-clear" data-i18n="hud.clearMark">清除標記</button>
+      </p>
+      <div class="sb-acts">
+        <button class="fbtn" type="button" id="sb-import" data-i18n="hud.sbImport">從 OS 匯入…</button>
+        <button class="fbtn" type="button" id="sb-open" data-i18n="hud.sbOpen">在檔案總管開啟</button>
+      </div>
+    </section>
+
+    <section class="hpanel">
+      <h2 class="hp-title">
+        <span data-i18n="hud.caps">能力閘門</span>
+        <em title="政策由主程序保管與執行。渲染層只能顯示，不能自行核准。" data-i18n-title="hud.capsInfo">i</em>
+      </h2>
+      <ul class="caps" id="caps" aria-label="能力政策" data-i18n-aria="hud.capsList"></ul>
+      <p class="hp-note" data-i18n="hud.capsNote">點一下循環切換 ALLOW / ASK / DENY。</p>
+    </section>
+
+    <section class="hpanel">
+      <h2 class="hp-title">
+        <span data-i18n="hud.memory">長期記憶</span>
+        <em title="檢索就是新的分頁：熱的在 context 裡，溫的在索引裡，冷的在磁碟上。" data-i18n-title="hud.memoryInfo">i</em>
+      </h2>
+      <ul class="mem" id="mem" aria-label="長期記憶" data-i18n-aria="hud.memory"></ul>
+    </section>
+  </aside>
+
+  <!-- ---------------- HUD: right (trace + journal) ---------------- -->
+  <aside class="hud hud-right" id="hud-right" aria-label="核心軌跡" data-i18n-aria="hud.right">
+    <div class="hud-bracket right" aria-hidden="true"></div>
+
+    <section class="hpanel hpanel-grow">
+      <h2 class="hp-title">
+        <span data-i18n="hud.trace">核心軌跡</span>
+        <em title="意圖 → 計畫 → 閘門 → 執行，每一步都看得見。" data-i18n-title="hud.traceInfo">i</em>
+      </h2>
+      <div class="phases" id="phases">
+        <span class="ph" data-phase="intent">INTENT</span>
+        <span class="ph" data-phase="plan">PLAN</span>
+        <span class="ph" data-phase="gate">GATE</span>
+        <span class="ph" data-phase="exec">EXEC</span>
+      </div>
+      <div class="trace" id="trace" role="log" aria-live="polite" aria-label="核心訊息" data-i18n-aria="hud.traceLog"></div>
+    </section>
+
+    <section class="hpanel">
+      <h2 class="hp-title">
+        <span data-i18n="hud.journal">動作日誌</span>
+        <em title="沒有可重播、可撤銷的日誌，這種系統無法除錯也無法稽核。" data-i18n-title="hud.journalInfo">i</em>
+      </h2>
+      <ol class="journal" id="journal" aria-label="已執行的動作" data-i18n-aria="hud.journalList"></ol>
+    </section>
+  </aside>
+</main>
+
+<!-- ####################################################################
+     INTENT BAR  (the syscall interface)
+     #################################################################### -->
+<form class="intent" id="intent-form" autocomplete="off">
+  <div class="intent-shell">
+    <span class="intent-sigil" aria-hidden="true">&gt;</span>
+    <label class="sr-only" for="intent-input" data-i18n="intent.label">你的意圖</label>
+    <textarea id="intent-input" class="intent-input" rows="1"
+              placeholder="說出你想達成的事，不用說怎麼做…" data-i18n-placeholder="intent.placeholder"
+              aria-describedby="intent-help"></textarea>
+    <!-- Lives in the bar, not in the chip row it controls: hiding the row has to
+         still leave somewhere to turn it back on, and the bar is always there. -->
+    <button class="intent-chips" id="btn-chips" type="button"
+            aria-expanded="true" aria-controls="chips" title="隱藏建議詞" data-i18n-title="intent.hideChips">▾</button>
+    <span class="intent-hint" id="intent-hint" aria-hidden="true">Ctrl+K</span>
+    <button class="intent-go" id="btn-run" type="submit" aria-label="執行意圖" data-i18n-aria="intent.runAria">
+      <span data-i18n="intent.run">執行</span>
+    </button>
+    <button class="intent-stop" id="btn-stop" type="button" hidden data-i18n="intent.stop">中止</button>
+  </div>
+  <p id="intent-help" class="sr-only" data-i18n="intent.help">按 Enter 送出，Shift + Enter 換行，Ctrl + K 聚焦。</p>
+  <div class="chips" id="chips" aria-label="範例意圖" data-i18n-aria="intent.chips"></div>
+</form>
+
+<!-- ####################################################################
+     DOCK
+     #################################################################### -->
+<nav class="dock" id="dock" aria-label="Dock">
+  <button class="dk" type="button" data-dock="intent" title="意圖列 (Ctrl+K)" data-i18n-title="dock.intent"><span>&gt;_</span></button>
+  <button class="dk" type="button" data-dock="apps" title="所有應用程式" data-i18n-title="dock.apps"><span>⊞</span></button>
+  <span class="dk-sep" aria-hidden="true"></span>
+  <button class="dk" type="button" data-dock="files" title="檔案總管（沙箱）" data-i18n-title="dock.files"><span>▤</span></button>
+  <button class="dk" type="button" data-dock="editor" title="編輯器" data-i18n-title="dock.editor"><span>✎</span></button>
+  <button class="dk" type="button" data-dock="browser" title="瀏覽器" data-i18n-title="dock.browser"><span>◈</span></button>
+  <button class="dk" type="button" data-dock="mail" title="郵件" data-i18n-title="dock.mail"><span>✉</span></button>
+  <button class="dk" type="button" data-dock="docs" title="文件" data-i18n-title="dock.docs"><span>▧</span></button>
+  <button class="dk" type="button" data-dock="sheets" title="試算表" data-i18n-title="dock.sheets"><span>▦</span></button>
+  <button class="dk" type="button" data-dock="slides" title="簡報" data-i18n-title="dock.slides"><span>▰</span></button>
+  <button class="dk" type="button" data-dock="pdf" title="PDF 檢視器" data-i18n-title="dock.pdf"><span>▥</span></button>
+  <button class="dk" type="button" data-dock="markdown" title="Markdown 檢視器" data-i18n-title="dock.markdown"><span>≡</span></button>
+  <button class="dk" type="button" data-dock="photos" title="圖片檢視器" data-i18n-title="dock.photos"><span>◪</span></button>
+  <button class="dk" type="button" data-dock="memoryApp" title="長期記憶" data-i18n-title="dock.memory"><span>◉</span></button>
+  <button class="dk" type="button" data-dock="forge" title="App Forge：讓核心寫程式" data-i18n-title="dock.forge"><span>⚒</span></button>
+  <button class="dk" type="button" data-dock="schedule" title="排程：定時執行程式或意圖" data-i18n-title="dock.schedule"><span>⏱</span></button>
+  <span class="dk-sep" aria-hidden="true"></span>
+  <button class="dk" type="button" data-dock="import" title="從作業系統匯入檔案" data-i18n-title="dock.import"><span>⤓</span></button>
+  <button class="dk" type="button" data-dock="trash" title="沙箱回收桶" data-i18n-title="dock.trash"><span>♻</span></button>
+  <button class="dk" type="button" data-dock="policy" title="能力政策" data-i18n-title="dock.policy"><span>⛨</span></button>
+  <span class="dk-sep" aria-hidden="true"></span>
+  <button class="dk" type="button" data-dock="hud-left" title="資源 HUD" data-i18n-title="dock.hudLeft" aria-pressed="true"><span>◧</span></button>
+  <button class="dk" type="button" data-dock="hud-right" title="軌跡 HUD" data-i18n-title="dock.hudRight" aria-pressed="true"><span>◨</span></button>
+  <span class="dk-sep dk-min-sep" aria-hidden="true" hidden></span>
+  <span class="dk-mins" id="dock-mins"></span>
+</nav>
+
+<!-- Consent is not rendered here on purpose. The main process owns that window
+     (see app/main/gate.js), so this document cannot approve its own actions. -->
+
+<!-- Drop target overlay for importing files from the operating system -->
+<div class="dropzone" id="dropzone" hidden aria-hidden="true">
+  <div class="dropzone-card">
+    <b data-i18n="drop.title">放開以複製進沙箱</b>
+    <span data-i18n="drop.note">原始檔案不會被搬移或修改</span>
+  </div>
+</div>
+
+<!-- Classic scripts, loaded in dependency order. No bundler on purpose: the
+     whole renderer is readable in a text editor and debuggable without a
+     sourcemap, which matters more here than module hygiene. -->
+<!-- The language layer first: it owns the dictionary and marks the document
+     before anything paints, and every later script asks it for strings. -->
+<script src="i18n.js"></script>
+<script src="kernel.js"></script>
+<script src="surfaces.js"></script>
+<script src="ui.js"></script>
+<!-- The web-translation controls, before the browser that mounts them. The
+     translating itself is in the main process; this is only the surface. -->
+<script src="translate.js"></script>
+<script src="apps/registry.js"></script>
+<script src="apps/chatpane.js"></script>
+<script src="apps/formula.js"></script>
+<script src="apps/appshell.js"></script>
+<script src="apps/files.js"></script>
+<!-- Ahead of editor.js. The editor accepts .md as source code and would win
+     registry.forPath, so a Markdown file would open as plain text. Reading is
+     the common case; both the viewer's menu and the editor remain one click
+     away. -->
+<script src="apps/markdown.js"></script>
+<script src="apps/photos.js"></script>
+<script src="apps/editor.js"></script>
+<script src="apps/memory.js"></script>
+<script src="apps/browser.js"></script>
+<script src="apps/mail.js"></script>
+<script src="apps/pdf.js"></script>
+<script src="apps/sheets.js"></script>
+<script src="apps/docs.js"></script>
+<script src="apps/slides.js"></script>
+<script src="apps/forge.js"></script>
+<script src="apps/schedule.js"></script>
+<script src="shell.js"></script>
+<!-- After shell.js, whose theme list it extends with the user's own; before
+     boot.js, which paints the menu those appear in. -->
+<script src="themer.js"></script>
+<script src="boot.js"></script>
+</body>
+</html>

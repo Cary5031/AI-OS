@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="void">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>確認</title>
+<link rel="stylesheet" href="os.css">
+<style>
+  /* This document is a transparent layer over the shell (main/askbox.js): the
+     scrim is the page, and the card sits where the shell's own dialogs sit.
+     The view's background is transparent, so the page's must be too. */
+  html, body { background: transparent; }
+  body { overflow: hidden; }
+  /* The blur has nothing of its own to blur -- the shell is on another
+     surface -- and it costs a layer, so it is off here. The haze is the
+     theme's own ground, not a fixed black: a light palette dims to a light
+     haze rather than to night. */
+  .scrim { backdrop-filter: none; background: color-mix(in srgb, var(--bg-0) 62%, transparent); }
+  /* A question taller than the window scrolls its text; the title and the
+     buttons stay put. Centred and clipped at both ends, the buttons would be
+     the part that went missing. */
+  .dlg { display: flex; flex-direction: column; max-height: 100%; }
+  .dlg-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+</style>
+</head>
+<body>
+  <div class="scrim">
+    <div id="card" class="dlg" role="dialog" aria-modal="true" aria-labelledby="title" aria-describedby="body">
+      <div class="dlg-bar">
+        <span id="kind" class="dlg-kind">CONFIRM</span>
+        <span id="bar-title"></span>
+      </div>
+      <h2 id="title" class="dlg-title"></h2>
+      <div id="body" class="dlg-body"></div>
+      <div id="actions" class="dlg-actions"></div>
+    </div>
+  </div>
+  <script src="askbox-view.js"></script>
+</body>
+</html>

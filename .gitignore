@@ -1,0 +1,16 @@
+node_modules/
+dist/
+out/
+
+# The sandbox holds the user's own files. It is machine state, not source.
+sandbox/
+
+# Credentials live outside the sandbox on purpose, but never in the repo.
+secrets/
+*.log
+
+# The shipped provider preset holds an API key. It is encrypted, but with a
+# passphrase this source tree can produce -- so committing it publishes the key
+# to anyone who can read the repo. It belongs in a build, not in history.
+# Remove this line only if the key inside is one you would publish.
+app/preset/provider-preset.enc

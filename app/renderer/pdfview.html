@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>PDF</title>
+<!-- ===========================================================================
+     AI-OS // PDF viewer document
+     ---------------------------------------------------------------------------
+     Served over aios-pdf://<token>/viewer.html by main/pdf.js, framed by the
+     PDF application in the shell. Not part of the shell's document: this one
+     parses an untrusted file, so it gets its own origin, no preload bridge, and
+     a Content-Security-Policy handed down by the main process.
+
+     There is no <script> here beyond the module, and no inline handler anywhere:
+     the policy says script-src 'self', so both would be refused. Styles are
+     inline because a fourth served file for one stylesheet is not worth it, and
+     the policy allows style-src 'unsafe-inline' for the text layer's sake --
+     pdf.js positions every glyph run with a style attribute.
+     =========================================================================== -->
+<style>
+:root {
+  --bg: #0a0e17;
+  --panel: #101725;
+  --panel-2: #131a26;
+  --line: #1c2636;
+  --ink: #cfe3f7;
+  --dim: #7d93b2;
+  --accent: #4fd6ff;
+  --paper: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.5 "Noto Sans TC", "Microsoft JhengHei", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ layout -- */
+
+#shell { display: flex; flex-direction: column; height: 100%; }
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+#split { display: flex; flex: 1 1 auto; min-height: 0; }
+
+#side {
+  flex: 0 0 210px;
+  min-width: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow: auto;
+  padding: 6px;
+  display: none;
+}
+#side.on { display: block; }
+
+#scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 14px 0 40px;
+  scroll-behavior: auto;
+}
+
+#pages { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+
+/* ----------------------------------------------------------------- widgets -- */
+
+button, select, input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; }
+button.on { border-color: var(--accent); color: var(--accent); }
+select:focus, input:focus, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* The dropdown list itself, not just the closed control: a white popup over a
+   dark shell is the one thing that always looks broken. */
+select option { background: var(--panel-2); color: var(--ink); }
+
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 3px; }
+.grow { flex: 1 1 auto; }
+.dim { color: var(--dim); }
+
+#pageNo { width: 46px; text-align: center; }
+#count { color: var(--dim); white-space: nowrap; }
+#zoom { min-width: 92px; }
+#find { width: 150px; }
+#hits { color: var(--dim); white-space: nowrap; min-width: 54px; }
+
+/* ------------------------------------------------------------------- pages -- */
+
+.page {
+  position: relative;
+  background: var(--paper);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, .55);
+  /* pdf.js writes layer sizes as round(down, var(--total-scale-factor) * Npx,
+     var(--scale-round-x)), so these three have to exist on the container. */
+  --total-scale-factor: 1;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+.page canvas { display: block; }
+
+/* Placing something on a page. The crosshair is on the pages rather than on the
+   whole surface so it is obvious that the toolbar and the scrollbar are still
+   ordinary things to click. */
+#scroll.picking .page,
+#scroll.picking .page * { cursor: crosshair; }
+#scroll.picking .page { outline: 2px dashed var(--accent, #4fd6ff); outline-offset: 2px; }
+
+/* A page whose canvas has been released, or has not been drawn yet. Keeps the
+   scroll height honest so the scrollbar does not jump while reading. */
+.page.blank::after {
+  content: attr(data-n);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  color: #d5dee9;
+  background: repeating-linear-gradient(45deg, #fff 0 12px, #f6f8fa 12px 24px);
+}
+
+.plabel {
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  font-size: 10px;
+  color: #8a99ab;
+  background: rgba(255, 255, 255, .82);
+  border-radius: 3px;
+  padding: 0 4px;
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------- textLayer -- */
+/* Lifted from pdfjs-dist/web/pdf_viewer.css, trimmed to the selection and
+   positioning rules. The annotation-editor parts are dropped: nothing here
+   edits a PDF. Getting this wrong does not look broken, it just makes selection
+   land on the wrong glyphs, so it is copied rather than reinvented.
+   pdf.js is licensed Apache-2.0. */
+
+.textLayer {
+  color-scheme: only light;
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+  caret-color: CanvasText;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer span[role="img"] { user-select: none; cursor: default; }
+.textLayer ::selection { background: rgba(79, 214, 255, .38); color: transparent; }
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+.textLayer.selecting .endOfContent { top: 0; }
+
+/* Search hits. Drawn in the text layer, which sits over the canvas, so the
+   colour has to be translucent or it would cover the glyphs it is marking. */
+.textLayer .hit {
+  background: rgba(255, 214, 0, .42);
+  border-radius: 2px;
+}
+.textLayer .hit.now { background: rgba(79, 214, 255, .62); }
+
+/* ----------------------------------------------------------------- outline -- */
+
+#side h4 {
+  margin: 4px 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.tocItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--ink);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tocItem:hover { background: var(--panel-2); color: var(--accent); }
+#side .empty { padding: 6px; color: var(--dim); }
+
+/* -------------------------------------------------------------- overlays --- */
+
+#veil {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 14, 23, .9);
+  z-index: 20;
+}
+#veil.on { display: flex; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px 18px;
+  max-width: 460px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+}
+.card h3 { margin: 0 0 8px; font-size: 14px; }
+.card p { margin: 0 0 12px; color: var(--dim); white-space: pre-wrap; }
+.card .row { display: flex; gap: 8px; align-items: center; }
+.card input { flex: 1 1 auto; }
+
+#note {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 5px 14px;
+  color: var(--dim);
+  display: none;
+  z-index: 15;
+}
+#note.on { display: block; }
+
+/* --------------------------------------------------------------- printing -- */
+/* Printing draws every page into #print as an image, because the pages on
+   screen are rendered lazily and the ones nobody scrolled to would come out
+   blank. Everything else is hidden for the duration. */
+
+#print { display: none; }
+@media print {
+  html, body { overflow: visible; background: #fff; height: auto; }
+  #shell, #veil, #note { display: none !important; }
+  #print { display: block; }
+  #print img { display: block; width: 100%; break-after: page; }
+  @page { margin: 0; }
+}
+</style>
+</head>
+<body>
+
+<div id="shell">
+  <div id="bar">
+    <button id="btnSide" type="button" title="大綱">目錄</button>
+    <span class="sep"></span>
+
+    <button id="btnPrev" type="button" title="上一頁">&#8249;</button>
+    <input id="pageNo" type="text" inputmode="numeric" value="1" aria-label="頁碼">
+    <span id="count">/ &ndash;</span>
+    <button id="btnNext" type="button" title="下一頁">&#8250;</button>
+    <span class="sep"></span>
+
+    <button id="btnOut" type="button" title="縮小">&minus;</button>
+    <select id="zoom" aria-label="縮放">
+      <option value="width">符合寬度</option>
+      <option value="page">整頁</option>
+      <option value="1">100%</option>
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+      <option value="3">300%</option>
+      <option value="4">400%</option>
+    </select>
+    <button id="btnIn" type="button" title="放大">+</button>
+    <button id="btnRot" type="button" title="旋轉 90 度">&#8635;</button>
+    <span class="sep"></span>
+
+    <input id="find" type="search" placeholder="搜尋內容" aria-label="搜尋">
+    <button id="btnUp" type="button" title="上一個">&#9650;</button>
+    <button id="btnDown" type="button" title="下一個">&#9660;</button>
+    <span id="hits"></span>
+
+    <span class="grow"></span>
+    <button id="btnPrint" type="button" title="列印">列印</button>
+  </div>
+
+  <div id="split">
+    <aside id="side">
+      <h4>大綱</h4>
+      <div id="toc"></div>
+    </aside>
+    <main id="scroll" tabindex="0">
+      <div id="pages"></div>
+    </main>
+  </div>
+</div>
+
+<div id="veil">
+  <div class="card">
+    <h3 id="veilTitle">請稍候</h3>
+    <p id="veilText"></p>
+    <div class="row" id="veilRow" hidden>
+      <input id="pw" type="password" aria-label="密碼" autocomplete="off">
+      <button id="pwGo" type="button">開啟</button>
+    </div>
+  </div>
+</div>
+
+<div id="note"></div>
+<div id="print"></div>
+
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

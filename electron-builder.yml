@@ -1,0 +1,56 @@
+# Packaging for AI-OS.
+#
+# In its own file rather than under "build" in package.json because
+# electron-builder validates that object strictly and rejects any key it does not
+# recognise -- including comment keys. The reasoning below is worth more than the
+# tidiness of one less file.
+
+appId: dev.aios.desktop
+productName: AI-OS
+copyright: AI-OS
+
+directories:
+  output: dist
+  # build/icon.png is drawn from the application's own palette; electron-builder
+  # renders the .ico from it.
+  buildResources: build
+
+# Only what the application runs on.
+#
+# Left to itself electron-builder ships everything that is not ignored, and three
+# directories here would each be a mistake: `sandbox/` is the developer's own
+# files and generated apps, `graphify-out/` is 4.4 MB of analysis output, and
+# `test/` is not something a user runs. Naming what goes in, rather than what
+# stays out, means a new directory of working files is excluded by default
+# instead of being shipped until somebody notices.
+files:
+  - app/**/*
+  - package.json
+  - '!**/*.map'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+  # A portable exe unpacks itself before running. Without a fixed name it lands
+  # in a fresh temp directory on every launch, so Chromium's cache is cold each
+  # time and the copies accumulate.
+  unpackDirName: AI-OS
+
+nsis:
+  artifactName: ${productName}-Setup-${version}.${ext}
+  # Per-user, not per-machine: no administrator prompt, and the install lands
+  # under the user's own profile rather than Program Files. This machine writes
+  # its data to %APPDATA% either way, but a per-machine install would ask for
+  # elevation for no benefit anyone here gets.
+  perMachine: false
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI-OS

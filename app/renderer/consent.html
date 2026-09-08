@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="void">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>核心請求授權</title>
+<link rel="stylesheet" href="os.css">
+<style>
+  /* This window is the dialog, so the page itself is the card. */
+  body {
+    display: block;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--glass-2);
+    border: 1px solid var(--hair-2);
+  }
+  .dlg { width: 100%; height: 100%; border: 0; border-radius: 0; background: none; box-shadow: none; animation: none; display: flex; flex-direction: column; }
+  .dlg-body { flex: 1; overflow-y: auto; scrollbar-width: thin; }
+  .dlg-drag { -webkit-app-region: drag; height: 100%; flex: 1; }
+</style>
+</head>
+<body>
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="title" aria-describedby="body">
+    <div class="dlg-bar">
+      <span class="dlg-kind">SECURITY</span>
+      <span class="dlg-drag">核心請求授權</span>
+    </div>
+    <h2 id="title" class="dlg-title">這個動作需要你的許可</h2>
+    <div id="body" class="dlg-body"></div>
+    <div class="dlg-actions">
+      <button id="deny" class="btn" type="button">拒絕</button>
+      <button id="allow" class="btn btn-primary" type="button">允許一次</button>
+    </div>
+  </div>
+  <script src="consent-view.js"></script>
+</body>
+</html>
