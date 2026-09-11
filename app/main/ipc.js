@@ -38,6 +38,7 @@ const prefs = require('./prefs');
 const themes = require('./themes');
 const askbox = require('./askbox');
 const translate = require('./translate');
+const extract = require('./extract');
 
 /**
  * Uniform wrapper: validate, authorise, run, report.
@@ -313,6 +314,74 @@ function register(getWindow) {
       return { ok: false, code: e.code || 'EFAIL', error: e.message };
     }
   });
+
+  /* ------------------------------------------------ document extraction ---- */
+
+  /* A second model, belonging to one program rather than to the machine.
+     Separate endpoint, separate key, separate settings file -- nothing here
+     reads or writes the core model's configuration, and nothing there reads
+     this one's. The two are configured in different windows on purpose: the
+     machine's model is the machine's, and the extraction model is that
+     program's.
+
+     The settings calls are plain() for the same reason the core model's are:
+     they are user gestures made in this shell's own window, they report whether
+     a credential exists and never what it is, and no model can reach them
+     because they are not in the syscall table.
+
+     The two that actually talk to the configured backend answer to doc.extract,
+     which is a switch of its own in the capability panel -- see gate.js. */
+  ipcMain.handle('extract:state', plain(async () => extract.state()));
+  ipcMain.handle('extract:configure', plain(async ({ patch } = {}) => extract.configure(patch || {})));
+  ipcMain.handle('extract:setSecret', plain(async ({ key, headers } = {}) =>
+    extract.setSecret({ key, headers })));
+  ipcMain.handle('extract:forgetSecret', plain(async () => extract.forgetSecret()));
+  ipcMain.handle('extract:probe', plain(async () => extract.probe()));
+
+  /* One document to the extraction model.
+     The renderer names a sandbox path, never bytes: a 10 MiB PDF would otherwise
+     cross the bridge twice to get somewhere the main process could have read it
+     from directly, and the window would be holding the document for no reason. */
+  ipcMain.handle('extract:send', guarded('extract.send', async (args = {}) => {
+    const file = await sandbox.readBytes(args.path);
+    /* The document is untrusted content, and the rows coming back are its words
+       rearranged. Armed here, in the process that enforces it, exactly as
+       fs:readBytes does -- routing a file through a model does not launder it. */
+    if (file.untrusted) gate.addTaint(file.vpath, file.vpath);
+    const out = await extract.generate({
+      base64: file.base64,
+      filename: String(file.vpath || '').split('/').pop(),
+      mimeType: args.mimeType,
+      prompt: args.prompt,
+      columns: args.columns,
+      temperature: args.temperature
+    });
+    return Object.assign(out, { path: file.vpath, untrusted: !!file.untrusted });
+  }, (args) => { sandbox.resolve(args.path); }, '把一份沙箱文件送到你設定的萃取模型'));
+
+  /* A request to the extraction service, in service mode. `spec.paths` names
+     sandbox files to upload; the bytes are read here for the same reason. */
+  ipcMain.handle('extract:call', guarded('extract.send', async ({ spec } = {}) => {
+    const s = Object.assign({}, spec || {});
+    const paths = Array.isArray(s.paths) ? s.paths : [];
+    delete s.paths;
+    if (paths.length) {
+      s.files = [];
+      for (const p of paths) {
+        const file = await sandbox.readBytes(p);
+        if (file.untrusted) gate.addTaint(file.vpath, file.vpath);
+        s.files.push({
+          field: 'files',
+          filename: String(file.vpath || '').split('/').pop(),
+          type: 'application/pdf',
+          base64: file.base64
+        });
+      }
+    }
+    return extract.call(s);
+  }, (args) => {
+    ((args && args.spec && args.spec.paths) || []).forEach((p) => sandbox.resolve(p));
+  }, '呼叫你設定的文件解析服務'));
 
   /* ------------------------------------------------------ filesystem ---- */
 

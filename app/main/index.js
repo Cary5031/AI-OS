@@ -58,6 +58,7 @@ const prefs = require('./prefs');
 const themes = require('./themes');
 const askbox = require('./askbox');
 const translate = require('./translate');
+const extract = require('./extract');
 
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 const ARGS = new Set(process.argv.slice(1));
@@ -388,6 +389,17 @@ function wireBoot() {
           (activeProvider.remote ? ' (remote — prompts leave this machine)' : '') +
           (providers.sealed ? '' : ' — no OS keychain, credentials cannot be stored'),
           activeProvider.remote ? 'warn' : 'ok');
+
+      /* The 文件萃取 program's own model. Reported separately from the core
+         provider above because it is a separate decision with a separate key:
+         a machine thinking locally can still be shipping every invoice to a
+         cloud reader, and the boot log should not let that go unsaid. */
+      const extractor = await extract.init(userData);
+      say(extractor.configured
+        ? `document extractor: ${extractor.mode === 'gemini' ? extractor.model : extractor.base}` +
+          ' — documents leave this machine'
+        : 'document extractor: not configured',
+        extractor.configured ? 'warn' : 'info');
 
       const mailStatus = await mail.init(userData);
       say(mailStatus.configured

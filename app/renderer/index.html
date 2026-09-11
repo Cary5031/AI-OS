@@ -349,6 +349,10 @@
      programs; it reads the formula engine and the palette when a chart is
      drawn, not when it loads, so it sits with the other shared surfaces. -->
 <script src="charts.js"></script>
+<!-- The document extractor's half with no screen in it: profiles, prompts,
+     column alignment, the filing plan. Beside charts.js for the same reason —
+     shared, pure, and loaded before anything that mounts a window. -->
+<script src="extract.js"></script>
 <script src="apps/registry.js"></script>
 <script src="apps/chatpane.js"></script>
 <script src="apps/formula.js"></script>

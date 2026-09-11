@@ -93,6 +93,31 @@ contextBridge.exposeInMainWorld('aios', {
     onChunk: (fn) => on('model:chunk', fn)
   },
 
+  /* ------------------------------------------------- document extraction */
+  /* The 文件萃取 program's own model, which is not this machine's model. Its
+     endpoint, key, auth kind and custom headers live in their own settings
+     file and are configured in that program's own window; nothing here touches
+     the core model above, and nothing above touches this.
+
+     `state` reports the address, the model name and whether a key exists, plus
+     what the custom headers are *called*. No value of any secret comes back
+     through this bridge -- there is no getter for one, here or in main, for the
+     same reason as the core model's: a bridge that can hand a credential out is
+     a bridge a bug in the renderer can be talked into handing one out through.
+
+     `send` names a sandbox path rather than carrying bytes. The window never
+     holds the document, and the main process reads it from the place it already
+     had to check containment for. */
+  extract: {
+    state: () => invoke('extract:state'),
+    configure: (patch) => invoke('extract:configure', { patch }),
+    setSecret: (key, headers) => invoke('extract:setSecret', { key, headers }),
+    forgetSecret: () => invoke('extract:forgetSecret'),
+    probe: () => invoke('extract:probe'),
+    send: (spec) => invoke('extract:send', spec || {}),
+    call: (spec) => invoke('extract:call', { spec })
+  },
+
   policy: {
     get: () => invoke('policy:get'),
     set: (cap, value) => invoke('policy:set', { cap, value })
