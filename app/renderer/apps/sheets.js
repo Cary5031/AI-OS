@@ -230,6 +230,49 @@
         args: '{name}', desc: '刪除一張工作表（至少要留一張）',
         run: async function (a, ctx) { return { note: ctx.api.deleteSheet(a && a.name) }; }
       },
+      /* Charts. A chart here is bound to a range instead of holding its own
+         numbers, which is the whole point of drawing one inside a spreadsheet:
+         change a cell and the picture changes with it. So every one of these
+         talks about ranges, and the data only appears in `rows` for the case
+         where the numbers are not on the sheet yet. */
+      insertChart: {
+        args: '{range:"A1:D13", type:"column"|"bar"|"line"|"area"|"pie"|"doughnut"|"scatter"|"stackedColumn"|"stackedBar"|"stackedArea", ' +
+              'title, seriesIn:"auto"|"cols"|"rows", categories:"A2:A13", headerRow, headerCol, omitTotals, at:"F2", ' +
+              'legend:"bottom"|"right"|"none", labels:true|false（資料標籤）, numFmt, xTitle, yTitle, rows:[[…]]}',
+        desc: '插入一張圖表，資料來自 range（省略就是目前選取的範圍；只選一格會自動抓整塊資料）。' +
+              'categories 是另外一段類別範圍，留空就用第一欄或第一列；at 是圖表左上角要貼在哪一格，省略就放在範圍右邊。' +
+              '數字還不在表上時可以直接給 rows（二維陣列，第一列是數列名稱、第一欄是類別），會先寫進儲存格再畫',
+        run: async function (a, ctx) { return { note: ctx.api.insertChart(a) }; }
+      },
+      setChart: {
+        args: '{id:"c1", type, title, range, categories, seriesIn, headerRow, headerCol, omitTotals, legend, labels, numFmt, xTitle, yTitle, at, width, height, colours:["藍","橙"]}',
+        desc: '改一張圖表：只給要改的欄位，其餘保留（欄位同 insertChart）。id 省略就是選取中的那張，沒有就是最後一張。' +
+              'at 是錨點儲存格，width/height 是像素；colours 依數列順序給，可用色名或 #RRGGBB',
+        run: async function (a, ctx) { return { note: ctx.api.setChart(a) }; }
+      },
+      deleteChart: {
+        args: '{id:"c1"}', desc: '刪除一張圖表。id 省略就是選取中的那張，沒有就是最後一張',
+        run: async function (a, ctx) { return { note: ctx.api.deleteChart(a) }; }
+      },
+      chartToApp: {
+        args: '{id:"c1", app:"docs"|"slides"}',
+        desc: '把圖表插到文件或簡報（用開著的視窗，沒有就開一個）。' +
+              '也可以不先插圖表，直接給 range（與可選的 type、title）把一段範圍畫成圖送過去',
+        run: async function (a, ctx) { return { note: await ctx.api.chartToApp(a) }; }
+      },
+      charts: {
+        args: '{}', desc: '列出這本活頁簿裡的每一張圖表：編號、內容、資料範圍與位置',
+        run: async function (_a, ctx) {
+          var list = ctx.api.charts();
+          return {
+            note: list.length
+              ? list.map(function (c) {
+                return c.id + '（' + c.sheet + ' ' + c.range + '）：' + c.describe;
+              }).join('\n')
+              : '這本活頁簿裡還沒有圖表'
+          };
+        }
+      },
       exportAs: {
         args: '{format:"csv"|"xlsx"|"pdf"}', desc: '匯出成 CSV、xlsx 或 PDF',
         run: async function (args, ctx) { return { note: await ctx.api.exportAs(args.format) }; }
@@ -244,6 +287,11 @@
       // ref -> { v } | { f } plus any of font, size, bold, italic
       var cells = {};
       var computed = { values: {}, errors: {} };
+      /* The last recalculation's values for *every* sheet, keyed by sheet name.
+         `computed` is only the active sheet, and a chart may be bound to a range
+         on one the user is not looking at. Kept rather than recomputed, because
+         a recalculation is what produced it a moment ago. */
+      var bookValues = {};
       /* Selection is a rectangle, held as two corners: `sel` is the active cell
          -- the one the formula bar edits and the one typing lands in -- and
          `anchor` is the corner it was extended from. A single cell is the case
@@ -368,6 +416,125 @@
         return out;
       }
 
+      /* ============================================================ charts
+
+         A list of records, one per chart floating over this sheet. A record
+         holds no numbers: it names the range it is drawn from and the few
+         decisions a person made about the picture. The data is read again on
+         every draw, which is why editing a cell redraws the chart and why a
+         file that is half a megabyte of figures does not become one megabyte.
+
+         Plain JSON, like the merges above, because a sheet travels through
+         JSON.stringify four times over -- the undo snapshot, the session, the
+         .aiossheet file and duplicateSheet -- and anything else would not
+         survive the round trip.
+
+           { id, type, title, legend, labels, numFmt, xTitle, yTitle,
+             colours: [null, 'EB6834', ...],       // sparse per-series overrides
+             range: 'A1:D13' | '工作表2!A1:D13',
+             categories: 'A2:A13' | '',            // a separate category range
+             seriesIn: 'cols' | 'rows',            // resolved, never 'auto'
+             headers: { row: null|true|false, col: null|true|false },
+             omitTotals: null | true | false,
+             anchor: { c, r }, w, h }
+      */
+      var charts = [];
+
+      /* Which chart the pointer or the keyboard is on. Not part of the sheet:
+         a selection is a fact about this window, like `sel`. */
+      var selChart = null;
+
+      var CHART_W = 440;
+      var CHART_H = 270;
+
+      /** An id nobody else has, named the way the deck names its objects. */
+      function chartId() {
+        return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      }
+
+      function triState(v) { return v === true ? true : v === false ? false : null; }
+
+      function bounded(v, lo, hi, dflt) {
+        var n = Math.round(Number(v));
+        if (!Number.isFinite(n)) return dflt;
+        return Math.max(lo, Math.min(hi, n));
+      }
+
+      /**
+       * Every record made safe to draw.
+       *
+       * Files and session snapshots are hand-editable and older ones have no
+       * charts at all, so this is the single gate: an unparseable range, a type
+       * nobody has or an anchor off the grid would each be a chart that throws
+       * in the middle of render(). A record that cannot be repaired is dropped
+       * rather than drawn as something it is not.
+       */
+      function normCharts(list) {
+        var seen = {};
+        return (Array.isArray(list) ? list : []).map(function (c) {
+          if (!c || typeof c !== 'object') return null;
+          /* Ranges are stored the way a formula spells them -- canonical case,
+             no dollars, the sheet quoted only when it needs to be -- so the two
+             halves of a comparison, and F.reshape, always see one spelling. */
+          var main = AIOS.charts.parseRange(c.range);
+          if (!main) return null;
+          var range = AIOS.charts.rangeText(main, main.sheet);
+          var catRect = c.categories ? AIOS.charts.parseRange(c.categories) : null;
+          var cats = catRect ? AIOS.charts.rangeText(catRect, catRect.sheet) : '';
+          var id = String(c.id === undefined || c.id === null ? '' : c.id).trim();
+          if (!/^[A-Za-z0-9_-]{1,32}$/.test(id) || seen[id]) id = chartId();
+          seen[id] = true;
+          var heads = c.headers && typeof c.headers === 'object' ? c.headers : {};
+          var anchor = c.anchor && typeof c.anchor === 'object' ? c.anchor : {};
+          /* The fields the picture itself has are cleaned by the one gate that
+             cleans them everywhere -- which is also where 「圓餅圖預設有資料標籤」
+             lives, so a record made without an opinion inherits it. */
+          var look = AIOS.charts.norm({
+            type: c.type, title: c.title, legend: c.legend, labels: c.labels,
+            numFmt: c.numFmt, xTitle: c.xTitle, yTitle: c.yTitle
+          });
+          return {
+            id: id,
+            type: look.type,
+            title: look.title,
+            legend: look.legend,
+            labels: look.labels,
+            numFmt: look.numFmt,
+            xTitle: look.xTitle,
+            yTitle: look.yTitle,
+            colours: (Array.isArray(c.colours) ? c.colours : [])
+              .slice(0, AIOS.charts.MAX_SERIES)
+              .map(function (x) { return AIOS.charts.hexOf(x) || null; }),
+            range: range,
+            categories: cats,
+            seriesIn: c.seriesIn === 'rows' ? 'rows' : 'cols',
+            headers: { row: triState(heads.row), col: triState(heads.col) },
+            omitTotals: triState(c.omitTotals),
+            anchor: { c: bounded(anchor.c, 0, 199, 0), r: bounded(anchor.r, 0, 1999, 0) },
+            w: bounded(c.w, 120, 2000, CHART_W),
+            h: bounded(c.h, 80, 2000, CHART_H)
+          };
+        }).filter(Boolean);
+      }
+
+      /** A chart by id, on whichever sheet it lives on. */
+      function findChart(id) {
+        stash();
+        for (var i = 0; i < book.length; i++) {
+          var list = book[i].charts || [];
+          for (var k = 0; k < list.length; k++) {
+            if (list[k].id === id) return { rec: list[k], sheet: i };
+          }
+        }
+        return null;
+      }
+
+      /** The same, on this sheet only, which is what the layer and the menu want. */
+      function chartById(id) {
+        for (var i = 0; i < charts.length; i++) if (charts[i].id === id) return charts[i];
+        return null;
+      }
+
       /* ======================================================== the workbook
 
          Several sheets, one of them active. The variables above hold the *active*
@@ -393,6 +560,7 @@
         book[active].rowHeights = rowHeights;
         book[active].freeze = freeze;
         book[active].merges = merges;
+        book[active].charts = charts;
       }
 
       /** Make sheet `i` the live one. */
@@ -409,8 +577,10 @@
         rowHeights = s.rowHeights;
         freeze = s.freeze;
         merges = s.merges || [];
+        charts = s.charts || [];
         sel = 'A1';
         anchor = 'A1';
+        selChart = null;
         recalc();
         ctx.setTitle('試算表 — ' + (path ? path.split('/').pop() : sheetName));
       }
@@ -425,7 +595,8 @@
           colWidths: {},
           rowHeights: {},
           freeze: { rows: 0, cols: 0 },
-          merges: []
+          merges: [],
+          charts: []
         };
       }
 
@@ -542,6 +713,7 @@
         rowHeights = live.rowHeights;
         freeze = live.freeze;
         merges = live.merges || [];
+        charts = live.charts || [];
       }
 
       /**
@@ -598,6 +770,9 @@
 
       /** After a shape change the selection may point off the grid. */
       function clampSelection() {
+        // A chart the step just removed cannot stay selected: the menu and the
+        // keyboard would keep acting on an id nothing answers to.
+        if (selChart && !chartById(selChart)) selChart = null;
         var p = F.parseRef(sel) || { col: 0, row: 0 };
         var a = F.parseRef(anchor) || p;
         sel = F.makeRef(Math.min(p.col, COLS - 1), Math.min(p.row, ROWS - 1));
@@ -670,6 +845,15 @@
       btnStyle.type = 'button';
       btnStyle.title = '底色、文字色、框線、自動換行';
 
+      /* Draws immediately from whatever is selected rather than opening a panel
+         first. A panel asked before anyone has seen a picture is a panel
+         answered by guessing; the chart appears, says what it worked out, and
+         the right-click menu has 編輯圖表… for everything after that. */
+      var btnChart = el('button', 'fbtn', '◔ 圖表');
+      btnChart.type = 'button';
+      btnChart.title = '把選取的範圍畫成圖表（只選一格就自動抓整塊資料）';
+      btnChart.addEventListener('mousedown', function (e) { e.preventDefault(); });
+
       var btnSheetFont = el('button', 'fbtn', '整張表');
       btnSheetFont.type = 'button';
       btnSheetFont.title = '設定整張表的預設字型與字級';
@@ -703,7 +887,7 @@
       [nameTag, refTag, input, numSel, alignSel]
         .forEach(function (n) { bar.appendChild(n); });
       [fontSel, sizeSel, btnBold, btnItalic, btnUnder, btnStrike,
-       btnMerge, btnBorder, btnStyle, btnSheetFont, btnRows, btnCols,
+       btnMerge, btnBorder, btnStyle, btnChart, btnSheetFont, btnRows, btnCols,
        btnUndo, btnRedo, btnSave, btnSaveAs, btnExport]
         .forEach(function (n) { bar2.appendChild(n); });
       ctx.body.appendChild(bar);
@@ -763,6 +947,14 @@
       fillHandle.hidden = true;
       fillHandle.title = '拖曳可以往下或往右填滿';
       wrap.appendChild(fillHandle);
+
+      /* The charts float in a layer of their own, a third child of `wrap` beside
+         the editor and the fill handle. Owned by the wrapper rather than by a
+         cell, so a full redraw of the table does not have to know about them --
+         and absolutely positioned inside a scrolling relative box, so they
+         follow the grid without anything listening for a scroll. */
+      var chartLayer = el('div', 'sh-charts');
+      wrap.appendChild(chartLayer);
 
       function raw(ref) {
         var c = cells[ref];
@@ -1150,6 +1342,60 @@
        */
       function reshapeMerges(list, op) { return G.reshape(list, op); }
 
+      /**
+       * A range string after rows or columns moved, or null when nothing of it
+       * is left.
+       *
+       * The question is the one F.reshape already answers for a formula -- a
+       * range after the cut shifts, one the cut lands inside grows or shrinks,
+       * and one whose every row went has no meaning -- so the range is handed
+       * over as a formula and the answer taken back out. Writing a second copy
+       * of that rule for charts is how the two would come to disagree.
+       */
+      function reshapeRange(text, op, home) {
+        var next = F.reshape('=' + text, op, home).slice(1);
+        return next.indexOf('#REF!') >= 0 ? null : next;
+      }
+
+      /** A chart's anchor cell, moved with the rows or columns under it. */
+      function shiftAnchor(a, op) {
+        var rowAxis = op.kind === 'insertRow' || op.kind === 'deleteRow';
+        var idx = rowAxis ? a.r : a.c;
+        var to = idx;
+        if (op.kind === 'insertRow' || op.kind === 'insertCol') {
+          if (idx >= op.at) to = idx + op.count;
+        } else if (idx >= op.at + op.count) {
+          to = idx - op.count;
+        } else if (idx >= op.at) {
+          // The row the chart was pinned to went; it lands on the gap it left.
+          to = op.at;
+        }
+        to = Math.max(0, Math.min(rowAxis ? 1999 : 199, to));
+        return rowAxis ? { c: a.c, r: to } : { c: to, r: a.r };
+      }
+
+      /**
+       * Every chart on one sheet, after a structural change somewhere in the
+       * book. `own` says the change happened on this very sheet, which is the
+       * only case where the anchor moves: a chart's source range may name
+       * another sheet, but the cell it sits on is always its own.
+       *
+       * A chart whose data is entirely gone is dropped, and its id returned in
+       * `lost` so the caller can say so. Leaving it would draw #REF! forever.
+       */
+      function reshapeCharts(list, op, home, own, lost) {
+        var kept = [];
+        (list || []).forEach(function (rec) {
+          var range = reshapeRange(rec.range, op, home);
+          if (!range) { lost.push(rec.id); return; }
+          rec.range = range;
+          rec.categories = rec.categories ? (reshapeRange(rec.categories, op, home) || '') : '';
+          if (own) rec.anchor = shiftAnchor(rec.anchor, op);
+          kept.push(rec);
+        });
+        return kept;
+      }
+
       /** Shift the keys of a size map (column widths, row heights) the same way. */
       function shiftSizes(map, op) {
         var out = {};
@@ -1170,6 +1416,7 @@
       function restructure(op, label) {
         var rowAxis = op.kind === 'insertRow' || op.kind === 'deleteRow';
         var dropped = 0;
+        var lostCharts = [];
         op.sheet = sheetName;
 
         mutate(label, function () {
@@ -1211,6 +1458,17 @@
 
           merges = reshapeMerges(merges, op);
 
+          /* And every chart in the book, because one of them may be drawn from
+             the rows that just moved -- on this sheet or on another. Same rule
+             as the formulas above, and for the same reason: a picture still
+             pointing at the addresses its numbers used to occupy is the quiet
+             kind of wrong this whole section exists to prevent. */
+          charts = reshapeCharts(charts, op, sheetName, true, lostCharts);
+          book.forEach(function (s, i) {
+            if (i === active) return;
+            s.charts = reshapeCharts(s.charts, op, s.name, false, lostCharts);
+          });
+
           if (rowAxis) {
             rowHeights = shiftSizes(rowHeights, op);
             if (op.kind === 'insertRow') ROWS = Math.min(2000, ROWS + op.count);
@@ -1225,6 +1483,9 @@
         clampSelection();
         if (dropped) {
           ctx.toast(dropped + ' 格被推出表格邊界而遺失（上限 2000 列 x 200 欄）', 't-warn');
+        }
+        if (lostCharts.length) {
+          ctx.toast('圖表 ' + lostCharts.join('、') + ' 的資料範圍被刪光了，圖表一起移除（Ctrl+Z 可以復原）', 't-warn');
         }
       }
 
@@ -1259,8 +1520,10 @@
           rowHeights = live.rowHeights;
           freeze = live.freeze;
           merges = live.merges || [];
+          charts = live.charts || [];
           sel = 'A1';
           anchor = 'A1';
+          selChart = null;
         });
         /* Formulas elsewhere that named the deleted sheet are left as they were
            written. They now read as blank, which is what Excel shows too -- and
@@ -1298,6 +1561,17 @@
                 return pre + written;
               });
             });
+            /* A chart's range is a reference spelled the same way, so it is
+               rewritten by the same two patterns. Missing it would leave the
+               picture bound to a sheet name nothing answers to. */
+            (s.charts || []).forEach(function (rec) {
+              ['range', 'categories'].forEach(function (k) {
+                if (!rec[k]) return;
+                rec[k] = rec[k].replace(quoted, written).replace(bare, function (m, pre) {
+                  return pre + written;
+                });
+              });
+            });
           });
         });
         return '工作表「' + from + '」改名為「' + to + '」';
@@ -1311,6 +1585,10 @@
         mutate('複製工作表 ' + src.name, function () {
           var copy = JSON.parse(JSON.stringify(src));
           copy.name = name;
+          /* The charts come across with everything else, but not their ids: two
+             charts answering to c1 would make 「改 c1」 mean whichever the search
+             reached first. */
+          (copy.charts || []).forEach(function (rec) { rec.id = chartId(); });
           book.splice(index + 1, 0, copy);
         }, { recalc: false });
         activate(index + 1);
@@ -1644,6 +1922,9 @@
         });
         var text = selectionTsv();
         clip = { rect: q, block: block, text: text, cut: !!cut, merges: carried };
+        /* One clipboard, so a chart copied earlier lets go: whichever was copied
+           last is what a paste means, here and in the other two programs. */
+        AIOS.charts.clearClip();
         await A.clipboard.write(text);
         ctx.toast((cut ? '已剪下 ' : '已複製 ') + selLabel() + '（' + selCount() + ' 格）');
       }
@@ -1661,6 +1942,11 @@
       async function pasteAt() {
         var read = await A.clipboard.read();
         var text = read.ok && read.data ? String(read.data.text || '') : '';
+        /* A chart first. Its twin on the system clipboard is the numbers as
+           text, so the cell paths below would land the table and quietly drop
+           the picture -- and the match is the same test they use: the rich
+           object is trusted only while the clipboard still holds its text. */
+        if (AIOS.charts.pasteMatches(text)) return pasteChart(AIOS.charts.clipSpec());
         var rich = clip && text && text === clip.text;
 
         var target = F.parseRef(sel);
@@ -1758,6 +2044,8 @@
         /* Only the active sheet's results reach the grid, but the pass covered
            every sheet -- a formula here may read one the user is not looking at,
            and computing sheet by sheet would leave those a recalculation behind. */
+        // The whole book's values, because a chart may be drawn from another sheet.
+        bookValues = out.values || {};
         computed = {
           values: out.values[sheetName] || {},
           errors: out.errors[sheetName] || {},
@@ -1810,6 +2098,35 @@
         return touched;
       }
 
+      /* Where every column and row begins, in table-content pixels, filled by
+         the last draw. The frozen panes need them, and so does the chart layer:
+         a card is placed on its anchor cell arithmetically rather than by
+         measuring that cell, because a chart may be anchored past the drawn edge
+         of the sheet and a cell that is not there measures nothing. */
+      var colLeft = [];
+      var rowTop = [];
+
+      /**
+       * Add the sizes up. Returns the total width, which is what a fixed table
+       * layout has to be given, and leaves the per-column and per-row offsets
+       * where the frozen panes and the chart layer can read them.
+       */
+      function measureGrid() {
+        colLeft = [];
+        var x = 34;
+        for (var c = 0; c < COLS; c++) {
+          colLeft.push(x);
+          x += colWidths[c] || DEFAULT_COL_W;
+        }
+        rowTop = [];
+        var y = DEFAULT_ROW_H;
+        for (var r = 0; r < ROWS; r++) {
+          rowTop.push(y);
+          y += rowHeights[r] || DEFAULT_ROW_H;
+        }
+        return x;
+      }
+
       /** What one cell shows. The single place a stored value becomes text. */
       function display(ref) {
         var c = cells[ref];
@@ -1830,18 +2147,7 @@
         /* Frozen panes need pixel offsets, so the leading sizes are added up once
            here rather than measured per cell. The row-header column is always
            frozen, which is why the column offsets start at its width. */
-        var colLeft = [];
-        var runningLeft = 34;
-        for (var ci = 0; ci < COLS; ci++) {
-          colLeft.push(runningLeft);
-          runningLeft += colWidths[ci] || DEFAULT_COL_W;
-        }
-        var rowTop = [];
-        var runningTop = DEFAULT_ROW_H;
-        for (var ri = 0; ri < ROWS; ri++) {
-          rowTop.push(runningTop);
-          runningTop += rowHeights[ri] || DEFAULT_ROW_H;
-        }
+        var runningLeft = measureGrid();
 
         /* Column widths live in a colgroup, and the table is laid out fixed.
            Measured before this existed: dragging a column edge did update
@@ -1970,6 +2276,10 @@
         paintSelection();
         syncBars();
         placeFillHandle();
+        /* Last, because the cards are placed from colLeft/rowTop and drawn from
+           the values the same pass just produced: one call gives a chart both
+           fresh numbers and fresh pixels. */
+        renderCharts();
       }
 
       /* The fill handle sits on the corner of the selection, positioned over the
@@ -1987,6 +2297,806 @@
         fillHandle.style.left = (cr.right - wr.left + wrap.scrollLeft - 4) + 'px';
         fillHandle.style.top = (cr.bottom - wr.top + wrap.scrollTop - 4) + 'px';
         fillHandle.hidden = false;
+      }
+
+      /* ============================================================ charts ---
+
+         Everything about the pictures floating over the grid: where they sit,
+         what they are drawn from, and the commands that change them.
+
+         A card is an absolutely positioned div inside `wrap`, exactly like the
+         editor and the fill handle. Its place is arithmetic on colLeft/rowTop --
+         the same numbers the frozen panes are laid out from -- rather than a
+         measurement of its anchor cell, because a chart may be anchored past the
+         drawn edge of the sheet and a cell that is not there measures nothing.
+      */
+
+      /** The left edge of a column, columns past the drawn grid included. */
+      function colX(c) {
+        if (c < colLeft.length) return colLeft[c];
+        var x = 34;
+        for (var k = 0; k < c; k++) x += colWidths[k] || DEFAULT_COL_W;
+        return x;
+      }
+
+      /** The top edge of a row, on the same terms. */
+      function rowY(r) {
+        if (r < rowTop.length) return rowTop[r];
+        var y = DEFAULT_ROW_H;
+        for (var k = 0; k < r; k++) y += rowHeights[k] || DEFAULT_ROW_H;
+        return y;
+      }
+
+      /* The inverse, for the end of a drag. Arithmetic and not elementFromPoint:
+         the pointer is over the card, so what is under it is the card. */
+      function colAtX(x) {
+        var at = 34;
+        for (var c = 0; c < 199; c++) {
+          var w = colWidths[c] || DEFAULT_COL_W;
+          if (x < at + w) return c;
+          at += w;
+        }
+        return 199;
+      }
+
+      function rowAtY(y) {
+        var at = DEFAULT_ROW_H;
+        for (var r = 0; r < 1999; r++) {
+          var h = rowHeights[r] || DEFAULT_ROW_H;
+          if (y < at + h) return r;
+          at += h;
+        }
+        return 1999;
+      }
+
+      /* ------------------------------------------------------- chart data ---
+
+         A record names a range; this turns that range into the cells behind it,
+         on whichever sheet it points at, and hands them to the shared reader.
+         Nothing here decides what a table means -- which row is the heading,
+         which column the categories, whether the last row is a total:
+         AIOS.charts.fromRows answers all of that once, for the three programs.
+      */
+
+      /**
+       * The sheet a range names: the one the chart lives on by default, another
+       * when the range is qualified. Values come from the last book-wide
+       * recalculation, because only the active sheet's are in `computed`.
+       */
+      function sheetSource(name, home) {
+        var want = name || home || sheetName;
+        if (want === sheetName) {
+          return { name: sheetName, cells: cells, values: computed.values, merges: merges };
+        }
+        var i = sheetIndexOf(want);
+        if (i < 0) return null;
+        var s = book[i];
+        return { name: s.name, cells: s.cells, values: bookValues[s.name] || {}, merges: s.merges || [] };
+      }
+
+      /**
+       * One cell the way the chart reader wants it: what it computes to, the
+       * text a person sees, and whether that text is a label rather than a
+       * number. A date cell is the case that needs all three -- its value is a
+       * serial, its text is the date, and a column of them is categories.
+       */
+      function chartCell(src, c, r) {
+        var ref = F.makeRef(c, r);
+        var v = src.values[ref];
+        var code = (src.cells[ref] || {}).numFmt || '';
+        if (v === undefined || v === null) v = '';
+        return {
+          v: v,
+          text: typeof v === 'number' && !isFinite(v) ? '#NUM!' : F.format(v, code || 'General'),
+          label: F.isDateCode(code) || code === '@',
+          numFmt: code
+        };
+      }
+
+      /** A rectangle of them. A covered cell is empty, as the grid shows it. */
+      function chartCells(src, rect) {
+        var mm = G.map(src.merges);
+        var rows = [];
+        for (var r = rect.r0; r <= rect.r1; r++) {
+          var row = [];
+          for (var c = rect.c0; c <= rect.c1; c++) {
+            row.push(mm.coveredBy[G.key(c, r)] ? null : chartCell(src, c, r));
+          }
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      /** A range string as a rectangle plus the sheet it lives on, or a refusal. */
+      function chartRect(text, what, home) {
+        var parsed = AIOS.charts.parseRange(text);
+        if (!parsed) throw new Error((what || '範圍') + '不合法：' + (text || '（空的）'));
+        var src = sheetSource(parsed.sheet, home);
+        if (!src) throw new Error('沒有這張工作表：' + parsed.sheet);
+        var rect = {
+          c0: parsed.c0, c1: Math.min(parsed.c1, 199),
+          r0: parsed.r0, r1: Math.min(parsed.r1, 1999)
+        };
+        if ((rect.c1 - rect.c0 + 1) * (rect.r1 - rect.r0 + 1) > 20000) {
+          throw new Error((what || '範圍') + '太大（最多 20000 格）');
+        }
+        return { rect: rect, src: src };
+      }
+
+      /**
+       * Everything a record turns into: the spec that gets drawn, what the table
+       * reader found, and the rectangles. The last two are for the .xlsx writer
+       * and for the report, which has to say what was left out.
+       *
+       * `home` is the sheet the record lives on, which is what an unqualified
+       * range means -- the export walks sheets that are not the active one.
+       */
+      function chartRead(rec, home) {
+        var main = chartRect(rec.range, '資料範圍', home);
+        var cat = rec.categories ? chartRect(rec.categories, '類別範圍', home) : null;
+        var heads = rec.headers || {};
+        var opts = {
+          seriesIn: rec.seriesIn,
+          headerRow: heads.row === null || heads.row === undefined ? undefined : heads.row,
+          headerCol: heads.col === null || heads.col === undefined ? undefined : heads.col,
+          omitTotals: rec.omitTotals === null || rec.omitTotals === undefined ? undefined : rec.omitTotals
+        };
+        /* A separate category range means the value range holds no categories of
+           its own, so the side that would have supplied them is told to stay out
+           of it -- otherwise the first column would be read as both. */
+        if (cat) {
+          if (opts.seriesIn === 'rows') opts.headerRow = false;
+          else opts.headerCol = false;
+        }
+        var got = AIOS.charts.fromRows(chartCells(main.src, main.rect), opts);
+        if (cat) {
+          var flat = [];
+          chartCells(cat.src, cat.rect).forEach(function (row) {
+            row.forEach(function (cell) { flat.push(cell ? cell.text : ''); });
+          });
+          got.categories = flat;
+        }
+        /* The number format and the x-axis title are the table's own unless the
+           record overrides them: a column of NT$ reads as NT$ on the axis
+           without anybody having to say so twice. */
+        var raw = Object.assign({}, got, {
+          type: rec.type, title: rec.title, legend: rec.legend, labels: rec.labels,
+          numFmt: rec.numFmt || got.numFmtHint || '',
+          xTitle: rec.xTitle || got.corner || '',
+          yTitle: rec.yTitle || '',
+          source: {
+            file: path || '', sheet: main.src.name,
+            range: rec.range, seriesIn: got.layout.seriesIn
+          }
+        });
+        return {
+          rec: rec, got: got, raw: raw,
+          sheet: main.src.name, rect: main.rect, catRect: cat ? cat.rect : null,
+          spec: AIOS.charts.withColours(AIOS.charts.norm(raw), rec.colours)
+        };
+      }
+
+      /** The picture a record draws, which is all the layer and the exports need. */
+      function chartSpec(rec, home) { return chartRead(rec, home).spec; }
+
+      /* --------------------------------------------------------- the layer */
+
+      function chartNode(id) {
+        return chartLayer.querySelector('.sh-chart[data-chart="' + id + '"]');
+      }
+
+      function chartIndex(id) {
+        for (var i = 0; i < charts.length; i++) if (charts[i].id === id) return i;
+        return -1;
+      }
+
+      /** The `on` class, without rebuilding the layer: selecting is not an edit. */
+      function syncChartSel() {
+        var list = chartLayer.querySelectorAll('.sh-chart');
+        for (var i = 0; i < list.length; i++) {
+          list[i].classList.toggle('on', list[i].dataset.chart === selChart);
+        }
+      }
+
+      function selectChart(id) {
+        if (selChart === id) return;
+        selChart = id;
+        syncChartSel();
+      }
+
+      function placeCard(card, rec) {
+        card.style.left = colX(rec.anchor.c) + 'px';
+        card.style.top = rowY(rec.anchor.r) + 'px';
+        card.style.width = rec.w + 'px';
+        card.style.height = rec.h + 'px';
+      }
+
+      /** One chart as DOM: the card, the drawing, and the handle to resize it. */
+      function chartCard(rec) {
+        var card = el('div', 'sh-chart' + (rec.id === selChart ? ' on' : ''));
+        card.dataset.chart = rec.id;
+        placeCard(card, rec);
+        try {
+          var spec = chartSpec(rec);
+          card.title = AIOS.charts.describe(spec) +
+            '\n拖曳可以搬動，右下角可以改大小；雙擊編輯，Delete 刪除，右鍵有更多';
+          /* The viewBox is the card minus its padding, so the drawing fills the
+             card at whatever size the person dragged it to. */
+          card.appendChild(AIOS.charts.render(spec, {
+            width: rec.w - 12, height: rec.h - 12,
+            font: AIOS.fonts.cssFor(sheetFont), fontSize: 12
+          }));
+        } catch (e) {
+          /* A range that no longer resolves is said on the card. Thrown out of
+             render() it would take the whole grid down with it. */
+          card.appendChild(el('div', null, '圖表 ' + rec.id + ' 畫不出來：' + e.message));
+        }
+        var grip = el('div', 'sh-chart-grip');
+        grip.title = '拖曳可以改變大小';
+        card.appendChild(grip);
+        wireCard(card, rec, grip);
+        return card;
+      }
+
+      function renderCharts() {
+        chartLayer.innerHTML = '';
+        charts.forEach(function (rec) { chartLayer.appendChild(chartCard(rec)); });
+      }
+
+      /** Every card back onto its anchor, without rebuilding what is inside it. */
+      function placeCharts() {
+        charts.forEach(function (rec) {
+          var node = chartNode(rec.id);
+          if (node) placeCard(node, rec);
+        });
+      }
+
+      /* One gesture is one undo step. The card follows the pointer as DOM only
+         -- a mutate per pixel would be sixty snapshots of the workbook for one
+         drag -- and the record is written once, on release, from where the card
+         actually ended up. endDrag does the same for a column width. */
+      var chartDrag = null;
+
+      function wireCard(card, rec, grip) {
+        function start(e, mode) {
+          if (e.button !== 0) return;
+          /* Stopped here, or the table's own pointerdown starts dragging a range
+             out under the card. */
+          e.stopPropagation();
+          e.preventDefault();
+          selectChart(rec.id);
+          wrap.focus();
+          chartDrag = {
+            id: rec.id, card: card, mode: mode,
+            x: e.clientX, y: e.clientY,
+            left: colX(rec.anchor.c), top: rowY(rec.anchor.r),
+            anchor: { c: rec.anchor.c, r: rec.anchor.r },
+            w: rec.w, h: rec.h
+          };
+          try { card.setPointerCapture(e.pointerId); } catch (err) { /* older path */ }
+        }
+        card.addEventListener('pointerdown', function (e) { start(e, 'move'); });
+        grip.addEventListener('pointerdown', function (e) { start(e, 'size'); });
+        card.addEventListener('pointermove', function (e) {
+          if (!chartDrag || chartDrag.card !== card) return;
+          var dx = e.clientX - chartDrag.x;
+          var dy = e.clientY - chartDrag.y;
+          if (chartDrag.mode === 'size') {
+            card.style.width = Math.max(120, Math.min(2000, chartDrag.w + dx)) + 'px';
+            card.style.height = Math.max(80, Math.min(2000, chartDrag.h + dy)) + 'px';
+          } else {
+            card.style.left = Math.max(34, chartDrag.left + dx) + 'px';
+            card.style.top = Math.max(DEFAULT_ROW_H, chartDrag.top + dy) + 'px';
+          }
+        });
+        card.addEventListener('pointerup', endCardDrag);
+        card.addEventListener('pointercancel', endCardDrag);
+        card.addEventListener('dblclick', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          chartPopover(rec, card);
+        });
+      }
+
+      function endCardDrag(e) {
+        if (!chartDrag) return;
+        var d = chartDrag;
+        chartDrag = null;
+        try { d.card.releasePointerCapture(e.pointerId); } catch (err) { /* gone */ }
+        if (d.mode === 'size') {
+          var w = Math.round(parseFloat(d.card.style.width));
+          var h = Math.round(parseFloat(d.card.style.height));
+          if (w === d.w && h === d.h) return;
+          mutate('圖表大小 ' + w + '×' + h, function () {
+            var rec = chartById(d.id);
+            if (rec) { rec.w = w; rec.h = h; }
+          }, { recalc: false });
+          return;
+        }
+        // The cell the card's top-left corner landed in.
+        var c = colAtX(parseFloat(d.card.style.left));
+        var r = rowAtY(parseFloat(d.card.style.top));
+        // Nowhere new: put the card back on its anchor rather than leaving it
+        // a few pixels off where the cell actually starts.
+        if (c === d.anchor.c && r === d.anchor.r) { renderCharts(); return; }
+        mutate('移動圖表 ' + F.makeRef(c, r), function () {
+          var rec = chartById(d.id);
+          if (rec) rec.anchor = { c: c, r: r };
+        }, { recalc: false });
+      }
+
+      /* --------------------------------------------------------- the edits ---
+
+         Every one of these is one mutate with { recalc: false }: a chart cannot
+         change a number, and recomputing the book for a picture would be a lie
+         about what happened. adoptSpec is the exception -- it writes cells.
+      */
+
+      /** Does this cell hold anything? Values, not formatting. */
+      function filledAt(c, r) {
+        var v = computed.values[F.makeRef(c, r)];
+        return v !== undefined && v !== null && v !== '';
+      }
+
+      /**
+       * The block of filled cells around one cell -- what 「畫這張表」 means when
+       * a person has clicked in the middle of it rather than selected it. Grows
+       * while the next row or column still has something in it, which is the
+       * rule Ctrl+Shift+* follows in every spreadsheet.
+       */
+      function blockAround(c, r) {
+        var q = { c0: c, c1: c, r0: r, r1: r };
+        function rowHas(rr) {
+          for (var k = q.c0; k <= q.c1; k++) if (filledAt(k, rr)) return true;
+          return false;
+        }
+        function colHas(cc) {
+          for (var k = q.r0; k <= q.r1; k++) if (filledAt(cc, k)) return true;
+          return false;
+        }
+        for (var guard = 0; guard < 2200; guard++) {
+          var grew = false;
+          if (q.r0 > 0 && rowHas(q.r0 - 1)) { q.r0--; grew = true; }
+          if (q.r1 < ROWS - 1 && rowHas(q.r1 + 1)) { q.r1++; grew = true; }
+          if (q.c0 > 0 && colHas(q.c0 - 1)) { q.c0--; grew = true; }
+          if (q.c1 < COLS - 1 && colHas(q.c1 + 1)) { q.c1++; grew = true; }
+          if (!grew) break;
+        }
+        return q;
+      }
+
+      /** The selection as a source range: a single cell grown to its block. */
+      function selectedBlock() {
+        var q = selRect();
+        if (q.c0 === q.c1 && q.r0 === q.r1) return blockAround(q.c0, q.r0);
+        return { c0: q.c0, c1: q.c1, r0: q.r0, r1: q.r1 };
+      }
+
+      /**
+       * Where a new chart goes: the column after its data, on the same row, so
+       * it sits beside the numbers it draws. Unless something is already there,
+       * in which case it goes underneath -- dropping a chart on top of the next
+       * table is worse than making the sheet taller.
+       */
+      function freeAnchor(rect) {
+        var c = Math.min(199, rect.c1 + 1);
+        for (var rr = rect.r0; rr <= Math.min(1999, rect.r0 + 11); rr++) {
+          for (var cc = c; cc <= Math.min(199, c + 5); cc++) {
+            if (filledAt(cc, rr)) return { c: rect.c0, r: Math.min(1999, rect.r1 + 2) };
+          }
+        }
+        return { c: c, r: rect.r0 };
+      }
+
+      /**
+       * A record out of what a caller asked for, with 'auto' settled.
+       *
+       * The stored record always says which way the series run: 'auto' is a
+       * question about the data, and the answer would change under the person's
+       * feet the next time a column was added beside it. So it is asked once,
+       * here, by reading the range.
+       */
+      function makeRecord(patch, base) {
+        var want = Object.assign({ id: chartId() }, base || {}, patch || {});
+        var heads = Object.assign({ row: null, col: null },
+          (base || {}).headers || {}, (patch || {}).headers || {});
+        if (want.headerRow !== undefined) heads.row = triState(want.headerRow);
+        if (want.headerCol !== undefined) heads.col = triState(want.headerCol);
+        want.headers = heads;
+        if (!AIOS.charts.parseRange(String(want.range || ''))) {
+          throw new Error('資料範圍不合法：' + (want.range || '（空的）'));
+        }
+        if (want.seriesIn !== 'cols' && want.seriesIn !== 'rows') {
+          want.seriesIn = chartRead(Object.assign({}, want, { seriesIn: 'auto' })).got.layout.seriesIn;
+        }
+        if (!want.anchor) want.anchor = freeAnchor(AIOS.charts.parseRange(want.range));
+        var rec = normCharts([want])[0];
+        if (!rec) throw new Error('資料範圍不合法：' + (want.range || '（空的）'));
+        return rec;
+      }
+
+      /** What a chart drawn from a range left out, said out loud. */
+      function gotNote(got) {
+        var bits = [];
+        if (got && got.omitted && got.omitted.length) bits.push('略過 ' + got.omitted.join('、'));
+        if (got && got.skipped && got.skipped.length) {
+          bits.push('沒有數字的欄位不畫：' + got.skipped.join('、'));
+        }
+        return bits.length ? '；' + bits.join('；') : '';
+      }
+
+      /**
+       * A range with nothing to draw, or more series than the palette has, is
+       * refused before anything is written -- both of those produce a chart that
+       * looks finished and is not.
+       */
+      function checkRead(read) {
+        if (!read.got.series.length) {
+          throw new Error('範圍 ' + read.rec.range + ' 裡沒有可以畫的數字');
+        }
+        if (read.got.series.length > AIOS.charts.MAX_SERIES) {
+          throw new Error('最多 ' + AIOS.charts.MAX_SERIES + ' 個數列，收到 ' +
+            read.got.series.length + '；改用 seriesIn:"rows" 或縮小範圍');
+        }
+        return read;
+      }
+
+      /** One record onto this sheet, selected so the next command can find it. */
+      function addChart(rec, label) {
+        mutate(label, function () { charts.push(rec); }, { recalc: false });
+        selChart = rec.id;
+        syncChartSel();
+      }
+
+      function insertRecord(patch) {
+        var rec = makeRecord(patch, null);
+        var read = checkRead(chartRead(rec));
+        addChart(rec, '插入圖表 ' + rec.id);
+        return '已插入' + AIOS.charts.typeName(rec.type) + ' ' + rec.id +
+          '（' + read.spec.series.length + ' 個數列 × ' + read.spec.categories.length +
+          ' 個類別，錨點 ' + F.makeRef(rec.anchor.c, rec.anchor.r) + '）' + gotNote(read.got);
+      }
+
+      /** An existing chart changed, wherever in the book it lives. */
+      function updateChart(id, patch) {
+        var hit = findChart(id);
+        if (!hit) throw new Error('沒有這張圖表：' + id);
+        // The sheet it is on comes to the front, or the report would describe a
+        // change nobody can see.
+        if (hit.sheet !== active) activate(hit.sheet);
+        var next = makeRecord(Object.assign({}, patch, { id: id }), chartById(id));
+        var read = checkRead(chartRead(next));
+        mutate('編輯圖表 ' + id, function () {
+          var at = chartIndex(id);
+          if (at >= 0) charts[at] = next;
+        }, { recalc: false });
+        selChart = id;
+        syncChartSel();
+        return '圖表 ' + id + '：' + AIOS.charts.describe(read.spec) +
+          '　範圍 ' + next.range + '　錨點 ' + F.makeRef(next.anchor.c, next.anchor.r) +
+          ' ' + next.w + '×' + next.h + gotNote(read.got);
+      }
+
+      function removeChart(id) {
+        var hit = findChart(id);
+        if (!hit) throw new Error('沒有這張圖表：' + id);
+        if (hit.sheet !== active) activate(hit.sheet);
+        mutate('刪除圖表 ' + id, function () {
+          var at = chartIndex(id);
+          if (at >= 0) charts.splice(at, 1);
+        }, { recalc: false });
+        if (selChart === id) { selChart = null; syncChartSel(); }
+        return '已刪除圖表 ' + id;
+      }
+
+      /** The chart a command means: by id, else the selected one, else the newest. */
+      function chartMeant(id) {
+        if (id !== undefined && id !== null && id !== '') {
+          var hit = findChart(String(id));
+          if (!hit) throw new Error('沒有這張圖表：' + id);
+          return hit;
+        }
+        if (selChart) {
+          var here = findChart(selChart);
+          if (here) return here;
+        }
+        stash();
+        if (charts.length) return { rec: charts[charts.length - 1], sheet: active };
+        for (var i = book.length - 1; i >= 0; i--) {
+          var list = book[i].charts || [];
+          if (list.length) return { rec: list[list.length - 1], sheet: i };
+        }
+        throw new Error('這本活頁簿裡還沒有圖表');
+      }
+
+      /* ------------------------------------------------------- clipboard --- */
+
+      /** The chart to the shared clipboard; its numbers as text, for everyone else. */
+      function copyChart(rec) {
+        if (!rec) return;
+        var spec;
+        try { spec = chartSpec(rec); } catch (e) { ctx.toast(e.message, 't-warn'); return; }
+        /* There is one clipboard, so the cell block goes: whichever was copied
+           last is what a paste means, and leaving both would make the answer
+           depend on which branch of pasteAt ran first. */
+        clip = null;
+        AIOS.charts.copy(spec).then(function () {
+          ctx.toast('已複製圖表，可以貼到文件、簡報或試算表裡', 't-ok');
+        }, function (e) {
+          ctx.toast('複製失敗：' + (e && e.message ? e.message : e), 't-err');
+        });
+      }
+
+      /**
+       * A chart from somewhere else, landed here.
+       *
+       * When it came from this very workbook and the cells it names are still
+       * here, the new chart is bound to them: copying a chart inside a book
+       * should not leave a second copy of its numbers to drift apart. Otherwise
+       * the numbers come with it -- written at the active cell like an ordinary
+       * paste -- and the chart is bound to the block that was just written,
+       * because a chart whose data is nowhere is a picture, not a chart.
+       */
+      function adoptSpec(spec, label, place) {
+        var s = AIOS.charts.norm(spec);
+        if (!s.series.length || !s.categories.length) throw new Error('這張圖表沒有可以畫的數字');
+        var pl = place || {};
+        var fields = {
+          type: s.type, title: s.title, legend: s.legend, labels: s.labels,
+          numFmt: s.numFmt, xTitle: s.xTitle, yTitle: s.yTitle,
+          colours: s.series.map(function (x) { return x.colour || null; })
+        };
+        // Where it goes, when the caller said: otherwise beside its own numbers.
+        if (pl.anchor) fields.anchor = pl.anchor;
+        if (pl.w) fields.w = pl.w;
+        if (pl.h) fields.h = pl.h;
+
+        var src = s.source || {};
+        if (src.file && path && src.file === path && src.range) {
+          var back = AIOS.charts.parseRange(src.range);
+          var on = back ? (back.sheet || src.sheet || sheetName) : null;
+          if (back && on && sheetIndexOf(on) >= 0) {
+            var bound = AIOS.charts.rangeText(back, on === sheetName ? null : on);
+            var kept = makeRecord(Object.assign({ range: bound, seriesIn: src.seriesIn }, fields));
+            addChart(kept, label);
+            return '已貼上圖表 ' + kept.id + '（還是綁在 ' + bound + '，沒有另外複製資料）';
+          }
+        }
+
+        var rows = AIOS.charts.toRows(s, { raw: true });
+        var at = F.parseRef(sel) || { col: 0, row: 0 };
+        var area = {
+          c0: at.col, r0: at.row,
+          c1: Math.min(199, at.col + rows[0].length - 1),
+          r1: Math.min(1999, at.row + rows.length - 1)
+        };
+        var range = AIOS.charts.rangeText(area);
+        var rec = normCharts([Object.assign({
+          id: chartId(), range: range, categories: '', seriesIn: 'cols',
+          headers: { row: true, col: true }, omitTotals: false,
+          anchor: freeAnchor(area), w: CHART_W, h: CHART_H
+        }, fields, { range: range })])[0];
+
+        mutate(label, function () {
+          // The incoming block owns the cells it fills, merges included.
+          merges = merges.filter(function (m) { return !overlaps(m, area); });
+          rows.forEach(function (row, ri) {
+            row.forEach(function (val, ci) {
+              writeCell(F.makeRef(area.c0 + ci, area.r0 + ri), val);
+            });
+          });
+          /* The chart's own number format onto the values it wrote, so the cells
+             read the way the picture does. A table that says 120000 beside an
+             axis that says NT$120,000 is two answers to one question. */
+          if (s.numFmt) {
+            var vals = [];
+            for (var r = area.r0 + 1; r <= area.r1; r++) {
+              for (var c = area.c0 + 1; c <= area.c1; c++) vals.push(F.makeRef(c, r));
+            }
+            applyFormat(vals, { numFmt: s.numFmt });
+          }
+          charts.push(rec);
+        });
+        selChart = rec.id;
+        syncChartSel();
+        return '已貼上圖表 ' + rec.id + '：資料寫在 ' + range + '，圖表綁著它';
+      }
+
+      /** The copied chart, adopted here, with the outcome as a toast. */
+      function pasteChart(spec) {
+        if (!spec) { ctx.toast('剪貼簿裡沒有圖表', 't-warn'); return; }
+        try { ctx.toast(adoptSpec(spec, '貼上圖表'), 't-ok'); }
+        catch (e) { ctx.toast(e.message, 't-warn'); }
+      }
+
+      /* ------------------------------------------------------------ files --- */
+
+      /**
+       * A sheet's charts as the .xlsx writer wants them: the picture with its
+       * values resolved, the cell references Excel's own chart will read, and
+       * where it sits. A chart whose range no longer resolves writes nothing --
+       * a broken picture inside the file is worse than no picture.
+       */
+      function chartsForExport(s) {
+        var out = [];
+        (s.charts || []).forEach(function (rec) {
+          var read;
+          try { read = chartRead(rec, s.name); } catch (e) { return; }
+          /* The references name the cells the chart was drawn from, which is
+             not always the whole range: a 合計 row the reader left out is not
+             part of the picture, and an Excel chart pointed at it would show a
+             seventh month this one does not. When what was kept is not a
+             rectangle, `bounds` is null and the chart travels with its numbers
+             instead of a reference -- true, if not live. */
+          var b = read.got.bounds;
+          var rect = b && {
+            c0: read.rect.c0 + b.c0, c1: read.rect.c0 + b.c1,
+            r0: read.rect.r0 + b.r0, r1: read.rect.r0 + b.r1
+          };
+          out.push({
+            spec: read.spec,
+            refs: rect
+              ? AIOS.charts.rangeRefs(read.sheet, rect, read.got.layout.seriesIn, read.got.layout, read.catRect)
+              : null,
+            anchor: { c: rec.anchor.c, r: rec.anchor.r },
+            w: rec.w, h: rec.h
+          });
+        });
+        return out;
+      }
+
+      /**
+       * Charts read out of an .xlsx, bound back to their cells.
+       *
+       * Excel names the cells of every series separately; refsToRange turns
+       * parallel columns (or rows) back into the one rectangle this program
+       * binds to. A chart whose series come from scattered cells has no such
+       * rectangle, so it is counted and left out rather than drawn from data it
+       * does not have.
+       */
+      function chartsFromXlsx(s, tally) {
+        var out = [];
+        (s.charts || []).forEach(function (c) {
+          var back = c && c.refs ? AIOS.charts.refsToRange(c.refs) : null;
+          if (!back) { tally.n++; return; }
+          var spec = AIOS.charts.norm(c.spec);
+          var other = back.sheet && back.sheet !== s.name ? back.sheet : null;
+          var anchor = c.anchor || {};
+          out.push({
+            id: chartId(),
+            type: spec.type, title: spec.title, legend: spec.legend, labels: spec.labels,
+            numFmt: spec.numFmt, xTitle: spec.xTitle, yTitle: spec.yTitle,
+            colours: spec.series.map(function (x) { return x.colour || null; }),
+            range: AIOS.charts.rangeText(back.range, other),
+            categories: back.categories ? AIOS.charts.rangeText(back.categories, other) : '',
+            seriesIn: back.seriesIn,
+            headers: { row: back.layout.headerRow, col: back.layout.headerCol },
+            /* Auto, the same as a chart drawn here. The references say which
+               cells the series come from, not whether the last of them was a
+               總計 the chart left out -- so a file this program wrote comes back
+               drawing what it drew, rather than one category longer. */
+            omitTotals: null,
+            anchor: { c: anchor.c, r: anchor.r },
+            w: c.w, h: c.h
+          });
+        });
+        tally.n += Number(s.chartsSkipped) || 0;
+        return normCharts(out);
+      }
+
+      /* ---------------------------------------------------------- panels --- */
+
+      /** The one line the shared panel shows under the range field. */
+      function detectLine(rangeText, o) {
+        if (!rangeText) return '';
+        var got = chartRead({
+          range: rangeText, categories: (o && o.categories) || '',
+          seriesIn: o && o.seriesIn, colours: [],
+          headers: { row: o && o.headerRow, col: o && o.headerCol },
+          omitTotals: o && o.omitTotals
+        }).got;
+        var bits = ['標題列' + (got.layout.headerRow ? '✓' : '✗') +
+          '　類別欄' + (got.layout.headerCol ? '✓' : '✗') +
+          '　數列在' + (got.layout.seriesIn === 'rows' ? '列' : '欄')];
+        bits.push(got.series.length + ' 個數列 × ' + got.categories.length + ' 個類別');
+        if (got.omitted.length) bits.push('略過 ' + got.omitted.join('、'));
+        if (got.skipped.length) bits.push('沒有數字：' + got.skipped.join('、'));
+        return '偵測：' + bits.join('　·　');
+      }
+
+      /**
+       * The shared chart editor, in a popover by the chart it edits.
+       *
+       * Range mode: a spreadsheet's chart is bound to cells, so the panel edits
+       * the range and the record, and the picture is resolved again from the
+       * sheet. The three programs share this panel, which is why the wording of
+       * 編輯圖表… is the same here as in a document.
+       */
+      function chartPopover(rec, anchorEl) {
+        var isNew = !rec;
+        var base = rec || {
+          type: 'column', title: '', legend: 'bottom', labels: false,
+          numFmt: '', xTitle: '', yTitle: '', colours: [],
+          range: AIOS.charts.rangeText(selectedBlock()), categories: '',
+          seriesIn: 'auto', headers: { row: null, col: null }, omitTotals: null
+        };
+        var shown;
+        try { shown = chartRead(base).spec; }
+        catch (e) { shown = AIOS.charts.norm({ type: base.type, title: base.title }); }
+        AIOS.popover(ctx.body, anchorEl || btnChart, function (p, close) {
+          AIOS.popover.label(p, isNew ? '插入圖表' : '編輯圖表');
+          AIOS.charts.panel(p, {
+            spec: shown,
+            mode: 'range',
+            range: base.range,
+            categories: base.categories,
+            selection: selLabel(),
+            seriesIn: base.seriesIn,
+            headers: base.headers,
+            omitTotals: base.omitTotals,
+            detect: detectLine,
+            onApply: function (next, extras) {
+              close();
+              var patch = {
+                type: next.type, title: next.title, legend: next.legend, labels: next.labels,
+                numFmt: next.numFmt, xTitle: next.xTitle, yTitle: next.yTitle,
+                range: extras.range, categories: extras.categories, seriesIn: extras.seriesIn,
+                headers: extras.headers, omitTotals: extras.omitTotals
+              };
+              try {
+                ctx.toast(isNew ? insertRecord(patch) : updateChart(rec.id, patch), 't-ok');
+              } catch (e) { ctx.toast(e.message, 't-warn'); }
+            },
+            onCancel: close
+          });
+        }, 'ui-pop-chart');
+      }
+
+      /** The numbers behind a chart, shown without changing anything. */
+      function dataPopover(rec) {
+        var spec;
+        try { spec = chartSpec(rec); } catch (e) { ctx.toast(e.message, 't-warn'); return; }
+        AIOS.popover(ctx.body, chartNode(rec.id) || btnChart, function (p) {
+          AIOS.popover.label(p, '圖表資料');
+          p.appendChild(el('div', 'ui-pop-count',
+            AIOS.charts.describe(spec) + '　·　' + rec.range));
+          p.appendChild(AIOS.charts.tableNode(spec));
+        }, 'ui-pop-chart');
+      }
+
+      /**
+       * The chart half of the right-click menu, worded as the document's and the
+       * deck's are: the same chart is the same object in all three.
+       */
+      function chartMenu(rec) {
+        var spec = null;
+        try { spec = chartSpec(rec); } catch (e) { spec = null; }
+        return [
+          { label: spec ? AIOS.charts.describe(spec) : '圖表 ' + rec.id, disabled: true },
+          { label: '編輯圖表…', hint: '雙擊', run: function () { chartPopover(rec, chartNode(rec.id)); } },
+          { label: '檢視資料', run: function () { dataPopover(rec); } },
+          { sep: true },
+          { label: '複製圖表', hint: 'Ctrl+C', run: function () { copyChart(rec); } }
+        ].concat(
+          AIOS.charts.sendMenuItems(function () { return chartSpec(rec); }, 'sheets', ctx.toast,
+            function () { return { aspect: rec.w / rec.h }; }),
+          [
+            { sep: true },
+            { label: '刪除圖表', hint: 'Del', danger: true, run: function () {
+              try { ctx.toast(removeChart(rec.id), 't-ok'); }
+              catch (e) { ctx.toast(e.message, 't-warn'); }
+            } }
+          ]
+        );
+      }
+
+      /** 圖表 from the toolbar or the cell menu: draw it now, explain afterwards. */
+      function insertChartMenu(range) {
+        try {
+          ctx.toast(insertRecord({ range: range || AIOS.charts.rangeText(selectedBlock()) }), 't-ok');
+        } catch (e) {
+          ctx.toast(e.message, 't-warn');
+        }
       }
 
       /* Selection is painted separately from the grid because dragging across a
@@ -2119,6 +3229,9 @@
       function select(ref, extend) {
         if (!F.parseRef(ref)) return;
         commitEditor();
+        // One object at a time: landing on a cell lets go of a selected chart,
+        // or Delete would mean two things at once.
+        if (selChart) { selChart = null; syncChartSel(); }
         /* Land on the master, never on a covered cell. The active cell is what
            the formula bar edits and what typing lands in, and a covered cell has
            neither a value of its own nor a node to edit in. The rectangle is not
@@ -2420,6 +3533,10 @@
         var td = e.target.closest && e.target.closest('td[data-ref]');
         if (td) {
           dragging = true;
+          /* The chart layer stops catching the pointer for the length of the
+             gesture: pointermove resolves cells with elementFromPoint, and a
+             card in the way would hide the cells being dragged over. */
+          wrap.classList.add('sh-dragging');
           select(td.dataset.ref, e.shiftKey);
           wrap.focus();
           // Capture so the drag survives leaving the cell it started in.
@@ -2480,6 +3597,12 @@
             if (p2 && p2.row === index && td.rowSpan < 2) td.style.height = px + 'px';
           });
         }
+        /* The cards sit on cell coordinates, so a column that just grew moves
+           the ones to its right. Re-placed rather than redrawn: what is inside
+           them did not change, and rebuilding a drawing on every pointer move is
+           exactly the stutter this live path exists to avoid. */
+        measureGrid();
+        placeCharts();
       }
 
       function endDrag(e) {
@@ -2500,6 +3623,7 @@
         }
         if (!dragging) return;
         dragging = false;
+        wrap.classList.remove('sh-dragging');
         try { table.releasePointerCapture(e.pointerId); } catch (err) { /* gone */ }
       }
       table.addEventListener('pointerup', endDrag);
@@ -2542,6 +3666,24 @@
       });
 
       wrap.addEventListener('keydown', function (e) {
+        /* A selected chart owns the keyboard. Without this first, pressing
+           Delete at a chart would fall through to the cell branch and clear the
+           cells underneath it -- which is both surprising and, because the chart
+           would still be there, invisible. */
+        if (selChart) {
+          if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            try { ctx.toast(removeChart(selChart), 't-ok'); }
+            catch (err) { ctx.toast(err.message, 't-warn'); }
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            selectChart(null);
+          } else if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'c') {
+            e.preventDefault();
+            copyChart(chartById(selChart));
+          }
+          return;
+        }
         if (editing) return;
         var k = e.key;
         var mod = e.ctrlKey || e.metaKey;
@@ -2620,6 +3762,7 @@
       });
       btnStyle.addEventListener('click', function () { openStylePanel(); });
       btnBorder.addEventListener('click', function () { openBorderPopover(); });
+      btnChart.addEventListener('click', function () { insertChartMenu(); });
       fontSel.addEventListener('change', async function () {
         var chosen = await AIOS.fonts.resolveChoice(fontSel.value, ctx.win.el);
         if (chosen === null) { render(); return; }
@@ -2737,10 +3880,11 @@
 
         stash();
         var payload = {
-          /* Version 5 adds the merged regions, per sheet. An older build reading
-             this file ignores them and shows an unmerged grid with the same
-             values, which is a degraded view rather than a wrong one. */
-          kind: 'aiossheet', version: 5,
+          /* Version 5 adds the merged regions, per sheet, and version 6 the
+             charts. An older build reading this file ignores them and shows an
+             unmerged grid with the same values and no pictures, which is a
+             degraded view rather than a wrong one. */
+          kind: 'aiossheet', version: 6,
           font: sheetFont, size: sheetSize,
           active: active,
           sheets: book,
@@ -2754,7 +3898,8 @@
              a complete description of the active sheet and the single-sheet reader
              looks for merges among them. Two descriptions of one sheet that
              disagree is the bug this avoids. */
-          merges: merges
+          merges: merges,
+          charts: charts
         };
         /* Only claim a version when saving over the file this window opened; a
            save-as names a file this workbook holds no version of. */
@@ -2793,6 +3938,21 @@
           var table = ctx.body.querySelector('.sh-grid, table');
           if (!table) throw new Error('沒有內容可以匯出');
 
+          /* The charts, after the table, as inline SVG. The print window runs no
+             JavaScript, so nothing can draw them there: what goes into the page
+             has to be the finished markup. `static` because a printed chart has
+             no hover, so the slots that read faint on white get a written
+             label instead of a tooltip nobody can reach. */
+          var chartHtml = charts.map(function (rec) {
+            var drawn;
+            try { drawn = chartSpec(rec); } catch (e) { return ''; }
+            return '<div style="width:min(' + rec.w + 'px,100%);margin:12px 0;break-inside:avoid">' +
+              AIOS.charts.svgString(drawn, {
+                width: rec.w, height: rec.h, static: true,
+                font: AIOS.fonts.cssFor(sheetFont), fontSize: 12
+              }) + '</div>';
+          }).join('');
+
           var out = await AIOS.printing.toPdf(target3, {
             title: sheetName,
             font: sheetFont,
@@ -2800,7 +3960,7 @@
             // A grid is usually wider than tall.
             landscape: true,
             bodyHtml: '<h1>' + String(sheetName).replace(/[&<>]/g, '') + '</h1>' +
-                      '<table>' + table.innerHTML + '</table>',
+                      '<table>' + table.innerHTML + '</table>' + chartHtml,
             css: [
               '.sh-colhead, .sh-rowhead, .sh-corner { display: none; }',
               'td { white-space: pre-wrap; }',
@@ -2837,7 +3997,9 @@
             return {
               name: s.name, cells: withValues,
               colWidths: s.colWidths, rowHeights: s.rowHeights, freeze: s.freeze,
-              merges: s.merges || []
+              merges: s.merges || [],
+              // Resolved here, so the chart Excel opens is live in the same cells.
+              charts: chartsForExport(s)
             };
           });
           var res = await A.office.writeXlsx(target2, sheetName, sheetsOut[active].cells,
@@ -2878,7 +4040,9 @@
                   freeze: { rows: (s.freeze || {}).rows || 0, cols: (s.freeze || {}).cols || 0 },
                   // Absent before version 5, and sanitised whatever the version:
                   // an overlapping pair in a hand-edited file cannot be rendered.
-                  merges: normMerges(s.merges)
+                  merges: normMerges(s.merges),
+                  // Absent before version 6, and sanitised for the same reason.
+                  charts: normCharts(s.charts)
                 };
               });
               active = Math.max(0, Math.min(book.length - 1, d.active || 0));
@@ -2895,7 +4059,8 @@
                 colWidths: d.colWidths || {},
                 rowHeights: d.rowHeights || {},
                 freeze: { rows: (d.freeze || {}).rows || 0, cols: (d.freeze || {}).cols || 0 },
-                merges: normMerges(d.merges)
+                merges: normMerges(d.merges),
+                charts: normCharts(d.charts)
               }];
               active = 0;
             }
@@ -2908,6 +4073,7 @@
             rowHeights = live.rowHeights;
             freeze = live.freeze;
             merges = live.merges;
+            charts = live.charts;
           } catch (e) { ctx.toast('檔案格式不對：' + e.message, 't-err'); return; }
         } else if (/\.csv$/i.test(vpath)) {
           var rc = await A.fs.read(vpath);
@@ -2926,11 +4092,13 @@
           sheetName = vpath.split('/').pop().replace(/\.csv$/i, '');
           // A CSV carries no geometry, so anything left from the last file would
           // be applied to columns that mean something else now. Merges likewise:
-          // a region from the previous file would cover unrelated data here.
+          // a region from the previous file would cover unrelated data here, and
+          // a chart would be drawn from whatever now sits in its range.
           colWidths = {};
           rowHeights = {};
           freeze = { rows: 0, cols: 0 };
           merges = [];
+          charts = [];
           book = [blankSheet(sheetName)];
           active = 0;
           stash();
@@ -2942,6 +4110,7 @@
             ? rx.data.sheets
             : [{ name: rx.data.sheet || '工作表1', cells: rx.data.cells || {},
                  cols: rx.data.cols, rows: rx.data.rows }];
+          var skippedCharts = { n: 0 };
           book = incoming.map(function (s, i) {
             return {
               name: s.name || ('工作表' + (i + 1)),
@@ -2951,7 +4120,8 @@
               colWidths: s.colWidths || {},
               rowHeights: s.rowHeights || {},
               freeze: { rows: (s.freeze || {}).rows || 0, cols: (s.freeze || {}).cols || 0 },
-              merges: normMerges(s.merges)
+              merges: normMerges(s.merges),
+              charts: chartsFromXlsx(s, skippedCharts)
             };
           });
           active = 0;
@@ -2964,6 +4134,13 @@
           rowHeights = first.rowHeights;
           freeze = first.freeze;
           merges = first.merges;
+          charts = first.charts;
+          /* Excel lets a chart read cells from anywhere; this one binds to a
+             rectangle. Said out loud rather than swallowed, because the file
+             still has those charts and a silent gap looks like a bug. */
+          if (skippedCharts.n) {
+            ctx.toast('有 ' + skippedCharts.n + ' 個圖表的資料來源不是連續範圍，沒有讀進來', 't-warn');
+          }
         } else {
           ctx.toast('試算表打不開 ' + vpath, 't-warn');
           return;
@@ -2974,6 +4151,7 @@
         dirty = false;
         sel = 'A1';
         anchor = 'A1';
+        selChart = null;
         undoStack.length = 0;
         redoStack.length = 0;
         recalc();
@@ -3015,6 +4193,16 @@
           lines.push('合併的儲存格：' + merges.map(rectLabel).join('、') +
             '（每個區域只有左上角那一格有值，其他格對公式來說是空的）');
         }
+        /* Charts by name, because the value grid below is only numbers: a model
+           that could not see them would have no way to say 「改 c1 的類型」. */
+        charts.forEach(function (rec) {
+          var body;
+          try { body = AIOS.charts.describe(chartSpec(rec)); }
+          catch (e) { body = '（畫不出來：' + e.message + '）'; }
+          lines.push('圖表 ' + rec.id + '：' + body +
+            '　範圍 ' + rec.range + '（數列在' + (rec.seriesIn === 'rows' ? '列' : '欄') + '）' +
+            '錨點 ' + F.makeRef(rec.anchor.c, rec.anchor.r) + ' ' + rec.w + '×' + rec.h);
+        });
         lines.push('目前值（每列一行，欄以 | 分隔，第一列是第 1 列）：');
         lines.push(rows.slice(0, 40).map(function (r, i) {
           return '  ' + (i + 1) + ': ' + r.join(' | ');
@@ -3046,6 +4234,17 @@
          first -- acting on the previously selected cell instead would be the
          kind of surprise that costs someone their data. */
       ctx.setMenu(function (ev) {
+        /* A chart first: it floats over the cells, so the cell branch below
+           would answer for whatever happens to be underneath it. */
+        var card = ev.target.closest ? ev.target.closest('.sh-chart') : null;
+        if (card) {
+          var hit = chartById(card.dataset.chart);
+          if (hit) {
+            selectChart(hit.id);
+            return chartMenu(hit);
+          }
+        }
+
         var td = ev.target.closest ? ev.target.closest('td[data-ref]') : null;
         if (td) {
           var ref = td.dataset.ref;
@@ -3115,6 +4314,11 @@
                   try { ctx.toast(mergeRect(selRect(), { across: true, centre: true }), 't-ok'); }
                   catch (err) { ctx.toast(err.message, 't-warn'); }
                 } }
+              : null,
+            { sep: true },
+            many
+              ? { label: '插入圖表 ' + selLabel(),
+                  run: function () { insertChartMenu(selLabel()); } }
               : null,
             { sep: true },
             { label: '在上面插入 ' + selSpanRows().count + ' 列', run: function () {
@@ -3220,6 +4424,152 @@
         ];
       });
 
+      /* Charts, by id. Each checks what it was given before anything is
+         written, so a refused request costs no undo step. The type and the
+         colours are refused here rather than left to norm(), which would quietly
+         read a misspelt type as 直條圖 and drop a colour it did not know. */
+
+      function chartFields(s) {
+        var out = {};
+        if (s.type !== undefined && s.type !== null && s.type !== '') {
+          out.type = AIOS.charts.requireType(s.type);
+        }
+        if (s.title !== undefined && s.title !== null) out.title = String(s.title);
+        if (s.legend !== undefined && s.legend !== null && s.legend !== '') {
+          if (AIOS.charts.LEGENDS.indexOf(s.legend) < 0) {
+            throw new Error('圖例位置只能是 bottom / right / none，收到「' + s.legend + '」');
+          }
+          out.legend = s.legend;
+        }
+        if (s.labels !== undefined && s.labels !== null) out.labels = !!s.labels;
+        ['numFmt', 'xTitle', 'yTitle'].forEach(function (k) {
+          if (s[k] !== undefined && s[k] !== null) out[k] = String(s[k]);
+        });
+        // Not upper-cased here: normCharts canonicalises a range without
+        // touching the sheet name, which may legitimately be lower case.
+        if (s.range !== undefined && s.range !== null && s.range !== '') {
+          out.range = String(s.range).trim();
+        }
+        if (s.categories !== undefined && s.categories !== null && !Array.isArray(s.categories)) {
+          out.categories = String(s.categories).trim();
+        }
+        if (s.seriesIn !== undefined && s.seriesIn !== null && s.seriesIn !== '') {
+          if (['auto', 'cols', 'rows'].indexOf(s.seriesIn) < 0) {
+            throw new Error('seriesIn 只能是 auto、cols 或 rows，收到「' + s.seriesIn + '」');
+          }
+          out.seriesIn = s.seriesIn;
+        }
+        if (s.headerRow !== undefined) out.headerRow = triState(s.headerRow);
+        if (s.headerCol !== undefined) out.headerCol = triState(s.headerCol);
+        if (s.omitTotals !== undefined) out.omitTotals = triState(s.omitTotals);
+        if (s.at !== undefined && s.at !== null && s.at !== '') {
+          var at = F.parseRef(String(s.at).toUpperCase());
+          if (!at) throw new Error('at 不是合法的儲存格：' + s.at);
+          out.anchor = { c: at.col, r: at.row };
+        }
+        if (s.width !== undefined && s.width !== null) out.w = Number(s.width);
+        if (s.height !== undefined && s.height !== null) out.h = Number(s.height);
+        if (Array.isArray(s.colours)) {
+          out.colours = s.colours.map(function (x) {
+            return x === null || x === undefined || x === '' ? null
+              : AIOS.charts.requireColour(x, '數列顏色');
+          });
+        }
+        return out;
+      }
+
+      function insertChartApi(spec) {
+        var s = spec || {};
+        var fields = chartFields(s);
+        /* Numbers that are not on the sheet yet arrive as `rows` or as a whole
+           `chart`. Both are written down first and then bound to, because a
+           chart here draws cells and nothing else -- a picture carrying its own
+           private copy of the figures is the word processor's model, not this
+           one's, and two copies of a number is one of them going stale. */
+        if (s.chart && typeof s.chart === 'object') {
+          return adoptSpec(Object.assign({}, s.chart, fields), '插入圖表', fields);
+        }
+        if (Array.isArray(s.rows)) {
+          var got = AIOS.charts.fromRows(s.rows, {
+            seriesIn: s.seriesIn, headerRow: s.headerRow,
+            headerCol: s.headerCol, omitTotals: s.omitTotals
+          });
+          if (!got.series.length) {
+            throw new Error('rows 裡沒有可以畫的數字：第一列是數列名稱，第一欄是類別，其餘要是數字');
+          }
+          var made = AIOS.charts.withColours(AIOS.charts.norm(Object.assign({}, fields, {
+            categories: got.categories,
+            series: got.series,
+            title: fields.title || got.titleHint || '',
+            xTitle: fields.xTitle || got.corner || '',
+            numFmt: fields.numFmt || got.numFmtHint || ''
+          })), fields.colours);
+          return adoptSpec(made, '插入圖表', fields);
+        }
+        if (!fields.range) fields.range = AIOS.charts.rangeText(selectedBlock());
+        return insertRecord(fields);
+      }
+
+      function setChartApi(spec) {
+        var s = spec || {};
+        var hit = chartMeant(s.id);
+        var fields = chartFields(s);
+        if (!Object.keys(fields).length) {
+          throw new Error('沒有指定要改什麼；可用：type、title、range、categories、seriesIn、' +
+            'headerRow、headerCol、omitTotals、legend、labels、numFmt、xTitle、yTitle、at、width、height、colours');
+        }
+        return updateChart(hit.rec.id, fields);
+      }
+
+      function deleteChartApi(spec) {
+        return removeChart(chartMeant((spec || {}).id).rec.id);
+      }
+
+      async function chartToAppApi(spec) {
+        var s = spec || {};
+        var app = String(s.app || '').toLowerCase();
+        if (app !== 'docs' && app !== 'slides') throw new Error('app 要是 docs（文件）或 slides（簡報）');
+        var rec;
+        var home;
+        var where;
+        if (s.range) {
+          /* A range sent straight across without leaving a chart behind here:
+             「把 A1:D8 畫成圖放到簡報」 is one request, not two. */
+          rec = makeRecord(chartFields(s));
+          home = sheetName;
+          where = '範圍 ' + rec.range;
+        } else {
+          var hit = chartMeant(s.id);
+          rec = hit.rec;
+          home = book[hit.sheet].name;
+          where = '圖表 ' + rec.id;
+        }
+        var read = checkRead(chartRead(rec, home));
+        var out = await AIOS.charts.sendTo(app, read.spec, { aspect: rec.w / rec.h });
+        return where + ' 已插入到' + AIOS.charts.APP_NAMES[app] +
+          (out && out.note ? '：' + out.note : '');
+      }
+
+      /** Every chart in the book, described the way the model will quote it back. */
+      function chartList() {
+        stash();
+        var out = [];
+        book.forEach(function (s) {
+          (s.charts || []).forEach(function (rec) {
+            var line;
+            try { line = AIOS.charts.describe(chartSpec(rec, s.name)); }
+            catch (e) { line = AIOS.charts.typeName(rec.type) + '（畫不出來：' + e.message + '）'; }
+            out.push({
+              id: rec.id, sheet: s.name, type: rec.type, range: rec.range,
+              categories: rec.categories, seriesIn: rec.seriesIn,
+              at: F.makeRef(rec.anchor.c, rec.anchor.r), w: rec.w, h: rec.h,
+              describe: line
+            });
+          });
+        });
+        return out;
+      }
+
       ctx.api = {
         setCell: setCell, setRange: setRange, clearRange: clearRange,
         setFormat: setFormat, setFont: setFont, setStyle: setStyle,
@@ -3290,6 +4640,12 @@
           return merges.map(rectLabel);
         },
 
+        insertChart: insertChartApi,
+        setChart: setChartApi,
+        deleteChart: deleteChartApi,
+        chartToApp: chartToAppApi,
+        charts: chartList,
+
         /* Sheets, addressed by name because that is what a formula uses and what
            the model can see in the description. */
         addSheet: function (name) { return addSheet(name); },
@@ -3344,7 +4700,8 @@
               colWidths: st.colWidths || {},
               rowHeights: st.rowHeights || {},
               freeze: { rows: (st.freeze || {}).rows || 0, cols: (st.freeze || {}).cols || 0 },
-              merges: normMerges(st.merges)
+              merges: normMerges(st.merges),
+              charts: normCharts(st.charts)
             }];
             active = 0;
           }
@@ -3359,6 +4716,10 @@
           // A session snapshot from before merges existed has none.
           merges = normMerges(live.merges);
           live.merges = merges;
+          // Nor charts, and a snapshot is restored raw -- so this is the one
+          // place a stale session's records are made safe to draw.
+          charts = normCharts(live.charts);
+          live.charts = charts;
           recalc();
           if (path) ctx.setTitle('試算表 — ' + path.split('/').pop());
         } else if (typeof ctx.arg === 'string') {
@@ -3380,7 +4741,7 @@
             cells: cells, sheetName: sheetName,
             cols: COLS, rows: ROWS,
             colWidths: colWidths, rowHeights: rowHeights, freeze: freeze,
-            merges: merges
+            merges: merges, charts: charts
           };
         },
         reopen: function (p) { if (typeof p === 'string') open(p); },

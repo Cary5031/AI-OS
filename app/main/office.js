@@ -8,9 +8,11 @@
    Scope, stated plainly rather than discovered later: this reads and writes the
    parts of OOXML that carry meaning for a text document and a grid of values --
    paragraphs, headings, bold/italic runs, lists, tables, cell values, formulas,
-   sheet names. It does not preserve the untouched remainder of a file
-   byte-for-byte the way Word does, and it does not attempt themes, numbering
-   definitions, drawings, pivot tables or conditional formatting.
+   sheet names, and charts (the one kind of drawing it carries, as DrawingML
+   chart parts built in chartxml.js). It does not preserve the untouched
+   remainder of a file byte-for-byte the way Word does, and it does not attempt
+   themes, numbering definitions, pictures in documents, pivot tables or
+   conditional formatting.
 
    That means a document authored here opens correctly in Word, and a document
    authored in Word opens here with its text and structure intact, but a
@@ -22,6 +24,11 @@
    =========================================================================== */
 
 const zip = require('./zip');
+const chartxml = require('./chartxml');
+/* The chart model is the renderer's, loaded here for the pure half (a chart's
+   data as a table and back) so the .md bridge reads a chart the way the editors
+   build one. */
+const charts = require('../renderer/charts.js');
 
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';
 
@@ -128,12 +135,46 @@ function readDocx(buffer) {
     }
   }
 
+  /* Relationships, for the parts a paragraph points at. The running head and
+     foot are found by their fixed names further down; a chart's part is
+     whatever its id says it is. */
+  const docRelMap = {};
+  const docRelsXml = files.get('word/_rels/document.xml.rels');
+  if (docRelsXml) {
+    const rels = docRelsXml.toString('utf8');
+    const rRe = /<Relationship\b[^>]*\/?>/g;
+    let rm;
+    while ((rm = rRe.exec(rels))) {
+      const id = /\bId="([^"]+)"/.exec(rm[0]);
+      const target = /\bTarget="([^"]+)"/.exec(rm[0]);
+      if (id && target) docRelMap[id[1]] = target[1].replace(/^\/?word\//, '').replace(/^\//, '');
+    }
+  }
+
   const paraRe = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
   let pm;
   while ((pm = paraRe.exec(xml))) {
     if (consumed.some(([a, b]) => pm.index >= a && pm.index < b)) continue;
     const inner = pm[1];
     const style = (inner.match(/<w:pStyle\s+w:val="([^"]+)"/) || [])[1] || '';
+
+    /* A chart is a drawing whose graphic data is a chart part. Read before the
+       runs are, or the paragraph would come back as an empty one. */
+    const drawn = /<w:drawing\b/.test(inner) ? /<c:chart\b[^>]*\br:id="(rId\d+)"/.exec(inner) : null;
+    if (drawn) {
+      const target = docRelMap[drawn[1]];
+      const part = target ? files.get('word/' + target) : null;
+      const read = part ? chartxml.readChartSpace(part.toString('utf8')) : null;
+      if (read) {
+        const ext = /<wp:extent\b[^>]*cx="(\d+)"[^>]*cy="(\d+)"/.exec(inner);
+        const aspect = ext && Number(ext[2]) > 0 ? Number(ext[1]) / Number(ext[2]) : 1.8;
+        blocks.push({
+          at: pm.index, type: 'chart', chart: read.spec,
+          aspect: Math.round(Math.max(1.2, Math.min(4, aspect)) * 100) / 100, ...readParaProps(inner)
+        });
+        continue;
+      }
+    }
 
     /* A page break is a run holding nothing but the break. Checked before the
        runs are read, because readRuns turns a <w:br> into a newline and the
@@ -373,9 +414,37 @@ function writeDocx(blocks, meta = {}) {
     return pr ? `<w:pPr>${pr}</w:pPr>` : '';
   }
 
+  /* Charts are the one drawing this writer carries. Each becomes its own part
+     under word/charts/, referenced from an inline drawing in the body. Their
+     relationship ids follow the four fixed ones (styles, numbering, header,
+     footer) so those stay where the reader expects them. */
+  const chartParts = [];
+  const TEXT_WIDTH_EMU = (11906 - 1440 - 1440) * 635;   // the page's text width
+
   const body = (blocks || []).map((b) => {
     // A block's own font applies to every run in it unless the run overrides.
     const base = { font: b.font || null, size: b.size || null };
+
+    if (b.type === 'chart') {
+      const spec = b.chart && typeof b.chart === 'object' ? b.chart : {};
+      const n = chartParts.length + 1;
+      const rid = 'rId' + (4 + n);
+      chartParts.push({
+        name: `charts/chart${n}.xml`, rid,
+        xml: chartxml.chartSpaceXml(spec, { font: docFont, size: docSize ? Math.max(6, docSize - 1) : 10 })
+      });
+      // The drawing spans the text width; the block's aspect ratio sets its height.
+      const aspect = Math.max(1.2, Math.min(4, Number(b.aspect) || 1.8));
+      const cx = TEXT_WIDTH_EMU;
+      const cy = Math.round(cx / aspect);
+      const title = spec.title ? String(spec.title) : `圖表 ${n}`;
+      return `<w:p>${paraXml(b, '')}<w:r><w:drawing>` +
+        '<wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0">' +
+        `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+        `<wp:docPr id="${1000 + n}" name="${esc(title)}"/><wp:cNvGraphicFramePr/>` +
+        `<a:graphic xmlns:a="${chartxml.NS_A}"><a:graphicData uri="${chartxml.CHART_GRAPHIC_URI}">` +
+        chartxml.chartRefXml(rid) + '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
+    }
 
     if (b.type === 'break') {
       // A paragraph holding nothing but the break, which is how Word writes one.
@@ -546,6 +615,8 @@ function writeDocx(blocks, meta = {}) {
       ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' +
         '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
       : '') +
+    chartParts.map((c) =>
+      `<Override PartName="/word/${c.name}" ContentType="${chartxml.CHART_CONTENT_TYPE}"/>`).join('') +
     '</Types>';
 
   const rels = XML_DECL +
@@ -561,6 +632,8 @@ function writeDocx(blocks, meta = {}) {
       ? '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>' +
         '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>'
       : '') +
+    chartParts.map((c) =>
+      `<Relationship Id="${c.rid}" Type="${chartxml.CHART_REL_TYPE}" Target="${c.name}"/>`).join('') +
     '</Relationships>';
 
   // Headings inherit the document typeface but keep their own size. Naming the
@@ -621,6 +694,7 @@ function writeDocx(blocks, meta = {}) {
     parts['word/header1.xml'] = headerXml;
     parts['word/footer1.xml'] = footerXml;
   }
+  chartParts.forEach((c) => { parts['word/' + c.name] = c.xml; });
   return zip.write(parts, { store: ['[Content_Types].xml'] });
 }
 
@@ -840,6 +914,88 @@ function indexToCol(n) {
  * named) and are kept because that is what the older single-sheet caller reads.
  * `sheets` is the whole book.
  */
+/**
+ * The charts anchored on a worksheet, with the cell references they draw from.
+ *
+ * Follows the chain of parts Excel writes: the worksheet names a drawing in its
+ * relationships, the drawing anchors graphic frames, and each frame names a
+ * chart part in the drawing's relationships. A link that does not resolve
+ * skips that chart; nothing is invented from a broken chain.
+ */
+function readSheetCharts(files, target, wsXml) {
+  const out = [];
+  const dm = /<drawing\b[^>]*r:id="(rId\d+)"/.exec(wsXml);
+  if (!dm) return out;
+  const base = target.replace(/^\/?xl\//, '');           // worksheets/sheet1.xml
+  const dir = base.replace(/[^/]*$/, '');                 // worksheets/
+  const name = base.slice(dir.length);
+  const relsPart = files.get('xl/' + dir + '_rels/' + name + '.rels');
+  if (!relsPart) return out;
+  const drawingTarget = relTarget(relsPart.toString('utf8'), dm[1]);
+  if (!drawingTarget) return out;
+  const drawingPath = resolvePart('xl/' + dir, drawingTarget);
+  const drawing = files.get(drawingPath);
+  if (!drawing) return out;
+  const drawingDir = drawingPath.replace(/[^/]*$/, '');
+  const dRels = files.get(drawingDir + '_rels/' + drawingPath.slice(drawingDir.length) + '.rels');
+  const dRelText = dRels ? dRels.toString('utf8') : '';
+  const text = drawing.toString('utf8');
+  const anchorRe = /<xdr:(oneCellAnchor|twoCellAnchor|absoluteAnchor)\b[^>]*>([\s\S]*?)<\/xdr:\1>/g;
+  let am;
+  while ((am = anchorRe.exec(text))) {
+    const body = am[2];
+    const cm = /<c:chart\b[^>]*\br:id="(rId\d+)"/.exec(body);
+    if (!cm) continue;
+    const chartTarget = relTarget(dRelText, cm[1]);
+    const part = chartTarget ? files.get(resolvePart(drawingDir, chartTarget)) : null;
+    const read = part ? chartxml.readChartSpace(part.toString('utf8')) : null;
+    if (!read) { out.skipped = (out.skipped || 0) + 1; continue; }
+    const from = /<xdr:from>([\s\S]*?)<\/xdr:from>/.exec(body);
+    const num = (xml, tag, dflt) => Number((new RegExp('<xdr:' + tag + '>(-?\\d+)</xdr:' + tag + '>').exec(xml || '') || [])[1] || dflt);
+    const col = from ? num(from[1], 'col', 0) : 0;
+    const row = from ? num(from[1], 'row', 0) : 0;
+    let w = 440, h = 270;
+    if (am[1] === 'twoCellAnchor') {
+      // Excel's own anchors span cells; sized here with the app's default grid.
+      const to = /<xdr:to>([\s\S]*?)<\/xdr:to>/.exec(body);
+      if (to) {
+        w = (num(to[1], 'col', col) - col) * 78 + num(to[1], 'colOff', 0) / 9525;
+        h = (num(to[1], 'row', row) - row) * 22 + num(to[1], 'rowOff', 0) / 9525;
+      }
+    } else {
+      const ext = /<xdr:ext\b[^>]*cx="(\d+)"[^>]*cy="(\d+)"/.exec(body);
+      if (ext) { w = Number(ext[1]) / 9525; h = Number(ext[2]) / 9525; }
+    }
+    out.push({
+      spec: read.spec, refs: read.refs, anchor: { c: col, r: row },
+      w: Math.round(Math.max(120, w)), h: Math.round(Math.max(80, h))
+    });
+  }
+  return out;
+}
+
+function relTarget(relsXml, rid) {
+  const re = /<Relationship\b[^>]*\/?>/g;
+  let m;
+  while ((m = re.exec(relsXml || ''))) {
+    const id = /\bId="([^"]+)"/.exec(m[0]);
+    const target = /\bTarget="([^"]+)"/.exec(m[0]);
+    if (id && target && id[1] === rid) return target[1];
+  }
+  return null;
+}
+
+/** A relationship target resolved against its part's directory. */
+function resolvePart(dir, target) {
+  if (target.startsWith('/')) return target.slice(1);
+  const out = [];
+  (dir + target).split('/').forEach((seg) => {
+    if (seg === '..') out.pop();
+    else if (seg && seg !== '.') out.push(seg);
+  });
+  return out.join('/');
+}
+
 function readXlsx(buffer, opts = {}) {
   const files = zip.read(buffer);
 
@@ -1089,7 +1245,14 @@ function readXlsx(buffer, opts = {}) {
         merges: [], missing: true
       };
     }
-    return Object.assign({ name: s.name }, readSheetXml(wsXml.toString('utf8')));
+    const wsText = wsXml.toString('utf8');
+    const out = Object.assign({ name: s.name }, readSheetXml(wsText));
+    // Absent rather than empty when the sheet has none, like merges.
+    const found = readSheetCharts(files, target, wsText);
+    if (found.length) out.charts = found;
+    // A chart of a kind this reader does not know is counted, not invented.
+    if (found.skipped) out.chartsSkipped = found.skipped;
+    return out;
   });
 
   const wanted = (opts.sheet && all.find((s) => s.name === opts.sheet)) || all[0];
@@ -1123,11 +1286,12 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
       colWidths: s.colWidths || {},
       rowHeights: s.rowHeights || {},
       freeze: s.freeze || { rows: 0, cols: 0 },
-      merges: Array.isArray(s.merges) ? s.merges : []
+      merges: Array.isArray(s.merges) ? s.merges : [],
+      charts: Array.isArray(s.charts) ? s.charts : []
     }))
     : [{
       name: sheetName, cells: cells,
-      colWidths: {}, rowHeights: {}, freeze: { rows: 0, cols: 0 }, merges: []
+      colWidths: {}, rowHeights: {}, freeze: { rows: 0, cols: 0 }, merges: [], charts: []
     }];
   /* Style table.
      xlsx does not let a cell name a typeface directly: it points at an index in
@@ -1309,16 +1473,90 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
         '</mergeCells>'
       : '';
 
+    /* The drawing that anchors the sheet's charts, after mergeCells -- the
+       schema fixes that order too. A sheet with no charts names no drawing and
+       declares no relationship namespace, so it is byte-identical to before. */
+    const withCharts = Array.isArray(g.charts) && g.charts.length > 0;
     return XML_DECL +
-      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"' +
+      (withCharts ? ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' : '') + '>' +
       views + colsXml +
-      `<sheetData>${rowsXml}</sheetData>${mergeXml}</worksheet>`;
+      `<sheetData>${rowsXml}</sheetData>${mergeXml}` +
+      (withCharts ? '<drawing r:id="rId1"/>' : '') + '</worksheet>';
   }
 
   /* Sheets are written before the workbook part, because writing the rows is
      what discovers which fonts are used -- and the style table they point at is
      shared by the whole book. */
   const sheetParts = book.map((s) => sheetXml(s.cells, s));
+
+  /* Excel caps a sheet name at 31 characters. The cap is applied before
+     escaping (slicing an escaped name can cut an entity in half), and a chart
+     reference that named the long form is rewritten to the short one, or every
+     series would point at a sheet the workbook does not contain. */
+  function sheetTitle(name) { return String(name || '').slice(0, 31); }
+  function shortRef(ref, name) {
+    const short = sheetTitle(name);
+    if (!ref || short === name) return ref;
+    const q = (n) => "'" + String(n).replace(/'/g, "''") + "'!";
+    return String(ref).split(q(name)).join(q(short));
+  }
+
+  /* Charts. Each sheet with any gets one drawing part anchoring them to cells,
+     and every chart its own part, numbered across the whole book. The
+     spreadsheet passes the cell references its chart was drawn from, so the
+     chart Excel opens is live in the same cells. Sizes arrive in pixels and
+     leave as EMU (9525 to the pixel at 96 dpi). */
+  const drawingParts = [];   // { sheet, xml, rels, charts: [{ name, xml }] }
+  let chartCount = 0;
+  book.forEach((s, i) => {
+    const list = (s.charts || []).filter((c) => c && typeof c === 'object');
+    if (!list.length) return;
+    const anchors = [];
+    const drels = [];
+    const cparts = [];
+    list.forEach((c, j) => {
+      const spec = c.spec || c.chart || c;
+      const n = ++chartCount;
+      const rid = 'rId' + (j + 1);
+      const refs = c.refs ? {
+        cat: shortRef(c.refs.cat, s.name),
+        tx: (c.refs.tx || []).map((r) => shortRef(r, s.name)),
+        val: (c.refs.val || []).map((r) => shortRef(r, s.name))
+      } : null;
+      cparts.push({
+        name: `charts/chart${n}.xml`,
+        xml: chartxml.chartSpaceXml(spec, {
+          font, size: size ? Math.max(6, size - 1) : 10, refs, sheet: sheetTitle(s.name)
+        })
+      });
+      drels.push(`<Relationship Id="${rid}" Type="${chartxml.CHART_REL_TYPE}" Target="../charts/chart${n}.xml"/>`);
+      const a = c.anchor || {};
+      const col = Math.max(0, Math.floor(Number(a.c) || 0));
+      const row = Math.max(0, Math.floor(Number(a.r) || 0));
+      const cx = Math.round(Math.max(120, Number(c.w) || 440) * 9525);
+      const cy = Math.round(Math.max(80, Number(c.h) || 270) * 9525);
+      const name = spec && spec.title ? String(spec.title) : `圖表 ${n}`;
+      anchors.push('<xdr:oneCellAnchor>' +
+        `<xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+        `<xdr:ext cx="${cx}" cy="${cy}"/>` +
+        '<xdr:graphicFrame macro="">' +
+        `<xdr:nvGraphicFramePr><xdr:cNvPr id="${j + 2}" name="${esc(name)}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>` +
+        '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>' +
+        `<a:graphic><a:graphicData uri="${chartxml.CHART_GRAPHIC_URI}">${chartxml.chartRefXml(rid)}</a:graphicData></a:graphic>` +
+        '</xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor>');
+    });
+    drawingParts.push({
+      sheet: i,
+      xml: XML_DECL +
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" ' +
+        `xmlns:a="${chartxml.NS_A}">` + anchors.join('') + '</xdr:wsDr>',
+      rels: XML_DECL +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        drels.join('') + '</Relationships>',
+      charts: cparts
+    });
+  });
 
   // Styles take the relationship id after the last worksheet.
   const stylesRid = 'rId' + (book.length + 1);
@@ -1328,7 +1566,7 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
     '<sheets>' +
     book.map((s, i) =>
-      `<sheet name="${esc(s.name).slice(0, 31)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
+      `<sheet name="${esc(sheetTitle(s.name))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
     '</sheets></workbook>';
 
   const wbRels = XML_DECL +
@@ -1346,6 +1584,9 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
     book.map((_s, i) =>
       `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
     '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    drawingParts.map((d, k) =>
+      `<Override PartName="/xl/drawings/drawing${k + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>` +
+      d.charts.map((c) => `<Override PartName="/xl/${c.name}" ContentType="${chartxml.CHART_CONTENT_TYPE}"/>`).join('')).join('') +
     '</Types>';
 
   const rels = XML_DECL +
@@ -1390,7 +1631,7 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
 
   const numFmtsXml = numFmtList.length
     ? `<numFmts count="${numFmtList.length}">` +
-      numFmtList.map((n) => `<numFmt numFmtId="${n.id}" formatCode="${esc(n.code)}"/>`).join('') +
+      numFmtList.map((n) => `<numFmt numFmtId="${n.id}" formatCode="${esc(charts.excelFormatCode(n.code))}"/>`).join('') +
       '</numFmts>'
     : '';
 
@@ -1426,6 +1667,15 @@ function writeXlsx({ sheetName = '工作表1', cells = {}, sheets = null, font =
     'xl/styles.xml': styles
   };
   sheetParts.forEach((xml, i) => { parts[`xl/worksheets/sheet${i + 1}.xml`] = xml; });
+  drawingParts.forEach((d, k) => {
+    parts[`xl/worksheets/_rels/sheet${d.sheet + 1}.xml.rels`] = XML_DECL +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${k + 1}.xml"/>` +
+      '</Relationships>';
+    parts[`xl/drawings/drawing${k + 1}.xml`] = d.xml;
+    parts[`xl/drawings/_rels/drawing${k + 1}.xml.rels`] = d.rels;
+    d.charts.forEach((c) => { parts['xl/' + c.name] = c.xml; });
+  });
 
   return zip.write(parts, { store: ['[Content_Types].xml'] });
 }
@@ -1616,6 +1866,19 @@ function tableXml(id, o, font) {
     '</a:graphicData></a:graphic></p:graphicFrame>';
 }
 
+/** A `<p:graphicFrame>` holding a chart part -- the same frame a table sits in. */
+function chartFrameXml(id, o, rid) {
+  return '<p:graphicFrame>' +
+    `<p:nvGraphicFramePr><p:cNvPr id="${id}" name="${esc((o.chart && o.chart.title) || '圖表')}"/>` +
+    '<p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr>' +
+    '<p:nvPr/></p:nvGraphicFramePr>' +
+    `<p:xfrm><a:off x="${pctX(o.x)}" y="${pctY(o.y)}"/>` +
+    `<a:ext cx="${pctX(o.w)}" cy="${pctY(o.h)}"/></p:xfrm>` +
+    `<a:graphic><a:graphicData uri="${chartxml.CHART_GRAPHIC_URI}">` +
+    chartxml.chartRefXml(rid) +
+    '</a:graphicData></a:graphic></p:graphicFrame>';
+}
+
 /** A `<p:pic>` for an image whose bytes are already in the package. */
 function pictureXml(id, o, rid) {
   return '<p:pic>' +
@@ -1676,6 +1939,7 @@ function writePptx(deck = {}) {
 
   const media = [];   // {name, buffer, mime}
   const byData = new Map();
+  const chartParts = [];   // {name, xml}, numbered across the deck
 
   /** Bytes into the package once, however many slides show the same picture. */
   function addImage(src) {
@@ -1759,6 +2023,26 @@ function writePptx(deck = {}) {
         const rid = 'rId' + nextRel++;
         rels.push(`<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${name}"/>`);
         shapes.push(pictureXml(nextId++, o, rid));
+        return;
+      }
+      if (o.kind === 'chart') {
+        const spec = o.chart && typeof o.chart === 'object' ? o.chart : null;
+        const hasData = !!spec && Array.isArray(spec.series) && spec.series.some((ser) =>
+          ser && Array.isArray(ser.values) && ser.values.some((v) => v !== null && v !== '' && isFinite(Number(v))));
+        if (!hasData) {
+          warnings.push('第 ' + (i + 1) + ' 頁的圖表沒有資料，沒有寫進去');
+          return;
+        }
+        const n = chartParts.length + 1;
+        chartParts.push({
+          name: `chart${n}.xml`,
+          xml: chartxml.chartSpaceXml(spec, {
+            font, size: at(o.size || 12), colour: o.colour || '404040', fill: o.fill || null
+          })
+        });
+        const rid = 'rId' + nextRel++;
+        rels.push(`<Relationship Id="${rid}" Type="${chartxml.CHART_REL_TYPE}" Target="../charts/chart${n}.xml"/>`);
+        shapes.push(chartFrameXml(nextId++, o, rid));
         return;
       }
       const opts = {
@@ -1930,6 +2214,8 @@ function writePptx(deck = {}) {
       : '') +
     slides.map((_, i) =>
       `<Override PartName="/ppt/slides/slide${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join('') +
+    chartParts.map((c) =>
+      `<Override PartName="/ppt/charts/${c.name}" ContentType="${chartxml.CHART_CONTENT_TYPE}"/>`).join('') +
     (notesParts.length
       ? '<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>' +
         notesParts.map((_, i) =>
@@ -1988,6 +2274,7 @@ function writePptx(deck = {}) {
   slideParts.forEach((xml, i) => { parts[`ppt/slides/slide${i + 1}.xml`] = xml; });
   slideRels.forEach((xml, i) => { parts[`ppt/slides/_rels/slide${i + 1}.xml.rels`] = xml; });
   media.forEach((m) => { parts['ppt/media/' + m.name] = m.buffer; });
+  chartParts.forEach((c) => { parts['ppt/charts/' + c.name] = c.xml; });
 
   if (notesParts.length) {
     parts['ppt/notesMasters/notesMaster1.xml'] = notesMaster;
@@ -2049,6 +2336,26 @@ function blocksToMarkdown(blocks) {
        every renderer and recognised again by the reader, which is better than
        dropping the break or borrowing `---` from the thematic rule. */
     if (b.type === 'break') return '<!-- pagebreak -->';
+    /* Nor a chart. It becomes its data as a table under a comment that says
+       what the table was drawn as: every renderer shows the numbers, and the
+       reader turns the pair back into a chart. */
+    if (b.type === 'chart') {
+      const spec = charts.norm(b.chart);
+      const meta = {
+        type: spec.type, title: spec.title, legend: spec.legend, labels: spec.labels,
+        numFmt: spec.numFmt, xTitle: spec.xTitle, yTitle: spec.yTitle,
+        colours: spec.series.map((s) => s.colour || '')
+      };
+      if (Number(b.aspect) > 0) meta.aspect = Number(b.aspect);
+      const cell = (c) => String(c == null ? '' : c).replace(/\|/g, '\\|');
+      const rows = charts.toRows(spec);
+      const head = '| ' + rows[0].map(cell).join(' | ') + ' |';
+      const sep = '| ' + rows[0].map(() => '---').join(' | ') + ' |';
+      const rest = rows.slice(1).map((r) => '| ' + r.map(cell).join(' | ') + ' |');
+      // A comment ends at the first `-->`, so the JSON may hold no double dash.
+      return '<!-- chart ' + JSON.stringify(meta).replace(/--/g, '-\\u002d') + ' -->\n' +
+        [head, sep, ...rest].join('\n');
+    }
     if (Array.isArray(b.runs) && b.runs.length) {
       return b.runs.map((r) => {
         let t = r.text || '';
@@ -2087,6 +2394,7 @@ function markdownToBlocks(md) {
   const blocks = [];
   let para = [];
   let table = null;
+  let pendingChart = null;   // a chart comment waiting for the table under it
 
   const flushPara = () => {
     if (!para.length) return;
@@ -2094,8 +2402,26 @@ function markdownToBlocks(md) {
     para = [];
   };
   const flushTable = () => {
-    if (table && table.length) blocks.push({ type: 'table', rows: table });
+    if (table && table.length) {
+      if (pendingChart) {
+        /* The table under a chart comment is the chart's data, read the way
+           the editors read a table into a chart. */
+        const got = charts.fromRows(table);
+        const spec = charts.norm(Object.assign({}, pendingChart, { categories: got.categories, series: got.series }));
+        if (Array.isArray(pendingChart.colours)) {
+          spec.series.forEach((s, k) => { if (pendingChart.colours[k]) s.colour = pendingChart.colours[k]; });
+        }
+        const block = { type: 'chart', chart: charts.norm(spec) };
+        if (Number(pendingChart.aspect) > 0) block.aspect = Number(pendingChart.aspect);
+        blocks.push(block);
+      } else {
+        blocks.push({ type: 'table', rows: table });
+      }
+    } else if (pendingChart) {
+      blocks.push({ type: 'chart', chart: charts.norm(pendingChart) });
+    }
     table = null;
+    pendingChart = null;
   };
 
   for (const raw of lines) {
@@ -2108,9 +2434,21 @@ function markdownToBlocks(md) {
       continue;
     }
 
+    const chartMark = /^\s*<!--\s*chart\s+(\{[\s\S]*\})\s*-->\s*$/i.exec(line);
+    if (chartMark) {
+      flushPara();
+      flushTable();
+      try { pendingChart = JSON.parse(chartMark[1]); } catch (e) { pendingChart = null; }
+      if (pendingChart && typeof pendingChart !== 'object') pendingChart = null;
+      continue;
+    }
+
     if (/^\s*\|.*\|\s*$/.test(line)) {
       flushPara();
-      const cells = line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      // A cell may hold an escaped pipe, which the chart writer emits for a
+      // label that contains one; it is not a column boundary.
+      const cells = line.trim().replace(/^\||\|$/g, '').replace(/\\\|/g, '\u0000')
+        .split('|').map((c) => c.trim().replace(/\u0000/g, '|'));
       if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;   // separator row
       (table = table || []).push(cells);
       continue;
@@ -2231,5 +2569,6 @@ module.exports = {
   writePptx,
   blocksToMarkdown, markdownToBlocks,
   parseCsv, toCsv,
-  colToIndex, indexToCol
+  colToIndex, indexToCol,
+  readSheetCharts
 };

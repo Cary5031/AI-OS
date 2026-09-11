@@ -58,7 +58,7 @@
     blank: '空白（只有物件）'
   };
 
-  var KINDS = { text: '文字方塊', image: '圖片', shape: '圖案', table: '表格' };
+  var KINDS = { text: '文字方塊', image: '圖片', shape: '圖案', table: '表格', chart: '圖表' };
 
   /* The shape gallery.
      Drawn with clip-path rather than SVG because a clip is expressed in
@@ -99,7 +99,8 @@
     text:  { w: 42, h: 16, size: 24, align: 'left', valign: 'top' },
     shape: { w: 26, h: 20, size: 18, align: 'center', valign: 'middle' },
     image: { w: 40, h: 34, size: 14, align: 'center', valign: 'middle' },
-    table: { w: 62, h: 30, size: 14, align: 'left', valign: 'middle' }
+    table: { w: 62, h: 30, size: 14, align: 'left', valign: 'middle' },
+    chart: { w: 56, h: 50, size: 12, align: 'center', valign: 'middle' }
   };
 
   var HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -159,6 +160,27 @@
   }
 
   /**
+   * The spec a chart object holds, from whichever shape it arrived in.
+   *
+   * A saved deck and a paste carry the spec itself. A conversation building a
+   * whole deck in one call says `rows` inside a slide's objects, the way it
+   * says them for a table -- so rows are read into categories and series here,
+   * by the reader the editor's own panel uses. An object that carries neither
+   * is handed over as it is; norm() reads what it can and draws 沒有資料.
+   */
+  function chartSpecOf(o) {
+    if (o.chart && typeof o.chart === 'object') return o.chart;
+    if (!Array.isArray(o.rows)) return o;
+    var got = AIOS.charts.fromRows(o.rows, {
+      seriesIn: o.seriesIn, headerRow: o.headerRow, headerCol: o.headerCol, omitTotals: o.omitTotals
+    });
+    return Object.assign({}, o, {
+      categories: got.categories, series: got.series,
+      title: o.title || got.titleHint, xTitle: o.xTitle || got.corner, numFmt: o.numFmt || got.numFmtHint
+    });
+  }
+
+  /**
    * Everything an object needs, with anything missing filled in.
    *
    * The single gate for objects arriving from a saved file, from the chat model,
@@ -202,6 +224,12 @@
       out.alt = String(o.alt || '').slice(0, 200);
       out.fit = FITS.some(function (f) { return f.id === o.fit; }) ? o.fit : 'contain';
       out.round = !!o.round;
+    } else if (kind === 'chart') {
+      /* The chart's own fields are the shared module's business: one gate for
+         a spec from a file, a chat action or a paste, the same gate the
+         document and the spreadsheet use. No fill by default -- the drawing
+         paints on the slide -- and the stroke is not read at all. */
+      out.chart = AIOS.charts.norm(chartSpecOf(o));
     } else {
       out.rows = normRows(o.rows, o.rowCount, o.colCount);
       out.header = o.header === undefined ? true : !!o.header;
@@ -261,6 +289,19 @@
     };
   }
 
+  /* One action under two names. The document and the spreadsheet call theirs
+     insertChart, and another program's 插入到簡報 arrives as addChart; a model
+     that learned either verb should not be told the deck has no such thing. */
+  var ADD_CHART = {
+    args: '{index, type:"column"|"bar"|"line"|"area"|"pie"|"doughnut"|"scatter"|"stackedColumn"|"stackedBar"|"stackedArea", title, rows:[["月份","收入","支出"],["1月",120,80]], categories:["1月"], series:[{name:"收入", values:[120]}], seriesIn:"auto"|"cols"|"rows", headerRow, headerCol, omitTotals, legend:"bottom"|"right"|"none", labels:true|false（資料標籤）, numFmt, xTitle, yTitle, x, y, w, h, newSlide:true|false}',
+    desc: '在第 index 頁放一張圖表（省略 index 就是目前這頁）。資料給 rows（二維陣列，第一列是數列名稱、' +
+          '第一欄是類別）或 categories + series；newSlide:true 會先在那頁後面插入一頁空白頁，把圖表放在新的一頁',
+    run: async function (args, ctx) {
+      ctx.api.snapshot();
+      return { note: ctx.api.addChart(args.index === undefined ? null : Number(args.index) - 1, args) };
+    }
+  };
+
   AIOS.apps.register({
     id: 'slides',
     name: '簡報',
@@ -270,7 +311,8 @@
     width: 1020,
     height: 680,
     purpose: '製作與放映簡報',
-    chatHint: '可以說「幫我做一份五頁的簡報介紹這台機器」、「第 3 頁改成雙欄比較」或「在這頁加一個 3×4 表格」。',
+    chatHint: '可以說「幫我做一份五頁的簡報介紹這台機器」、「第 3 頁改成雙欄比較」、「在這頁加一個 3×4 表格」' +
+              '或「用這些數字畫一張直條圖」。',
 
     accepts: function (p) { return /\.aiosdeck$/i.test(p || ''); },
 
@@ -316,8 +358,9 @@
         }
       },
       addObject: {
-        args: '{index, kind:"text"|"image"|"shape"|"table", x, y, w, h, text, src, shape, rows, fill, stroke, colour, size, align, valign, bold, italic, fit}',
-        desc: '在第 index 頁放一個物件。x/y/w/h 是投影片寬高的百分比（0-100），size 是點數',
+        args: '{index, kind:"text"|"image"|"shape"|"table"|"chart", x, y, w, h, text, src, shape, rows, chart, fill, stroke, colour, size, align, valign, bold, italic, fit}',
+        desc: '在第 index 頁放一個物件。x/y/w/h 是投影片寬高的百分比（0-100），size 是點數；' +
+              'chart 是圖表規格（畫圖表用 addChart 更方便）',
         run: async function (args, ctx) {
           ctx.api.snapshot();
           return { note: ctx.api.addObject(args.index === undefined ? null : Number(args.index) - 1, args) };
@@ -331,8 +374,12 @@
           return { note: ctx.api.addTable(args.index === undefined ? null : Number(args.index) - 1, args) };
         }
       },
+      addChart: ADD_CHART,
+      insertChart: { args: ADD_CHART.args, desc: '同 addChart（文件與試算表叫 insertChart，兩個名字都收）', run: ADD_CHART.run },
       setObject: {
-        args: '{index, object, ...欄位}', desc: '改第 index 頁的第 object 個物件（都從 1 開始），欄位同 addObject',
+        args: '{index, object, ...欄位}',
+        desc: '改第 index 頁的第 object 個物件（都從 1 開始），欄位同 addObject；' +
+              '圖表可以給 type、title、rows、categories、series、legend、labels、numFmt、xTitle、yTitle，或整個 chart',
         run: async function (args, ctx) {
           ctx.api.snapshot();
           return { note: ctx.api.setObject(Number(args.index) - 1, Number(args.object) - 1, args) };
@@ -354,6 +401,32 @@
         run: async function (args, ctx) {
           ctx.api.snapshot();
           return { note: ctx.api.setTableStyle(Number(args.index) - 1, Number(args.object) - 1, args) };
+        }
+      },
+      tableToChart: {
+        args: '{index, object, type:"column"|"bar"|"line"|"area"|"pie"|"doughnut"|"scatter"|"stackedColumn"|"stackedBar"|"stackedArea", title}',
+        desc: '把第 index 頁的第 object 個表格換成同樣位置的圖表（object 省略就是選到的表格，或那頁最後一個表格）',
+        run: async function (args, ctx) {
+          ctx.api.snapshot();
+          return { note: ctx.api.tableToChart(args.index === undefined ? null : Number(args.index) - 1,
+            args.object === undefined ? null : Number(args.object) - 1, args) };
+        }
+      },
+      chartToTable: {
+        args: '{index, object}',
+        desc: '把第 index 頁的第 object 個圖表換成同樣位置的表格（object 省略就是選到的圖表，或那頁最後一個圖表）',
+        run: async function (args, ctx) {
+          ctx.api.snapshot();
+          return { note: ctx.api.chartToTable(args.index === undefined ? null : Number(args.index) - 1,
+            args.object === undefined ? null : Number(args.object) - 1) };
+        }
+      },
+      chartToApp: {
+        args: '{index, object, app:"docs"|"sheets"}',
+        desc: '把第 index 頁的第 object 個圖表插入到文件或試算表（這份簡報本身不會變）',
+        run: async function (args, ctx) {
+          return { note: await ctx.api.chartToApp(args.index === undefined ? null : Number(args.index) - 1,
+            args.object === undefined ? null : Number(args.object) - 1, args.app) };
         }
       },
       present: {
@@ -470,8 +543,12 @@
       var btnImage = button('\u25a3 圖片', null, '從沙箱選一張圖，或從電腦匯入');
       var btnShape = button('\u25c6 圖案', null, '從圖庫選一個圖案');
       var btnBox = button('\u25ad 文字方塊', null, '在投影片上放一個可以自由擺放的文字方塊');
+      /* 圖表 sits at the end of the insert group because it is the one insert
+         that asks a question first: the panel wants the numbers before there is
+         anything to place. */
+      var btnChart = button('\u25d4 圖表', null, '插入一張圖表：先填資料，再挑類型');
       var objBar = el('span', 'sl-objbar');
-      [insTag, btnTable, btnImage, btnShape, btnBox, objBar].forEach(function (n) { bar2.appendChild(n); });
+      [insTag, btnTable, btnImage, btnShape, btnBox, btnChart, objBar].forEach(function (n) { bar2.appendChild(n); });
       ctx.body.appendChild(bar2);
 
       var split = el('div', 'sl-split');
@@ -526,6 +603,11 @@
 
       var VJUST = { top: 'flex-start', middle: 'center', bottom: 'flex-end' };
       var HJUST = { left: 'flex-start', center: 'center', right: 'flex-end' };
+      /* The same two axes for a chart, as preserveAspectRatio: where the drawing
+         sits in its box while the two disagree in shape, which is only during a
+         resize, before the drawing is made again. */
+      var XFIT = { left: 'xMin', center: 'xMid', right: 'xMax' };
+      var YFIT = { top: 'YMin', middle: 'YMid', bottom: 'YMax' };
 
       /**
        * A slide as DOM.
@@ -644,6 +726,7 @@
         if (o.kind === 'text') box.appendChild(buildTextObject(o, mode, s));
         else if (o.kind === 'shape') box.appendChild(buildShapeObject(o, mode, s));
         else if (o.kind === 'image') box.appendChild(buildImageObject(o, mode));
+        else if (o.kind === 'chart') box.appendChild(buildChartObject(o, mode));
         else box.appendChild(buildTableObject(o, mode, s));
 
         if (mode === 'edit') {
@@ -935,6 +1018,54 @@
           });
         }
         return tbl;
+      }
+
+      /**
+       * A chart object: the shared renderer's <svg>, in this object's box.
+       *
+       * The drawing is laid out in a viewBox 640 units wide and as tall as the
+       * box's own shape -- o.w percent of a 16:9 slide's width by o.h percent
+       * of its height -- and fills the box at 100% both ways. So one drawing
+       * serves the stage, the thumbnail, the projection and both exports, and
+       * a resize needs no rebuild until the gesture ends. Type is o.size
+       * points on a 540pt slide: the box is o.h / 100 * 540 points tall and VH
+       * units tall, so one point is VH / (o.h * PT_PER_CQH) units. The ink is
+       * the slide's own colour and the series colours the slide's variables,
+       * unless the chart has a fill of its own -- then both are chosen against
+       * that fill, inline, so the choice travels into the exports with it.
+       */
+      function buildChartObject(o, mode) {
+        var VH = Math.round(640 * (o.h * 9) / (o.w * 16));
+        var svg = AIOS.charts.render(o.chart, {
+          width: 640,
+          height: VH,
+          font: AIOS.fonts.cssFor(deckFont),
+          fontSize: o.size * VH / (o.h * PT_PER_CQH),
+          surface: o.fill ? '#' + o.fill : '',
+          preserve: XFIT[o.align] + YFIT[o.valign] + ' meet'
+        });
+        if (o.fill || o.colour) svg.style.color = inkFor(o, o.fill);
+        if (o.fill) {
+          var steps = AIOS.charts.luminanceOf(o.fill) > 0.184
+            ? AIOS.charts.COLOURS : AIOS.charts.COLOURS_DARK;
+          steps.forEach(function (hex, k) {
+            svg.style.setProperty('--ch-' + (k + 1), '#' + hex);
+          });
+        }
+        return svg;
+      }
+
+      /**
+       * Draw a chart object again in place, once its box has changed shape.
+       *
+       * The viewBox follows the box, so a resize leaves the drawing with its
+       * old proportions until it is made again. One node is replaced, never the
+       * slide: a full render mid-gesture would hand the pointer a detached
+       * element, and this runs when the gesture ends.
+       */
+      function refreshChart(o, boxEl) {
+        var old = boxEl ? boxEl.querySelector(':scope > svg') : null;
+        if (old) boxEl.replaceChild(buildChartObject(o, 'edit'), old);
       }
 
       /* ------------------------------------------------- table cell range ---
@@ -1276,6 +1407,9 @@
         cur = at;
         var kind = KINDS[spec && spec.kind] ? spec.kind : 'text';
         if (objects().length >= 40) throw new Error('一頁最多 40 個物件');
+        // A chart's fields are checked the way addChart checks them, so the two
+        // ways of asking for one refuse the same bad names.
+        if (kind === 'chart') spec = Object.assign({}, spec, { chart: chartFromArgs(spec).spec });
 
         var o = normObject(Object.assign({}, spec, { kind: kind }, placeFor(kind, spec)));
         objects().push(o);
@@ -1318,6 +1452,12 @@
       function patchObject(o, spec) {
         var merged = Object.assign({}, o, spec, { id: o.id, kind: o.kind });
         if (spec.data !== undefined && o.kind === 'table') merged.rows = spec.data;
+        /* A chart's fields are merged into its spec rather than onto the object,
+           and checked the way addChart checks them -- only when one was given,
+           so a plain move never re-reads a chart it was not asked about. */
+        if (o.kind === 'chart' && CHART_KEYS.some(function (k) { return spec[k] !== undefined; })) {
+          merged.chart = chartFromArgs(spec, o.chart).spec;
+        }
         var next = normObject(merged);
         Object.keys(o).forEach(function (k) { delete o[k]; });
         Object.assign(o, next);
@@ -1401,6 +1541,222 @@
         markDirty();
         render();
         return '刪掉第 ' + (i + 1) + ' 頁的第 ' + (j + 1) + ' 個物件';
+      }
+
+      /* ---------------------------------------------------- chart edits */
+
+      /* The keys a conversation may use to say what a chart holds. Any one of
+         them on a chart object means "change the chart", which is how setObject
+         tells a chart edit from a plain move. */
+      var CHART_KEYS = ['chart', 'type', 'title', 'rows', 'categories', 'series', 'seriesIn',
+        'headerRow', 'headerCol', 'omitTotals', 'legend', 'labels', 'numFmt', 'xTitle', 'yTitle'];
+
+      /**
+       * A chart spec out of what a conversation hands over, checked.
+       *
+       * `chart` is a whole spec, `rows` a table read the way the editor's panel
+       * reads one (heading row first), else categories + series -- the same
+       * three shapes the document takes, so one vocabulary travels. A type
+       * name or a series colour nobody has is refused rather than read as
+       * 直條圖 and grey: a model told it succeeded has no way to find out. More
+       * series than a chart holds is refused too, unless it is a stack, which
+       * folds the rest into 其他 and says so.
+       *
+       * Returns { spec, said }: `said` is what the caller should pass on.
+       */
+      function chartFromArgs(s, base) {
+        var raw = Object.assign({}, base || {}, s.chart && typeof s.chart === 'object' ? s.chart : {});
+        var said = [];
+        if (Array.isArray(s.rows)) {
+          var got = AIOS.charts.fromRows(s.rows, {
+            seriesIn: s.seriesIn, headerRow: s.headerRow, headerCol: s.headerCol, omitTotals: s.omitTotals
+          });
+          if (!got.series.length) {
+            throw new Error('rows 裡沒有可以畫的數字：第一列放數列名稱，第一欄放類別，其餘的格子放數字');
+          }
+          raw.categories = got.categories;
+          raw.series = got.series;
+          if (!raw.title && got.titleHint) raw.title = got.titleHint;
+          if (!raw.xTitle && got.corner) raw.xTitle = got.corner;
+          if (!raw.numFmt && got.numFmtHint) raw.numFmt = got.numFmtHint;
+          if (got.omitted.length) said.push('略過 ' + got.omitted.join('、'));
+          if (got.skipped.length) said.push('沒有數字：' + got.skipped.join('、'));
+        }
+        /* After the table rather than instead of it, the way the document reads
+           the same arguments: a caller that sends both meant the explicit lists,
+           and a series named here is still checked rather than quietly dropped. */
+        if (Array.isArray(s.categories)) raw.categories = s.categories;
+        if (Array.isArray(s.series)) raw.series = s.series;
+        if (s.type !== undefined) raw.type = AIOS.charts.requireType(s.type);
+        if (s.legend !== undefined) {
+          if (AIOS.charts.LEGENDS.indexOf(s.legend) < 0) throw new Error('legend 要是 bottom、right 或 none');
+          raw.legend = s.legend;
+        }
+        ['title', 'labels', 'numFmt', 'xTitle', 'yTitle'].forEach(function (k) {
+          if (s[k] !== undefined) raw[k] = s[k];
+        });
+        if (Array.isArray(raw.series)) {
+          raw.series = raw.series.map(function (ser) {
+            if (!ser || typeof ser !== 'object' || !ser.colour) return ser;
+            return Object.assign({}, ser, { colour: AIOS.charts.requireColour(ser.colour, '數列顏色') });
+          });
+        }
+        var over = AIOS.charts.overflow(raw);
+        if (over.dropped) {
+          throw new Error('最多 ' + AIOS.charts.MAX_SERIES + ' 個數列，收到 ' +
+            (AIOS.charts.MAX_SERIES + over.extra) + '；改用 seriesIn:"rows"、改成堆疊圖，或減少數列');
+        }
+        if (over.folded) said.push('後 ' + over.folded + ' 個數列併成「其他」');
+        return { spec: AIOS.charts.norm(raw), said: said };
+      }
+
+      /**
+       * The box a new chart gets: what was asked for; else the shape another
+       * program handed over -- 84% of the width, no taller than 70% of the
+       * height, centred; else the default box and the usual stagger.
+       */
+      function chartGeometry(s) {
+        var g = { x: s.x, y: s.y, w: s.w, h: s.h };
+        var aspect = Number(s.aspect);
+        if (aspect > 0 && s.w === undefined && s.h === undefined) {
+          // A percentage of width and one of height are different distances on
+          // a 16:9 slide, so the ratio is scaled by 16/9 -- as insertImage does.
+          var w = 84;
+          var h = w * 16 / (9 * aspect);
+          if (h > 70) { h = 70; w = h * 9 * aspect / 16; }
+          g.w = Math.round(w * 10) / 10;
+          g.h = Math.round(h * 10) / 10;
+          if (g.x === undefined) g.x = Math.round((100 - g.w) / 2);
+          if (g.y === undefined) g.y = Math.round((100 - g.h) / 2);
+        }
+        return g;
+      }
+
+      /**
+       * A chart on a slide, the way a conversation asks for one.
+       *
+       * With newSlide a blank page goes in after the one named, titled with the
+       * chart's title, and the chart lands there: what another program's
+       * 插入到簡報 asks for, and what "a slide with this chart" means.
+       */
+      function addChart(i, spec) {
+        var s = spec || {};
+        var at = i === null || i === undefined ? cur : i;
+        if (!deck.slides[at]) throw new Error('沒有第 ' + (at + 1) + ' 頁（共 ' + deck.slides.length + ' 頁）');
+        var made = chartFromArgs(s);
+        if (!made.spec.series.length) {
+          throw new Error('要給 rows（二維陣列，第一列是數列名稱、第一欄是類別）或 categories + series');
+        }
+        if (s.newSlide === true || s.newSlide === 'true') {
+          addSlide(at + 1, { layout: 'blank', title: made.spec.title });
+          at += 1;
+        }
+        var note = addObject(at, Object.assign({ kind: 'chart', chart: made.spec }, chartGeometry(s)));
+        return note + '：' + AIOS.charts.describe(made.spec) +
+               (made.said.length ? '（' + made.said.join('；') + '）' : '');
+      }
+
+      /**
+       * The object a chart command means: the one numbered; else the selected
+       * one, when it is of that kind; else the last of that kind on the slide.
+       */
+      function pickObject(i, j, kind) {
+        if (!deck.slides[i]) throw new Error('沒有第 ' + (i + 1) + ' 頁');
+        if (j !== null && j !== undefined) return objectAt(i, j);
+        var sel = i === cur ? selected() : null;
+        if (sel && sel.kind === kind) return sel;
+        var last = objects(i).filter(function (o) { return o.kind === kind; }).pop();
+        if (!last) throw new Error('第 ' + (i + 1) + ' 頁沒有' + KINDS[kind]);
+        return last;
+      }
+
+      /** One object becomes another kind in the same place, keeping its identity and its box. */
+      function swapObject(i, o, spec) {
+        var list = objects(i);
+        var at = list.indexOf(o);
+        if (at < 0) throw new Error('物件不在第 ' + (i + 1) + ' 頁');
+        var next = normObject(Object.assign({}, spec, { id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }));
+        list.splice(at, 1, next);
+        // A cell range marked on a table that is no longer one names nothing.
+        if (cellSel && cellSel.id === o.id) cellSel = null;
+        cur = i;
+        selId = next.id;
+        markDirty();
+        render();
+        return next;
+      }
+
+      /**
+       * A table object's rows as a chart spec.
+       *
+       * Read by the shared reader, so what it makes of a heading row, a
+       * category column or a 合計 line is what the document and the spreadsheet
+       * make of them. A covered cell of a merged region reads as its master's
+       * text: a heading merged over three columns names all three, where a
+       * blank would make them 數列 2 and 數列 3. A table whose first row is
+       * styled as a heading is read as one; otherwise the cells decide.
+       */
+      function tableToChartSpec(o, extra) {
+        var mm = AIOS.grid.map(o.merges);
+        var rows = o.rows.map(function (row, r) {
+          return row.map(function (cell, c) {
+            var under = mm.coveredBy[AIOS.grid.key(c, r)];
+            return under ? o.rows[under.r][under.c] : cell;
+          });
+        });
+        var got = AIOS.charts.fromRows(rows, { headerRow: o.header ? true : undefined });
+        if (!got.series.length) throw new Error('表格裡沒有可以畫的數字');
+        var raw = Object.assign({
+          type: 'column', title: got.titleHint, xTitle: got.corner, numFmt: got.numFmtHint
+        }, extra || {}, { categories: got.categories, series: got.series });
+        var said = [];
+        if (got.omitted.length) said.push('略過 ' + got.omitted.join('、'));
+        if (got.skipped.length) said.push('沒有數字：' + got.skipped.join('、'));
+        var over = AIOS.charts.overflow(raw);
+        if (over.dropped) said.push('只畫前 ' + AIOS.charts.MAX_SERIES + ' 個數列');
+        if (over.folded) said.push('後 ' + over.folded + ' 個數列併成「其他」');
+        return { spec: AIOS.charts.norm(raw), said: said };
+      }
+
+      function tableToChart(i, j, spec) {
+        var s = spec || {};
+        var at = i === null || i === undefined ? cur : i;
+        var o = pickObject(at, j, 'table');
+        if (o.kind !== 'table') throw new Error('第 ' + (j + 1) + ' 個物件不是表格');
+        var extra = {};
+        if (s.type !== undefined) extra.type = AIOS.charts.requireType(s.type);
+        if (s.title !== undefined) extra.title = String(s.title);
+        var made = tableToChartSpec(o, extra);
+        var next = swapObject(at, o, { kind: 'chart', chart: made.spec });
+        return '第 ' + (at + 1) + ' 頁的第 ' + (objects(at).indexOf(next) + 1) + ' 個物件從表格變成圖表：' +
+               AIOS.charts.describe(next.chart) + (made.said.length ? '（' + made.said.join('；') + '）' : '');
+      }
+
+      function chartToTable(i, j) {
+        var at = i === null || i === undefined ? cur : i;
+        var o = pickObject(at, j, 'chart');
+        if (o.kind !== 'chart') throw new Error('第 ' + (j + 1) + ' 個物件不是圖表');
+        var rows = AIOS.charts.toRows(o.chart);
+        var lost = rows.length > MAX_TABLE_ROWS || rows[0].length > MAX_TABLE_COLS;
+        var next = swapObject(at, o, { kind: 'table', rows: rows, header: true });
+        return '第 ' + (at + 1) + ' 頁的第 ' + (objects(at).indexOf(next) + 1) + ' 個物件從圖表變成表格（' +
+               next.rows[0].length + ' 欄 × ' + next.rows.length + ' 列）' +
+               (lost ? '；表格最多 ' + MAX_TABLE_COLS + ' 欄 ' + MAX_TABLE_ROWS + ' 列，多出來的沒放進去' : '');
+      }
+
+      /** Hand a chart to the document or the spreadsheet, through their own insert action. */
+      async function chartToApp(i, j, app) {
+        var at = i === null || i === undefined ? cur : i;
+        var o = pickObject(at, j, 'chart');
+        if (o.kind !== 'chart') throw new Error('第 ' + (j + 1) + ' 個物件不是圖表');
+        var id = String(app || '').trim().toLowerCase();
+        id = { '文件': 'docs', '試算表': 'sheets' }[id] || id;
+        if (id === 'slides' || !AIOS.charts.APP_NAMES[id]) throw new Error('app 要是 docs（文件）或 sheets（試算表）');
+        var out = await AIOS.charts.sendTo(id, o.chart, { aspect: (o.w * 16) / (o.h * 9) });
+        // Worded as the document's chartToApp words it: where it came from, then
+        // whatever the other program said about where it landed.
+        return '第 ' + (at + 1) + ' 頁的圖表已插入到' + AIOS.charts.APP_NAMES[id] +
+               (out && out.note ? '：' + out.note : '');
       }
 
       function duplicateSelected() {
@@ -1584,6 +1940,8 @@
           canvas.removeEventListener('pointerup', up);
           canvas.removeEventListener('pointercancel', up);
           if (pushed) {
+            // A chart's drawing follows its box, so a resized one is drawn again.
+            if (o.kind === 'chart') refreshChart(o, boxEl);
             markDirty();
             renderThumb(cur);
             syncBars();
@@ -1626,8 +1984,15 @@
         if ((e.ctrlKey || e.metaKey) && (lower === 'y' || (lower === 'z' && e.shiftKey))) {
           e.preventDefault(); redo(); return;
         }
+        /* A chart travels between the three programs on the clipboard. Paste
+           needs no selection: it lands on the slide. */
+        if ((e.ctrlKey || e.metaKey) && lower === 'v') { pasteChart(); return; }
         if (!selId) return;
 
+        var picked = selected();
+        if ((e.ctrlKey || e.metaKey) && lower === 'c' && picked && picked.kind === 'chart') {
+          e.preventDefault(); copyChart(picked); return;
+        }
         if ((e.ctrlKey || e.metaKey) && lower === 'd') { e.preventDefault(); duplicateSelected(); return; }
         if ((e.ctrlKey || e.metaKey) && e.key === ']') { e.preventDefault(); layerSelected(1); return; }
         if ((e.ctrlKey || e.metaKey) && e.key === '[') { e.preventDefault(); layerSelected(-1); return; }
@@ -1840,12 +2205,16 @@
           }
 
           if (o.kind !== 'image') {
-            p.appendChild(el('div', 'ui-pop-sub', o.kind === 'table' ? '標題列底色' : '填色'));
+            p.appendChild(el('div', 'ui-pop-sub',
+              o.kind === 'table' ? '標題列底色' : o.kind === 'chart' ? '底色' : '填色'));
             p.appendChild(swatchRow(o.fill, function (hex) { change(function () { o.fill = hex; }); }));
           }
 
-          p.appendChild(el('div', 'ui-pop-sub', o.kind === 'table' ? '框線顏色' : '線條顏色'));
-          p.appendChild(swatchRow(o.stroke, function (hex) { change(function () { o.stroke = hex; }); }));
+          // A chart has no line of its own to colour.
+          if (o.kind !== 'chart') {
+            p.appendChild(el('div', 'ui-pop-sub', o.kind === 'table' ? '框線顏色' : '線條顏色'));
+            p.appendChild(swatchRow(o.stroke, function (hex) { change(function () { o.stroke = hex; }); }));
+          }
 
           if (o.kind !== 'image') {
             p.appendChild(el('div', 'ui-pop-sub', '文字顏色'));
@@ -1871,8 +2240,10 @@
              Alignment used to live in the same unlabelled run of controls as the
              type size, and the vertical half was skipped for tables and the whole
              pair for pictures -- so the panel looked like it only did horizontal. */
+          /* A chart has no text of its own to align: the same pair decides where
+             the drawing sits while its box and its viewBox disagree in shape. */
           p.appendChild(el('div', 'ui-pop-sub',
-            o.kind === 'image' ? '圖片在框裡的位置' : '文字對齊'));
+            o.kind === 'image' ? '圖片在框裡的位置' : o.kind === 'chart' ? '圖表在框裡的位置' : '文字對齊'));
           var aligns = el('div', 'ui-pop-row');
           aligns.appendChild(picker('水平對齊', ALIGNS, o.align, function (v) { o.align = v; }));
           aligns.appendChild(picker('垂直對齊', VALIGNS, o.valign, function (v) { o.valign = v; }));
@@ -1899,7 +2270,10 @@
               change(function () { o.size = span(sizeSel.value, o.size, 6, 200); });
             });
             row.appendChild(sizeSel);
+          }
 
+          // A chart's text is the renderer's; it has no bold or italic to offer.
+          if (o.kind !== 'image' && o.kind !== 'chart') {
             var bold = button('B', o.bold ? 'on' : null, '粗體');
             bold.style.fontWeight = '700';
             bold.addEventListener('click', function () { change(function () { o.bold = !o.bold; }); });
@@ -1934,6 +2308,27 @@
               closePop();
             });
             row.appendChild(alt);
+          }
+
+          if (o.kind === 'chart') {
+            row.appendChild(picker('圖表類型',
+              AIOS.charts.TYPES.map(function (t) { return { id: t.id, name: t.name }; }),
+              o.chart.type, function (v) { o.chart.type = v; }));
+            row.appendChild(picker('圖例', [
+              { id: 'bottom', name: '圖例在下方' }, { id: 'right', name: '圖例在右側' }, { id: 'none', name: '不顯示圖例' }
+            ], o.chart.legend, function (v) { o.chart.legend = v; }));
+            /* A checkbox rather than a toggle button: it is the control the
+               chart editor shows for the same field, under the same name. */
+            var labelWrap = el('label', 'ui-pop-check');
+            var labelBox = el('input');
+            labelBox.type = 'checkbox';
+            labelBox.checked = !!o.chart.labels;
+            labelBox.addEventListener('change', function () {
+              change(function () { o.chart.labels = labelBox.checked; });
+            });
+            labelWrap.appendChild(labelBox);
+            labelWrap.appendChild(el('span', null, '資料標籤'));
+            row.appendChild(labelWrap);
           }
 
           if (o.kind === 'table') {
@@ -2053,6 +2448,17 @@
           var swap = button('換圖…');
           swap.addEventListener('click', function () { insertImage(); });
           objBar.appendChild(swap);
+        }
+        if (o.kind === 'chart') {
+          var chartBtn = button('編輯圖表…', null, '類型、標題、資料、圖例、數字格式、座標軸標題');
+          chartBtn.addEventListener('click', function () { chartPopover(chartBtn, o); });
+          objBar.appendChild(chartBtn);
+          var dataBtn = button('檢視資料', null, '看這張圖表畫的是哪些數字');
+          dataBtn.addEventListener('click', function () { chartDataPopover(dataBtn, o); });
+          objBar.appendChild(dataBtn);
+          var tableBtn = button('轉成表格', null, '換成一張放在同樣位置的表格');
+          tableBtn.addEventListener('click', function () { chartToTableUI(o); });
+          objBar.appendChild(tableBtn);
         }
 
         var up = button('\u2b71', null, '上移一層 (Ctrl+])');
@@ -2185,8 +2591,137 @@
           { label: o.banded ? '取消交錯底色' : '交錯底色', run: function () {
             tableOp(o, null, function () { o.banded = !o.banded; });
           } },
+          { sep: true },
+          // The same verb the document's table offers, worded the same.
+          { label: '轉成圖表', run: function () { tableToChartUI(o); } },
           { sep: true }
         ].filter(Boolean);
+      }
+
+      /* ------------------------------------------------------ chart panels */
+
+      /* What the editor opens with when there is no chart yet: a table small
+         enough to read as an example and complete enough to draw. */
+      var STARTER_CHART = {
+        type: 'column', xTitle: '月份',
+        categories: ['1月', '2月', '3月'],
+        series: [{ name: '收入', values: [120, 95, 140] }, { name: '支出', values: [80, 110, 90] }]
+      };
+
+      /**
+       * The shared chart editor, in a popover.
+       *
+       * One panel inserts and edits: with an object it rewrites that object's
+       * chart, without one it adds a chart to this slide. Data mode, because a
+       * slide's chart keeps its numbers inside the deck -- there is no sheet to
+       * point a range at. What the panel noticed about the table (a 合計 it
+       * left out, a column with no numbers) is said out loud: a chart that
+       * quietly lost a column looks complete.
+       */
+      function chartPopover(anchor, o) {
+        popover(anchor || fmtBtn || bar2, function (p, close) {
+          popLabel(p, o ? '編輯圖表' : '插入圖表');
+          AIOS.charts.panel(p, {
+            spec: o ? o.chart : STARTER_CHART,
+            mode: 'data',
+            onApply: function (spec, extras) {
+              close();
+              try {
+                edit(function () {
+                  if (o) o.chart = spec;
+                  else addObject(cur, { kind: 'chart', chart: spec });
+                });
+              } catch (e) { ctx.toast(e.message, 't-warn'); return; }
+              var got = extras && extras.table;
+              var said = [];
+              if (got && got.omitted.length) said.push('略過 ' + got.omitted.join('、'));
+              if (got && got.skipped.length) said.push('沒有數字：' + got.skipped.join('、'));
+              ctx.toast((o ? '已更新圖表' : '已插入圖表') + (said.length ? '；' + said.join('；') : ''),
+                said.length ? 't-warn' : 't-ok');
+            },
+            onCancel: close
+          });
+        }, 'ui-pop-chart');
+      }
+
+      /** The numbers behind a chart, shown without changing anything. */
+      function chartDataPopover(anchor, o) {
+        popover(anchor || fmtBtn || bar2, function (p) {
+          popLabel(p, '圖表資料');
+          p.appendChild(el('div', 'ui-pop-count', AIOS.charts.describe(o.chart)));
+          p.appendChild(AIOS.charts.tableNode(o.chart));
+          var row = el('div', 'ui-pop-row');
+          var copyBtn = button('複製圖表', null, '複製這張圖表 (Ctrl+C)：可以貼到文件、試算表或另一份簡報');
+          copyBtn.addEventListener('click', function () { closePop(); copyChart(o); });
+          row.appendChild(copyBtn);
+          p.appendChild(row);
+        }, 'ui-pop-chart');
+      }
+
+      /**
+       * The clipboard, for charts.
+       *
+       * The rich copy lives in the shared module and its text twin -- the
+       * numbers, tab-separated -- goes to the system clipboard: a paste into
+       * any other program gets a table, a paste into one of ours gets the
+       * chart back whole. The two are matched by the text, so a copy made
+       * elsewhere in between is never mistaken for the chart.
+       */
+      function copyChart(o) {
+        AIOS.charts.copy(o.chart).then(function () {
+          ctx.toast('已複製圖表，可以貼到文件、試算表或另一份簡報', 't-ok');
+        }, function (e) {
+          ctx.toast('複製失敗：' + (e && e.message ? e.message : e), 't-err');
+        });
+      }
+
+      function pasteChart() {
+        A.clipboard.read().then(function (r) {
+          var text = r && r.ok && r.data ? String(r.data.text || '') : '';
+          if (!AIOS.charts.pasteMatches(text)) return;
+          try {
+            edit(function () { addObject(cur, { kind: 'chart', chart: AIOS.charts.clipSpec() }); });
+            ctx.toast('已貼上圖表', 't-ok');
+          } catch (e) { ctx.toast(e.message, 't-warn'); }
+        });
+      }
+
+      /* 轉成圖表 and 轉成表格 from the toolbar and the menu: the same conversions
+         the chat actions do, as one undo step each, with the outcome said. */
+      function tableToChartUI(o) {
+        var note;
+        try {
+          note = edit(function () { return tableToChart(cur, objects().indexOf(o)); });
+        } catch (e) { ctx.toast(e.message, 't-warn'); return; }
+        ctx.toast(note, 't-ok');
+      }
+
+      function chartToTableUI(o) {
+        var note;
+        try {
+          note = edit(function () { return chartToTable(cur, objects().indexOf(o)); });
+        } catch (e) { ctx.toast(e.message, 't-warn'); return; }
+        ctx.toast(note, 't-ok');
+      }
+
+      /**
+       * The chart half of the right-click menu.
+       *
+       * Empty for anything that is not a chart, so the caller concatenates it
+       * without asking, the way it does the table's. The panels open at the
+       * object that was clicked, which is where the eyes are.
+       */
+      function chartMenu(o, ev) {
+        if (o.kind !== 'chart') return [];
+        var at = ev && ev.target && ev.target.closest ? ev.target.closest('.sl-obj') : null;
+        return [
+          { label: '編輯圖表…', run: function () { chartPopover(at, o); } },
+          { label: '檢視資料', run: function () { chartDataPopover(at, o); } },
+          { label: '轉成表格', run: function () { chartToTableUI(o); } },
+          { label: '複製圖表', hint: 'Ctrl+C', run: function () { copyChart(o); } }
+        ].concat(AIOS.charts.sendMenuItems(function () { return o.chart; }, 'slides', ctx.toast,
+          function () { return { aspect: (o.w * 16) / (o.h * 9) }; }))
+         .concat([{ sep: true }]);
       }
 
       /* -------------------------------------------------------- presenting */
@@ -2311,6 +2846,12 @@
           '  container-type: size; flex-direction: column;',
           '  overflow: hidden; color: ' + ink + '; }',
           (print ? '.sl-canvas { display: flex; }' : ''),
+          /* The eight chart series colours, re-stepped for a dark surface the
+             way os.css does under a dark theme. The drawing names them as
+             var(--ch-N, light-hex) and the print flavour leaves them unset, so
+             the PDF paints the steps that were validated on white. */
+          (print ? '' : '.sl-canvas { --ch-1: #3987E5; --ch-2: #D95926; --ch-3: #199E70; --ch-4: #C98500;' +
+            ' --ch-5: #D55181; --ch-6: #008300; --ch-7: #9085E9; --ch-8: #E66767; }'),
           '.sl-flow { flex: 1; min-height: 0; padding: 6% 7%;',
           '  display: flex; flex-direction: column; gap: 4%; }',
           '.sl-title { font-size: calc(6.6cqh * var(--sl-k, 1)); font-weight: 600;',
@@ -2371,6 +2912,25 @@
               // A real Markdown table, so the export is readable rather than a
               // description of a table.
               obj.rows.forEach(function (row, r) {
+                out.push('| ' + row.map(function (c) {
+                  return String(c).replace(/\|/g, '\\|');
+                }).join(' | ') + ' |');
+                if (r === 0) out.push('| ' + row.map(function () { return '---'; }).join(' | ') + ' |');
+              });
+            } else if (obj.kind === 'chart') {
+              /* The pair office.js writes for a document: a comment naming what
+                 the table was drawn as, then the numbers as a table every
+                 renderer shows and the reader turns back into a chart. */
+              var spec = AIOS.charts.norm(obj.chart);
+              var meta = {
+                type: spec.type, title: spec.title, legend: spec.legend, labels: spec.labels,
+                numFmt: spec.numFmt, xTitle: spec.xTitle, yTitle: spec.yTitle,
+                colours: spec.series.map(function (ser) { return ser.colour || ''; }),
+                aspect: Math.round((obj.w * 16) / (obj.h * 9) * 100) / 100
+              };
+              // A comment ends at the first `-->`, so the JSON may hold no double dash.
+              out.push('<!-- chart ' + JSON.stringify(meta).replace(/--/g, '-\\u002d') + ' -->');
+              AIOS.charts.toRows(spec).forEach(function (row, r) {
                 out.push('| ' + row.map(function (c) {
                   return String(c).replace(/\|/g, '\\|');
                 }).join(' | ') + ' |');
@@ -2464,11 +3024,12 @@
           throw new Error(why);
         }
 
-        /* Version 3 adds the object layer. Pictures are stored as sandbox paths
-           rather than bytes, so the deck file stays small and a picture edited on
-           disk shows through; the HTML export is where images get inlined. */
+        /* Version 3 added the object layer, version 5 chart objects. Pictures
+           are stored as sandbox paths rather than bytes, so the deck file stays
+           small and a picture edited on disk shows through; the HTML export is
+           where images get inlined. A chart is its data: nothing to fetch. */
         var payload = {
-          kind: 'aiosdeck', version: 4, title: deck.title,
+          kind: 'aiosdeck', version: 5, title: deck.title,
           font: deckFont, scale: deckScale,
           slides: deck.slides
         };
@@ -2510,7 +3071,8 @@
           var pptxTarget = explicitTarget || (base + '.pptx');
           /* The writer lives in main and takes pictures as data: URIs only, so
              the sandbox paths are resolved here -- the process that owns the
-             sandbox should not be following paths it found inside a document. */
+             sandbox should not be following paths it found inside a document.
+             A chart travels as its spec; the writer draws it as a native chart. */
           var payload = {
             title: deck.title, font: deckFont, scale: deckScale,
             slides: deck.slides.map(function (s) {
@@ -2629,6 +3191,7 @@
       btnBox.addEventListener('click', function () {
         edit(function () { addObject(cur, { kind: 'text', text: '' }); });
       });
+      btnChart.addEventListener('click', function () { chartPopover(btnChart, null); });
 
       btnPlay.addEventListener('click', function () { present(cur); });
       btnSave.addEventListener('click', function () { save(); });
@@ -2650,6 +3213,7 @@
                    : o.kind === 'image' ? (o.src || '（沒有圖）')
                    : o.kind === 'shape' ? (SHAPES[o.shape] || SHAPES.rect).name +
                                           (o.text ? '「' + o.text + '」' : '')
+                   : o.kind === 'chart' ? AIOS.charts.describe(o.chart)
                    : '「' + String(o.text || '').slice(0, 40) + '」';
         return '      物件 ' + n + '. ' + what + ' ' + detail +
                '　位置 ' + Math.round(o.x) + '%,' + Math.round(o.y) + '%' +
@@ -2676,6 +3240,8 @@
           '可用圖案：' + Object.keys(SHAPES).map(function (k) { return k + '(' + SHAPES[k].name + ')'; }).join('、'),
           '可用顏色名稱：' + AIOS.palette.fills.map(function (c) { return c.name; }).join('、') +
             '（也可以直接給 #RRGGBB）',
+          '可用圖表類型：' + AIOS.charts.TYPES.map(function (t) { return t.id + '(' + t.name + ')'; }).join('、') +
+            '（addChart 給 rows 或 categories + series；newSlide:true 會另起一頁放）',
           '頁面內容（編號就是 setSlide / addObject 的 index，物件編號就是 object）：',
           deck.slides.map(function (s, i) {
             var lines = ['  ' + (i + 1) + '. [' + s.layout + '] ' + (s.title || '（無標題）'),
@@ -2702,7 +3268,7 @@
           if (o) {
             if (selId !== o.id) selectObject(o.id);
             var list = objects();
-            head = tableMenu(o, ev).concat([
+            head = tableMenu(o, ev).concat(chartMenu(o, ev)).concat([
               { label: KINDS[o.kind] + '（第 ' + (list.indexOf(o) + 1) + ' 個物件）', disabled: true },
               { label: '格式…', run: function () { formatPopover(); } },
               { label: '上移一層', hint: 'Ctrl+]', run: function () { layerSelected(1); } },
@@ -2752,6 +3318,7 @@
           { label: '插入文字方塊', run: function () {
             edit(function () { addObject(cur, { kind: 'text', text: '' }); });
           } },
+          { label: '插入圖表…', run: function () { chartPopover(btnChart, null); } },
           { sep: true },
           { label: '放映', run: function () { present(cur); } },
           { label: '字型：' + deckFont + '　' + deckScale + '%', disabled: true },
@@ -2772,8 +3339,9 @@
       ctx.api = {
         setSlide: setSlide, addSlide: addSlide, deleteSlide: deleteSlide, moveSlide: moveSlide,
         buildDeck: buildDeck, present: present, save: save, saveAs: saveAs, exportAs: exportAs,
-        addObject: addObject, addTable: addTable, setObject: setObject, deleteObject: deleteObject,
-        setTableStyle: setTableStyle,
+        addObject: addObject, addTable: addTable, addChart: addChart, setObject: setObject,
+        deleteObject: deleteObject, setTableStyle: setTableStyle,
+        tableToChart: tableToChart, chartToTable: chartToTable, chartToApp: chartToApp,
         setFont: function (spec) {
           var s = spec || {};
           if (s.font) { deckFont = String(s.font).slice(0, 64); fontSel.value = deckFont; }

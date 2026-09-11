@@ -406,6 +406,18 @@
 :root[data-light] .ed-gutter { background: rgba(0, 0, 0, .04); }
 :root[data-light] .sh-style-scrim { background: rgba(0, 0, 0, .16); }
 
+/* Chart series colours. A chart draws its eight series slots as
+   var(--ch-N, light-hex): wherever nothing defines the variable -- a printed
+   page, the deck's PDF -- it paints the light palette that was validated on
+   white. A dark theme re-steps the same eight hues for a dark surface, and this
+   is the one place that says so; a light theme, built-in or custom, leaves the
+   variables unset and gets the light steps. The deck's dark .html export
+   carries its own copy of these eight values in its stylesheet. */
+:root:not([data-light]) {
+  --ch-1: #3987E5; --ch-2: #D95926; --ch-3: #199E70; --ch-4: #C98500;
+  --ch-5: #D55181; --ch-6: #008300; --ch-7: #9085E9; --ch-8: #E66767;
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 
@@ -2274,6 +2286,53 @@ body {
 }
 .ui-swatch-auto { background: var(--hair); }
 
+/* ---- charts --------------------------------------------------------------
+
+   The chart editor (AIOS.charts.panel) and the drawing itself, shared by the
+   three Office programs. The drawing carries every colour inline and only
+   needs a box to sit in; the editor is a popover wider than the others because
+   it holds a table of data and a grid of ten chart types.
+   -------------------------------------------------------------------------- */
+.ui-pop-chart { width: min(460px, calc(100% - 12px)); }
+.ui-chart { display: block; max-width: 100%; }
+.ui-chart-grid {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 4px;
+}
+.ui-chart-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 5px 2px 4px; border: 1px solid var(--hair-2); border-radius: 6px;
+  background: var(--hair); color: var(--fg-dim); font-family: var(--mono);
+  font-size: 9.5px; cursor: pointer;
+}
+.ui-chart-btn:hover { border-color: var(--accent); color: var(--fg); }
+.ui-chart-btn.on {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.ui-chart-data {
+  min-height: 120px; font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  white-space: pre; overflow: auto; resize: vertical;
+  scrollbar-width: thin; scrollbar-color: var(--hair-2) transparent;
+}
+.ui-chart-inline {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-dim);
+}
+.ui-chart-tri { width: auto; padding: 3px 4px; }
+.ui-chart-legend { width: auto; flex: 1; }
+.ui-chart-axes .ui-pop-field { flex: 1; width: auto; }
+.ui-chart-rangerow .ui-pop-field { flex: 1; width: auto; }
+/* The data behind a chart, shown without changing anything. */
+.ui-chart-table {
+  border-collapse: collapse; font-family: var(--mono); font-size: 10.5px;
+  margin-top: 6px; max-width: 100%;
+}
+.ui-chart-table th, .ui-chart-table td {
+  border: 1px solid var(--hair-2); padding: 2px 6px; text-align: right; white-space: nowrap;
+}
+.ui-chart-table th { background: var(--hair); color: var(--fg-faint); text-align: left; }
+.ui-chart-table td:first-child { text-align: left; }
+
 .fbtn-primary {
   background: var(--accent); border-color: var(--accent);
   color: var(--on-fill); font-weight: 600;
@@ -2871,6 +2930,30 @@ select optgroup {
 }
 .sh-editor:focus { outline: none; }
 
+/* Charts float over the grid, anchored to a cell and sized in pixels, in a
+   layer that scrolls with the table because it is a child of .sh-wrap like the
+   editor and the fill handle. z-index 0 keeps a positioned chart above the
+   cells and below the sticky headers and frozen panes (1-4), the fill handle
+   (9) and the editor (10): a chart scrolled under the column headings goes
+   under them, the way it does in Excel. The card paints its own background
+   so the gridlines do not show through the plot. */
+.sh-charts { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 0; }
+.sh-chart {
+  position: absolute; box-sizing: border-box;
+  background: var(--bg-1); color: var(--fg);
+  border: 1px solid var(--hair-2); border-radius: 6px;
+  padding: 6px; cursor: move; overflow: hidden;
+}
+.sh-chart.on { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+.sh-chart-grip {
+  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px;
+  background: var(--accent); border: 1px solid var(--bg-0); border-radius: 2px;
+  cursor: nwse-resize;
+}
+/* While the grid is dragging out a range, the layer must not catch the
+   pointer: elementFromPoint has to find the cells under it. */
+.sh-wrap.sh-dragging .sh-charts { pointer-events: none; }
+
 /* ###########################################################################
    Docs
    ######################################################################### */
@@ -2957,6 +3040,15 @@ li.dc-list.ordered { list-style: decimal; }
   border: 1px solid var(--hair-2); padding: 5px 9px; min-width: 70px;
 }
 .dc-table th { background: var(--hair); color: var(--fg-faint); font-size: 11px; }
+/* A chart block: the drawing at the text width, focusable like a page break so
+   the toolbar and the menus can say which block is current. Its ink is the
+   page's, so it reads on the dark page here and on the white one in print. */
+.dc-chart {
+  margin: 8px 0; padding: 4px; border-radius: 6px; color: inherit;
+  user-select: none; cursor: default; outline: none;
+}
+.dc-chart:focus { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+.dc-chart .ui-chart { width: 100%; height: auto; }
 
 /* ###########################################################################
    Slides

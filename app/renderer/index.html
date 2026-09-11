@@ -345,6 +345,10 @@
 <!-- The web-translation controls, before the browser that mounts them. The
      translating itself is in the main process; this is only the surface. -->
 <script src="translate.js"></script>
+<!-- The chart model and its SVG renderer, shared by the three Office
+     programs; it reads the formula engine and the palette when a chart is
+     drawn, not when it loads, so it sits with the other shared surfaces. -->
+<script src="charts.js"></script>
 <script src="apps/registry.js"></script>
 <script src="apps/chatpane.js"></script>
 <script src="apps/formula.js"></script>

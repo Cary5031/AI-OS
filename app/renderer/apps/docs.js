@@ -28,14 +28,15 @@
   }
 
   var BLOCK_LABELS = {
-    heading: '標題', para: '段落', list: '項目', quote: '引用', table: '表格', break: '分頁'
+    heading: '標題', para: '段落', list: '項目', quote: '引用', table: '表格', break: '分頁',
+    chart: '圖表'
   };
 
   /* Blocks that hold no text of their own. Every command that reaches into a
      block's characters has to skip these, and naming the set once is cheaper
-     than remembering to check for both in eight places. */
+     than remembering to check for each of them in eight places. */
   function isTextBlock(b) {
-    return !!b && b.type !== 'table' && b.type !== 'break';
+    return !!b && b.type !== 'table' && b.type !== 'break' && b.type !== 'chart';
   }
 
   /* Paragraph-level formatting. Kept apart from the run keys because these are
@@ -48,6 +49,35 @@
   ];
   var LINE_HEIGHTS = [['', '預設'], ['1', '單行'], ['1.15', '1.15'], ['1.5', '1.5'], ['2', '兩倍']];
   var INDENT_PT = 24;                    // one level on screen; 720 twips in docx
+
+  /* What a block hands on when another block takes its place -- Enter after a
+     centred line, a table redrawn as a chart: the geometry and the typeface
+     were the person's choice for that spot, not for that kind of block. */
+  var CARRY_KEYS = ['align', 'indent', 'lineHeight', 'spaceBefore', 'spaceAfter', 'font', 'size'];
+
+  /* A chart block's width over its height. The drawing spans the text width,
+     so the ratio is all a block needs to know about its height; bounded because
+     outside this band it is a hairline or a wall. */
+  var ASPECT_MIN = 1.2;
+  var ASPECT_MAX = 4;
+  var ASPECT_DEFAULT = 1.8;
+  function clampAspect(v) {
+    var n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) n = ASPECT_DEFAULT;
+    return Math.round(Math.max(ASPECT_MIN, Math.min(ASPECT_MAX, n)) * 100) / 100;
+  }
+
+  /* The fields a chart is made of, as a chat action names them. A setBlock
+     that mentions any of these on a chart block is editing the chart. */
+  var CHART_KEYS = ['chart', 'rows', 'categories', 'series', 'type', 'title',
+                    'legend', 'labels', 'numFmt', 'xTitle', 'yTitle'];
+
+  /* What 插入 → 圖表 opens with: a small table that already shows what the
+     first row and the first column mean, which reads faster than a blank one. */
+  var STARTER_CHART = {
+    type: 'column', xTitle: '月份', categories: ['1月', '2月', '3月'],
+    series: [{ name: '收入', values: [120, 95, 140] }, { name: '支出', values: [80, 110, 90] }]
+  };
 
   AIOS.apps.register({
     id: 'docs',
@@ -64,9 +94,10 @@
 
     actions: {
       setBlock: {
-        args: '{index, text, type, level, rows, merges}',
+        args: '{index, text, type, level, rows, merges, chart, aspect}',
         desc: '改寫第 index 個區塊（從 1 開始）。表格區塊可以給 rows（二維陣列）' +
-              '與 merges（合併區域，[{c0,r0,c1,r1}]，0 起算含端點）',
+              '與 merges（合併區域，[{c0,r0,c1,r1}]，0 起算含端點）；圖表區塊可以給 chart（整張圖表）' +
+              '與 aspect（寬高比 1.2–4），改圖表的個別欄位用 setChart',
         run: async function (args, ctx) {
           var i = Number(args.index) - 1;
           ctx.api.snapshot();
@@ -75,9 +106,10 @@
         }
       },
       insertBlock: {
-        args: '{index, type:"heading"|"para"|"list"|"quote"|"table", text, level, rows}',
+        args: '{index, type:"heading"|"para"|"list"|"quote"|"table"|"chart", text, level, rows, chart}',
         desc: '在第 index 個位置插入區塊，index 省略就加在最後。' +
-              'type 是 table 時給 rows（二維陣列），第一列是標題列',
+              'type 是 table 時給 rows（二維陣列），第一列是標題列；是 chart 時給 chart（圖表物件）' +
+              '或 rows，要畫圖表通常直接用 insertChart',
         run: async function (args, ctx) {
           ctx.api.snapshot();
           var at = args.index === undefined ? null : Number(args.index) - 1;
@@ -152,6 +184,40 @@
           ctx.api.snapshot();
           return { note: ctx.api.setTableStyle(a) };
         }
+      },
+      /* Charts. The data lives inside the block, so a chart drawn from a
+         conversation is given its numbers here -- as a table of rows, or as
+         categories and series -- and the document stands on its own after. */
+      insertChart: {
+        args: '{index, type:"column"|"stackedColumn"|"bar"|"stackedBar"|"line"|"area"|"stackedArea"|"pie"|"doughnut"|"scatter", ' +
+              'title, rows:[["月份","收入"],["1月",120]], categories:["1月"], series:[{name:"收入", values:[120]}], ' +
+              'seriesIn:"auto"|"cols"|"rows", headerRow, headerCol, omitTotals, legend:"bottom"|"right"|"none", ' +
+              'labels:true|false（資料標籤）, numFmt, xTitle, yTitle, aspect}',
+        desc: '插入一張圖表區塊。資料給 rows（二維陣列，第一列是數列名稱、第一欄是類別）或 categories 加 series；' +
+              'index 是插入的位置（從 1 開始），省略就加在最後；aspect 是寬高比（預設 1.8）',
+        run: async function (a, ctx) { return { note: ctx.api.insertChart(a) }; }
+      },
+      setChart: {
+        args: '{index, type, title, rows, categories, series, seriesIn, headerRow, headerCol, omitTotals, ' +
+              'legend, labels, numFmt, xTitle, yTitle, aspect}',
+        desc: '改第 index 個圖表區塊：只給要改的欄位，其餘保留（欄位同 insertChart）。' +
+              'index 省略就是游標所在的圖表，沒有就是最後一張',
+        run: async function (a, ctx) { return { note: ctx.api.setChart(a) }; }
+      },
+      tableToChart: {
+        args: '{index, type, title, keep:true|false}',
+        desc: '把第 index 個表格區塊畫成圖表。keep:true 保留表格、把圖表插在它下面；省略就把表格換成圖表',
+        run: async function (a, ctx) { return { note: ctx.api.tableToChart(a) }; }
+      },
+      chartToTable: {
+        args: '{index}',
+        desc: '把第 index 個圖表區塊換回它的資料表格',
+        run: async function (a, ctx) { return { note: ctx.api.chartToTable(a) }; }
+      },
+      chartToApp: {
+        args: '{index, app:"slides"|"sheets"}',
+        desc: '把第 index 個圖表區塊插到簡報或試算表（用開著的視窗，沒有就開一個）',
+        run: async function (a, ctx) { return { note: await ctx.api.chartToApp(a) }; }
       },
       exportAs: {
         args: '{format:"md"|"docx"|"pdf"}', desc: '匯出成 Markdown、docx 或 PDF',
@@ -246,7 +312,7 @@
       var btnBorder = fbtn('\u229e 框線', '框線與網底（游標要在表格裡）');
 
       var bar2 = el('div', 'dc-bar dc-bar2');
-      var btnInsert = fbtn('\u25a6 插入', '表格、分頁');
+      var btnInsert = fbtn('\u25a6 插入', '表格、分頁、圖表');
       var btnFind = fbtn('\u2315 尋找', '尋找與取代 (Ctrl+F)');
       var btnLayout = fbtn('\u25a4 版面', '整份字型、頁首、頁尾、頁碼');
       var btnUndo = fbtn('\u21b6', '復原上一步 (Ctrl+Z)');
@@ -534,12 +600,371 @@
               ctx.toast('已合併 ' + AIOS.grid.label(range) +
                 (lost ? '，捨棄 ' + lost + ' 格內容（可以復原）' : ''), lost ? 't-warn' : 't-ok');
             } },
+          { sep: true },
+          { label: '轉成圖表', run: function () { tableToChartMenu(i, false); } },
+          { label: '在下面插入圖表', run: function () { tableToChartMenu(i, true); } },
           { sep: true }
         ].filter(Boolean);
       }
 
+      /* --------------------------------------------------------- charts ---
+
+         A chart block is { type: 'chart', chart: <spec>, aspect: 1.8 }. The spec
+         is AIOS.charts' portable one -- the object the spreadsheet binds to a
+         range and the deck puts on a slide -- with its data inside, so the
+         document stands on its own. The drawing is built at render time and
+         never stored on the block: a block has to stay plain JSON for the
+         snapshot, the session and the docx writer.
+      */
+
+      /** Cleaned lazily, like normTable: neither open() nor boot normalises. */
+      function normChart(b) {
+        b.chart = AIOS.charts.norm(b.chart);
+        b.aspect = clampAspect(b.aspect);
+        return b;
+      }
+
+      /**
+       * A chart block as DOM: a focusable box around the drawing.
+       *
+       * Focusable, because a block with nothing editable in it still has to be
+       * the one the toolbar and the menu act on -- the page break marker works
+       * the same way. The keys a person expects of a selected object are on the
+       * box: Delete, Enter to edit, Ctrl+C to copy.
+       */
+      function chartNode(b, i) {
+        normChart(b);
+        var wrap = el('div', 'dc-chart');
+        wrap.tabIndex = 0;
+        wrap.setAttribute('role', 'img');
+        wrap.setAttribute('aria-label', '圖表 ' + (i + 1) + '：' + AIOS.charts.describe(b.chart));
+        wrap.title = '按 Enter 或雙擊編輯，Delete 刪除，Ctrl+C 複製；右鍵有更多';
+        /* Drawn into a fixed viewBox and scaled by the box, so the same node
+           reads at the page width on screen and on paper. The height comes from
+           the block's ratio, not from the drawing's default. */
+        var svg = AIOS.charts.render(b.chart, {
+          width: 640, height: Math.round(640 / b.aspect),
+          font: AIOS.fonts.cssFor(b.font || docFont), fontSize: 13
+        });
+        svg.style.width = '100%';
+        svg.style.height = 'auto';
+        wrap.appendChild(svg);
+        wrap.addEventListener('focus', function () { focusIndex = i; syncStyleSel(); syncMarks(); });
+        wrap.addEventListener('dblclick', function () { chartPopover(b, i); });
+        wrap.addEventListener('keydown', function (e) {
+          if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            snapshot();
+            deleteBlock(i);
+            focusBlock(Math.min(i, blocks.length - 1));
+          } else if (e.key === 'Enter') {
+            e.preventDefault();
+            chartPopover(b, i);
+          } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            copyChart(b);
+          } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            undo();
+          }
+        });
+        return wrap;
+      }
+
+      /** Every chart command: one undo step, one redraw, one report -- tableOp's shape. */
+      function chartOp(b, label, fn) {
+        try {
+          snapshot();
+          normChart(b);
+          fn(b);
+          normChart(b);
+          markDirty();
+          render();
+          if (label) ctx.toast(label, 't-ok');
+        } catch (e) {
+          undo();
+          ctx.toast(e.message, 't-warn');
+        }
+      }
+
+      /**
+       * A chart spec out of whatever a caller gave: a whole `chart`, a table in
+       * `rows`, or `categories` and `series` -- and any of the chart's own
+       * fields on top of that. `base` is the chart being edited, when there is
+       * one. The type and the colours are checked here rather than left to
+       * norm(), which would quietly read a misspelt type as 直條圖 and drop a
+       * colour it did not know. Returns { spec, raw, got }: `raw` is the spec
+       * before norm() capped it, `got` what the table reader found -- both for
+       * the report, which has to say what was left out.
+       */
+      function chartSpecFrom(s, base) {
+        var out = Object.assign({}, base || {});
+        var whole = s.chart && typeof s.chart === 'object' ? s.chart : null;
+        if (whole) Object.assign(out, whole);
+        var got = null;
+        if (Array.isArray(s.rows)) {
+          got = AIOS.charts.fromRows(s.rows, {
+            seriesIn: s.seriesIn, headerRow: s.headerRow, headerCol: s.headerCol, omitTotals: s.omitTotals
+          });
+          if (!got.series.length) {
+            throw new Error('rows 裡沒有可以畫的數字：第一列是數列名稱，第一欄是類別，其餘要是數字');
+          }
+          out.categories = got.categories;
+          out.series = got.series;
+          if (!out.title && got.titleHint) out.title = got.titleHint;
+          if (!out.xTitle && got.corner) out.xTitle = got.corner;
+          if (!out.numFmt && got.numFmtHint) out.numFmt = got.numFmtHint;
+        }
+        if (Array.isArray(s.categories)) out.categories = s.categories;
+        if (Array.isArray(s.series)) out.series = s.series;
+        ['title', 'legend', 'labels', 'numFmt', 'xTitle', 'yTitle'].forEach(function (k) {
+          if (s[k] !== undefined && s[k] !== null) out[k] = s[k];
+        });
+        var type = s.type !== undefined && s.type !== null && s.type !== '' ? s.type : (whole ? whole.type : undefined);
+        if (type !== undefined && type !== null && type !== '') out.type = AIOS.charts.requireType(type);
+        if (out.legend && AIOS.charts.LEGENDS.indexOf(out.legend) < 0) {
+          throw new Error('圖例位置只能是 bottom / right / none，收到「' + out.legend + '」');
+        }
+        if (Array.isArray(out.series)) {
+          out.series = out.series.map(function (ser) {
+            if (!ser || typeof ser !== 'object' || ser.colour === undefined || ser.colour === null || ser.colour === '') return ser;
+            return Object.assign({}, ser, { colour: AIOS.charts.requireColour(ser.colour, '數列顏色') });
+          });
+        }
+        return { spec: AIOS.charts.norm(out), raw: out, got: got };
+      }
+
+      /**
+       * What a chart drawn from a table left out, said out loud: a chart that
+       * quietly lost a column looks complete.
+       */
+      function gotNote(got, raw) {
+        var bits = [];
+        if (got && got.omitted && got.omitted.length) bits.push('略過 ' + got.omitted.join('、'));
+        if (got && got.skipped && got.skipped.length) bits.push('沒有數字的欄位不畫：' + got.skipped.join('、'));
+        var over = AIOS.charts.overflow(raw || {});
+        if (over.folded) {
+          bits.push('超過 ' + AIOS.charts.MAX_SERIES + ' 個數列，後面 ' + over.extra + ' 個併成「其他」');
+        } else if (over.dropped) {
+          bits.push('超過 ' + AIOS.charts.MAX_SERIES + ' 個數列，只畫前 ' + AIOS.charts.MAX_SERIES + ' 個');
+        }
+        return bits.length ? '；' + bits.join('；') : '';
+      }
+
+      /**
+       * The chart block a command means: by number, or -- when none is given --
+       * the one the cursor is on, else the last one in the document.
+       */
+      function chartAt(index) {
+        if (index === undefined || index === null || index === '') {
+          if (blocks[focusIndex] && blocks[focusIndex].type === 'chart') return focusIndex;
+          for (var k = blocks.length - 1; k >= 0; k--) if (blocks[k].type === 'chart') return k;
+          throw new Error('文件裡沒有圖表');
+        }
+        var i = Number(index) - 1;
+        if (!blocks[i]) throw new Error('沒有第 ' + index + ' 個區塊（共 ' + blocks.length + ' 個）');
+        if (blocks[i].type !== 'chart') throw new Error('第 ' + index + ' 個區塊不是圖表');
+        return i;
+      }
+
+      /**
+       * A table's cells with each merged region's value in every cell it covers.
+       * The rows hold the value once, at the region's top-left, and blanks under
+       * it; read as a chart that blank is a missing number, whereas the person
+       * who merged 「2024」 across three columns meant all three.
+       */
+      function tableCells(b) {
+        normTable(b);
+        var mm = AIOS.grid.map(b.merges);
+        return b.rows.map(function (cells, ri) {
+          return cells.map(function (cell, ci) {
+            var cov = mm.coveredBy[AIOS.grid.key(ci, ri)];
+            return cov ? b.rows[cov.r][cov.c] : cell;
+          });
+        });
+      }
+
+      /**
+       * A table block drawn as a chart: in its place, or right under it when
+       * `keep` is set. One snapshot for the whole conversion, taken only once
+       * the table has proved to hold numbers. Returns { index, note }.
+       */
+      function tableToChart(i, opts) {
+        var o = opts || {};
+        var b = blocks[i];
+        if (!b || b.type !== 'table') throw new Error('第 ' + (i + 1) + ' 個區塊不是表格');
+        var got = AIOS.charts.fromRows(tableCells(b), {
+          seriesIn: o.seriesIn, headerRow: o.headerRow, headerCol: o.headerCol, omitTotals: o.omitTotals
+        });
+        if (!got.series.length) throw new Error('第 ' + (i + 1) + ' 個表格裡沒有可以畫的數字');
+        var made = chartSpecFrom({
+          type: o.type, title: o.title || got.titleHint, categories: got.categories, series: got.series,
+          xTitle: got.corner, numFmt: got.numFmtHint
+        });
+        snapshot();
+        var nb = { type: 'chart', chart: made.spec, aspect: clampAspect(o.aspect) };
+        CARRY_KEYS.forEach(function (k) { if (b[k]) nb[k] = b[k]; });
+        var at = o.keep ? i + 1 : i;
+        blocks.splice(at, o.keep ? 0 : 1, nb);
+        // The marked cells were the table's; without it they name nothing.
+        if (!o.keep && cellSel && cellSel.block === i) cellSel = null;
+        focusIndex = at;
+        markDirty();
+        render();
+        return {
+          index: at,
+          note: (o.keep ? '已在第 ' + (i + 1) + ' 個表格下面插入' : '已把第 ' + (i + 1) + ' 個表格換成') +
+            AIOS.charts.typeName(made.spec.type) + '：' + AIOS.charts.describe(made.spec) + gotNote(got, made.raw)
+        };
+      }
+
+      /** 轉成圖表 from the table's menu: the same conversion, reported as a toast. */
+      function tableToChartMenu(i, keep) {
+        try {
+          ctx.toast(tableToChart(i, { keep: keep }).note, 't-ok');
+        } catch (e) {
+          ctx.toast(e.message, 't-warn');
+        }
+      }
+
+      /** A chart block replaced by the table of its data. Returns the note. */
+      function chartToTable(i) {
+        var b = blocks[i];
+        if (!b || b.type !== 'chart') throw new Error('第 ' + (i + 1) + ' 個區塊不是圖表');
+        normChart(b);
+        var rows = AIOS.charts.toRows(b.chart).map(function (r) {
+          return r.map(function (c) { return c === null || c === undefined ? '' : String(c); });
+        });
+        snapshot();
+        var nb = { type: 'table', rows: rows, merges: [] };
+        CARRY_KEYS.forEach(function (k) { if (b[k]) nb[k] = b[k]; });
+        normTable(nb);
+        blocks[i] = nb;
+        focusIndex = i;
+        markDirty();
+        render();
+        return '已把第 ' + (i + 1) + ' 個圖表換成 ' + rows[0].length + ' 欄 × ' + rows.length + ' 列的表格';
+      }
+
+      /** 轉成表格 from a menu: the same conversion, reported as a toast. */
+      function chartToTableMenu(i) {
+        try {
+          ctx.toast(chartToTable(i), 't-ok');
+        } catch (e) {
+          ctx.toast(e.message, 't-warn');
+        }
+      }
+
+      /** The chart to the shared clipboard; its numbers as text, for everyone else. */
+      function copyChart(b) {
+        normChart(b);
+        AIOS.charts.copy(b.chart).then(function () {
+          ctx.toast('已複製圖表，可以貼到文件、簡報或試算表裡', 't-ok');
+        }, function (e) {
+          ctx.toast('複製失敗：' + (e && e.message ? e.message : e), 't-err');
+        });
+      }
+
+      /** The copied chart as a new block at `at` (null: the end). */
+      function pasteChart(at) {
+        var spec = AIOS.charts.clipSpec();
+        if (!spec) return false;
+        snapshot();
+        insertBlock(at, { type: 'chart', chart: spec });
+        var i = at === null || at === undefined || at > blocks.length - 1 ? blocks.length - 1 : Math.max(0, at);
+        focusBlock(i);
+        ctx.toast('已貼上圖表', 't-ok');
+        return true;
+      }
+
+      /**
+       * Paste when the system clipboard still holds what the chart was copied
+       * with. Read first rather than trusted: the person may have copied some
+       * text since, and a stale chart landing in place of it would be a surprise.
+       */
+      function pasteHeldChart(at) {
+        if (!AIOS.charts.clipSpec()) { ctx.toast('剪貼簿裡沒有圖表', 't-warn'); return Promise.resolve(false); }
+        return A.clipboard.read().then(function (read) {
+          var text = read && read.ok && read.data ? String(read.data.text || '') : '';
+          if (!AIOS.charts.pasteMatches(text)) { ctx.toast('剪貼簿裡的已經不是那張圖表了', 't-warn'); return false; }
+          return pasteChart(at);
+        });
+      }
+
+      /**
+       * The shared chart editor, in a popover by the block it edits -- or by
+       * the 插入 button for a new one, inserted at `at`. Data mode: the document
+       * keeps the numbers inside the block, so the panel edits a table of text.
+       */
+      function chartPopover(b, i, at) {
+        var isNew = !b;
+        var anchor = (!isNew && blockRow(i)) || btnInsert;
+        popover(anchor, function (p, close) {
+          AIOS.popover.label(p, isNew ? '插入圖表' : '編輯圖表');
+          AIOS.charts.panel(p, {
+            spec: isNew ? STARTER_CHART : b.chart,
+            mode: 'data',
+            onApply: function (spec, extras) {
+              close();
+              var got = extras && extras.table;
+              if (isNew) {
+                snapshot();
+                insertBlock(at, { type: 'chart', chart: spec });
+                var k = at === null || at === undefined || at > blocks.length - 1 ? blocks.length - 1 : Math.max(0, at);
+                focusBlock(k);
+                ctx.toast('已插入' + AIOS.charts.typeName(spec.type) + gotNote(got, spec), 't-ok');
+              } else {
+                chartOp(b, '已更新圖表' + gotNote(got, spec), function () { b.chart = spec; });
+              }
+            },
+            onCancel: close
+          });
+        }, 'ui-pop-chart');
+      }
+
+      /** The numbers behind a chart, shown without changing anything. */
+      function dataPopover(b, i) {
+        normChart(b);
+        popover(blockRow(i) || btnInsert, function (p) {
+          AIOS.popover.label(p, '圖表資料');
+          p.appendChild(el('div', 'ui-pop-count', AIOS.charts.describe(b.chart)));
+          p.appendChild(AIOS.charts.tableNode(b.chart));
+          var row = popRow(p);
+          popBtn(row, '編輯圖表…', null, function () { chartPopover(b, i); });
+          popBtn(row, '轉成表格', '把圖表換成這張表格（可以復原）', function () {
+            closePop();
+            chartToTableMenu(i);
+          });
+        }, 'ui-pop-chart');
+      }
+
+      /**
+       * The chart half of the right-click menu, worded as the deck's and the
+       * spreadsheet's are: the same chart is the same object in all three.
+       */
+      function chartMenu(b, i) {
+        normChart(b);
+        // A right-click selects the block it landed on, as the text menu does.
+        focusIndex = i;
+        syncMarks();
+        return [
+          { label: AIOS.charts.describe(b.chart), disabled: true },
+          { label: '編輯圖表…', hint: 'Enter', run: function () { chartPopover(b, i); } },
+          { label: '檢視資料', run: function () { dataPopover(b, i); } },
+          { label: '轉成表格', run: function () { chartToTableMenu(i); } },
+          { sep: true },
+          { label: '複製圖表', hint: 'Ctrl+C', run: function () { copyChart(b); } }
+        ].concat(
+          AIOS.charts.sendMenuItems(function () { return b.chart; }, 'docs', ctx.toast,
+            function () { return { aspect: b.aspect }; }),
+          [{ sep: true }]
+        );
+      }
+
       function textOf(b) {
         if (b.type === 'break') return '';
+        // A chart is its picture; what it shows is said by describe() and publish().
+        if (b.type === 'chart') return '';
         if (b.type === 'table') return (b.rows || []).map(function (r) { return r.join('\t'); }).join('\n');
         if (Array.isArray(b.runs) && b.runs.length) return b.runs.map(function (r) { return r.text; }).join('');
         return b.text || '';
@@ -1059,6 +1484,10 @@
             var tnode = tableNode(b, i);
             applyParaStyle(tnode, b);
             row.appendChild(tnode);
+          } else if (b.type === 'chart') {
+            var cnode = chartNode(b, i);
+            applyParaStyle(cnode, b);
+            row.appendChild(cnode);
           } else if (b.type === 'break') {
             /* A page break has no text, so it is a marker rather than a field.
                It still occupies a numbered block, because that is how it is
@@ -1196,8 +1625,7 @@
           /* The new paragraph inherits the shape of the one it came from. Typing
              Enter after centring a line and getting a left-aligned one back means
              setting the alignment again on every line. */
-          ['align', 'indent', 'lineHeight', 'spaceBefore', 'spaceAfter', 'font', 'size']
-            .forEach(function (k) { if (from[k]) next[k] = from[k]; });
+          CARRY_KEYS.forEach(function (k) { if (from[k]) next[k] = from[k]; });
           snapshot();
           blocks.splice(i + 1, 0, next);
           markDirty();
@@ -1243,10 +1671,10 @@
       function focusBlock(i) {
         var node = editableFor(i);
         if (!node) {
-          // A page break has no editable text; focus the marker so the block is
-          // still the one the toolbar and the menu act on.
+          // A page break or a chart has no editable text; focus the marker so
+          // the block is still the one the toolbar and the menu act on.
           var row = blockRow(i);
-          var mark = row && row.querySelector('.dc-break');
+          var mark = row && row.querySelector('.dc-break, .dc-chart');
           if (mark) mark.focus();
           return;
         }
@@ -1369,7 +1797,12 @@
       function setBlock(i, spec) {
         if (i < 0 || i >= blocks.length) throw new Error('沒有第 ' + (i + 1) + ' 個區塊（共 ' + blocks.length + ' 個）');
         var b = blocks[i];
-        if (spec.type) b.type = spec.type;
+        /* `type` names the block's kind -- except on a chart block, where a
+           chart kind (bar, pie…) is what the caller means: the two vocabularies
+           share the word and do not overlap, so the value says which. */
+        var chartType = b.type === 'chart' && spec.type && !BLOCK_LABELS[spec.type] &&
+          AIOS.charts.resolveType(spec.type) ? spec.type : null;
+        if (spec.type && !chartType) b.type = spec.type;
         if (spec.level) b.level = Number(spec.level);
         if (spec.text !== undefined) {
           b.text = String(spec.text);
@@ -1377,8 +1810,8 @@
         }
         /* A table is rows and merged regions rather than text, and both are
            normalised on the way in: a region naming a column the table does not
-           have cannot be drawn. */
-        if (Array.isArray(spec.rows)) {
+           have cannot be drawn. On a chart block, rows are the chart's data. */
+        if (Array.isArray(spec.rows) && b.type !== 'chart') {
           b.rows = spec.rows.map(function (r) {
             return (Array.isArray(r) ? r : [r]).map(function (c) {
               return c == null ? '' : String(c);
@@ -1389,6 +1822,16 @@
         if (spec.cellStyles !== undefined) b.cellStyles = spec.cellStyles;
         applyParaSpec(b, spec);
         if (b.type === 'table') normTable(b);
+        /* A chart: the whole spec, or any of its fields, merged over what is
+           there, then cleaned like a table is. */
+        if (b.type === 'chart') {
+          var fields = Object.assign({}, spec, { type: chartType || undefined });
+          if (CHART_KEYS.some(function (k) { return fields[k] !== undefined; })) {
+            b.chart = chartSpecFrom(fields, b.chart).spec;
+          }
+          if (spec.aspect !== undefined) b.aspect = clampAspect(spec.aspect);
+          normChart(b);
+        }
         markDirty();
         render();
       }
@@ -1444,6 +1887,19 @@
           b.merges = [];
           delete b.text;
           normTable(b);
+        }
+        /* A chart is its spec and a ratio. Whatever shape the caller gave -- a
+           whole chart, a table of rows, categories and series -- is resolved
+           here for the same reason the table is built here. The block's `type`
+           is the block's own; the chart's kind rides inside `chart`. */
+        if (b.type === 'chart') {
+          delete b.text;
+          delete b.level;
+          delete b.ordered;
+          var fields = Object.assign({}, spec);
+          delete fields.type;
+          b.chart = chartSpecFrom(fields).spec;
+          b.aspect = clampAspect(spec.aspect);
         }
         if (at === null || at === undefined || at > blocks.length) blocks.push(b);
         else blocks.splice(Math.max(0, at), 0, b);
@@ -1595,6 +2051,8 @@
               '.dc-break { break-after: page; page-break-after: always;',
               '  height: 0; margin: 0; border: 0; color: transparent;',
               '  font-size: 0; overflow: hidden; }',
+              // A chart is one picture: never split across two pages.
+              '.dc-chart { break-inside: avoid; page-break-inside: avoid; }',
               '.dc-code { font-family: Consolas, "Courier New", monospace;',
               '  background: #f4f6f9; padding: .1em .3em; border-radius: 3px; }'
             ].join('\n')
@@ -1971,10 +2429,10 @@
         }, 'ui-pop-wide');
       }
 
-      /** Table size grid and the page break, the two things worth inserting. */
+      /** Table size grid, the page break and a chart: the things worth inserting. */
       function insertPopover() {
         popover(btnInsert, function (p) {
-          AIOS.popover.label(p, '插入表格');
+          AIOS.popover.label(p, '插入');
           var read = el('div', 'ui-tgrid-read', '拖過去選格數');
           var grid = el('div', 'ui-tgrid-grid');
           var cells = [];
@@ -2012,7 +2470,14 @@
             insertBlock(at, { type: 'break' });
             ctx.toast('已插入分頁', 't-ok');
           });
-          p.appendChild(el('p', 'ui-pop-note', '表格的列欄與合併都用表格上的右鍵選單操作。'));
+          popBtn(row, '◔ 圖表', '插入一張圖表：先填資料，再挑類型', function () {
+            closePop();
+            // Where the caret is now, not where it is when the panel is applied:
+            // the panel takes the focus, and the block under it is what was meant.
+            var at = focusIndex >= 0 ? focusIndex + 1 : null;
+            chartPopover(null, -1, at);
+          });
+          p.appendChild(el('p', 'ui-pop-note', '表格的列欄與合併都用表格上的右鍵選單操作；表格也能從右鍵選單轉成圖表。'));
         }, 'ui-pop-wide');
       }
 
@@ -2225,7 +2690,7 @@
 
       styleSel.addEventListener('change', function () {
         var b = blocks[focusIndex];
-        if (!isTextBlock(b)) { syncStyleSel(); ctx.toast('分頁與表格沒有段落樣式', 't-warn'); return; }
+        if (!isTextBlock(b)) { syncStyleSel(); ctx.toast('分頁、表格與圖表沒有段落樣式', 't-warn'); return; }
         var v = styleSel.value;
         // Undoable like every other change: a heading turned into a paragraph by
         // a mis-click is as much of a loss as deleted text.
@@ -2269,11 +2734,35 @@
       btnSave.addEventListener('click', function () { save(); });
       btnSaveAs.addEventListener('click', function () { saveAs(); });
 
+      /* A chart on the clipboard. The system clipboard carries only its numbers
+         as text; the chart itself is held by AIOS.charts and trusted while the
+         text still matches. Captured, so the paste never reaches a paragraph's
+         own handler and lands there as a block of tab-separated figures. */
+      page.addEventListener('paste', function (e) {
+        var text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+        if (!AIOS.charts.pasteMatches(text)) return;
+        e.preventDefault();
+        pasteChart(focusIndex >= 0 ? focusIndex + 1 : null);
+      }, true);
+      /* Ctrl+V with a chart or a page break selected: nothing editable has the
+         focus, so the paste is read from the clipboard by hand. Cancelling the
+         key here is also what keeps the browser's own paste from following. */
+      page.addEventListener('keydown', function (e) {
+        if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+        var active = document.activeElement;
+        if (active && active.isContentEditable) return;
+        if (!AIOS.charts.clipSpec()) return;
+        e.preventDefault();
+        pasteHeldChart(focusIndex >= 0 ? focusIndex + 1 : null);
+      });
+
       /* ------------------------------------------------------------ wiring */
 
       function publish() {
         var text = blocks.map(function (b, i) {
-          return (i + 1) + '. [' + (BLOCK_LABELS[b.type] || b.type) + '] ' + textOf(b);
+          // A chart has no text; what the model should know about it is its summary.
+          var body = b.type === 'chart' ? AIOS.charts.describe(b.chart) : textOf(b);
+          return (i + 1) + '. [' + (BLOCK_LABELS[b.type] || b.type) + '] ' + body;
         }).join('\n');
         ctx.publish('文件 ' + (path || title) + '：\n' + text.slice(0, 5000), 'app/docs');
       }
@@ -2296,6 +2785,7 @@
             var kind = BLOCK_LABELS[b.type] || b.type;
             if (b.type === 'heading') kind += ' H' + (b.level || 1);
             if (b.type === 'break') return '  ' + (i + 1) + '. [分頁] （這裡開始新的一頁）';
+            if (b.type === 'chart') return '  ' + (i + 1) + '. [圖表] ' + AIOS.charts.describe(b.chart);
             var para = paraSummary(b);
             if (para) kind += '，' + para;
             var runs = runSummary(b);
@@ -2333,6 +2823,7 @@
 
         var head = [];
         if (b && b.type === 'table') head = tableMenu(b, i, ev);
+        else if (b && b.type === 'chart') head = chartMenu(b, i);
         if (b) {
           /* The character formats, when the click landed in text. Offered here as
              well as in the toolbar because a right-click is where a hand goes
@@ -2384,7 +2875,11 @@
             { label: '在下面插入段落', run: function () { snapshot(); insertBlock(i + 1, { type: 'para', text: '' }); focusBlock(i + 1); } },
             { label: '在下面插入項目', run: function () { snapshot(); insertBlock(i + 1, { type: 'list', text: '' }); focusBlock(i + 1); } },
             { label: '在下面插入分頁', run: function () { snapshot(); insertBlock(i + 1, { type: 'break' }); } },
-            { label: '複製這個區塊的文字', disabled: b.type === 'break',
+            // Only while a chart is on the clipboard: an entry that would refuse is noise.
+            AIOS.charts.clipSpec()
+              ? { label: '貼上圖表', hint: 'Ctrl+V', run: function () { pasteHeldChart(i + 1); } }
+              : null,
+            { label: '複製這個區塊的文字', disabled: b.type === 'break' || b.type === 'chart',
               run: function () { A.clipboard.write(textOf(b)); ctx.toast('已複製'); } },
             { label: '刪除這個區塊', danger: true, disabled: blocks.length <= 1, run: function () {
               snapshot(); deleteBlock(i);
@@ -2552,9 +3047,68 @@
         return '第 ' + s.index + ' 個表格 ' + AIOS.grid.label(area) + '：' + said.join('、');
       }
 
+      /* Charts, by block number. Each checks what it was given before it takes
+         its snapshot, so a refused request costs no undo step. */
+
+      function insertChartApi(spec) {
+        var s = spec || {};
+        var made = chartSpecFrom(s);
+        if (!made.spec.series.length || !made.spec.categories.length) {
+          throw new Error('要給 rows（二維陣列，第一列是數列名稱、第一欄是類別）或 categories 加 series');
+        }
+        var at = s.index === undefined || s.index === null || s.index === '' ? null : Number(s.index) - 1;
+        if (at !== null && !Number.isFinite(at)) throw new Error('index 要是數字（從 1 開始）');
+        snapshot();
+        insertBlock(at, { type: 'chart', chart: made.spec, aspect: s.aspect });
+        var i = at === null || at > blocks.length - 1 ? blocks.length - 1 : Math.max(0, at);
+        return '已插入' + AIOS.charts.typeName(made.spec.type) + '（第 ' + (i + 1) + ' 個區塊）：' +
+          AIOS.charts.describe(made.spec) + gotNote(made.got, made.raw);
+      }
+
+      function setChartApi(spec) {
+        var s = spec || {};
+        var i = chartAt(s.index);
+        var b = blocks[i];
+        normChart(b);
+        var made = chartSpecFrom(s, b.chart);
+        snapshot();
+        b.chart = made.spec;
+        if (s.aspect !== undefined) b.aspect = clampAspect(s.aspect);
+        normChart(b);
+        markDirty();
+        render();
+        return '第 ' + (i + 1) + ' 個區塊：' + AIOS.charts.describe(b.chart) + gotNote(made.got, made.raw);
+      }
+
+      function tableToChartApi(spec) {
+        var s = spec || {};
+        var i = Number(s.index) - 1;
+        if (!blocks[i]) throw new Error('沒有第 ' + s.index + ' 個區塊（共 ' + blocks.length + ' 個）');
+        return tableToChart(i, s).note;
+      }
+
+      function chartToTableApi(spec) {
+        var s = spec || {};
+        return chartToTable(chartAt(s.index));
+      }
+
+      async function chartToApp(spec) {
+        var s = spec || {};
+        var app = String(s.app || '').toLowerCase();
+        if (app !== 'slides' && app !== 'sheets') throw new Error('app 要是 slides（簡報）或 sheets（試算表）');
+        var i = chartAt(s.index);
+        var b = blocks[i];
+        normChart(b);
+        var out = await AIOS.charts.sendTo(app, b.chart, { aspect: b.aspect });
+        return '第 ' + (i + 1) + ' 個區塊的圖表已插入到' + AIOS.charts.APP_NAMES[app] +
+          (out && out.note ? '：' + out.note : '');
+      }
+
       ctx.api = {
         setBlock: setBlock, insertBlock: insertBlock, deleteBlock: deleteBlock,
         setTableStyle: setTableStyle,
+        insertChart: insertChartApi, setChart: setChartApi,
+        tableToChart: tableToChartApi, chartToTable: chartToTableApi, chartToApp: chartToApp,
         fromMarkdown: fromMarkdown, toMarkdown: toMarkdown,
         save: save, saveAs: saveAs, exportAs: exportAs, open: open, snapshot: snapshot, undo: undo,
         setFont: setFont, setPara: setParaApi, formatText: formatTextApi,
