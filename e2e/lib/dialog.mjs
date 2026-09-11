@@ -63,3 +63,59 @@ export async function dialogOpen(port) {
   const list = await targets(port).catch(() => []);
   return list.some((t) => DOC.test(t.url));
 }
+
+/* ---------------------------------------------------------------- consent */
+
+const CONSENT = /consent\.html/;
+
+/**
+ * Answer the capability gate's own window -- the other dialog this machine has.
+ *
+ * Separate from pressDialog because it is a separate window with a separate
+ * job: askbox.html confirms an action the shell is about to take, while
+ * consent.html is the gate asking whether an operation may happen at all. Only
+ * two buttons, and the allow one is relabelled by what it is granting ("執行 12
+ * 次"), so this presses by role rather than by text.
+ *
+ * Resolves with what the window said, so a spec can assert on the question as
+ * well as answer it -- including the batch list, which is the whole point of
+ * asking once about many operations.
+ */
+export async function pressConsent(port, granted, { timeout = 30000 } = {}) {
+  const target = await until(async () => {
+    const list = await targets(port);
+    return list.find((t) => CONSENT.test(t.url) && t.webSocketDebuggerUrl) || null;
+  }, { timeout, what: `授權視窗出現（要按${granted ? '允許' : '拒絕'}）` });
+
+  const dlg = await connect(target.webSocketDebuggerUrl);
+  try {
+    return await until(() => run(dlg, `
+      var allow = document.getElementById('allow');
+      var deny = document.getElementById('deny');
+      if (!allow || !deny || !document.getElementById('body').textContent.trim()) return null;
+      var said = {
+        title: document.getElementById('title').textContent,
+        text: document.getElementById('body').textContent,
+        allow: allow.textContent,
+        rows: [].slice.call(document.querySelectorAll('.dlg-row-main')).map(function (n) {
+          return n.textContent;
+        }),
+        count: document.querySelectorAll('.dlg-row').length
+      };
+      var hit = ${granted ? 'allow' : 'deny'};
+      if (hit.disabled) return { error: '按鈕是停用的', said: said };
+      said.pressed = hit.textContent;
+      // Deferred so this answer leaves the page before main takes it down.
+      setTimeout(function () { hit.click(); }, 0);
+      return said;
+    `), { timeout, what: '授權視窗的按鈕' });
+  } finally {
+    try { dlg.close(); } catch { /* the window is already gone */ }
+  }
+}
+
+/** Whether the capability gate's window is on screen right now. */
+export async function consentOpen(port) {
+  const list = await targets(port).catch(() => []);
+  return list.some((t) => CONSENT.test(t.url));
+}
