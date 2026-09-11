@@ -724,7 +724,7 @@
         head.querySelector('p').style.whiteSpace = 'pre-wrap';
         grid.appendChild(head);
 
-        var table = el('table', 'ext-table');
+        var table = el('table', 'ext-table ext-plan');
         var thead = el('thead');
         var hr = el('tr');
         ['原檔名', '新檔名', '去處', '列數', '原因'].forEach(function (h) {
@@ -738,7 +738,13 @@
           var tr = el('tr', e.status === 'finished' ? null : 'ext-row-unsure');
           tr.appendChild(el('td', null, e.name));
           tr.appendChild(el('td', e.newName === e.name ? 'ext-src' : null, e.newName));
-          tr.appendChild(el('td', 'ext-src', e.dir));
+          /* The bin, not the whole path. The directories are listed in full just
+             above, and putting them in the rows made every one of them wide
+             enough to push the 原因 column off the right edge -- which is the
+             column a person is actually reading this table for. */
+          var bin = el('td', 'ext-src', e.dir.split('/').pop());
+          bin.title = e.dir;
+          tr.appendChild(bin);
           tr.appendChild(el('td', 'ext-src', String(e.rows)));
           tr.appendChild(el('td', e.reason ? 'ext-why' : null, e.reason || ''));
           tbody.appendChild(tr);
@@ -883,7 +889,7 @@
           return row;
         }
         (s.headerNames || []).forEach(function (n) { addHeaderRow(n, true); });
-        var addHdr = btn('加一列表頭', null, 'ext-mini');
+        var addHdr = btn('加一列表頭', '再加一組要跟著請求送出的表頭');
         addHdr.addEventListener('click', function () { addHeaderRow('', false); });
         hdrWrap.appendChild(addHdr);
         settings.appendChild(hdrWrap);

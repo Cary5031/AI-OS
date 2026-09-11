@@ -3953,12 +3953,18 @@ li.dc-list.ordered { list-style: decimal; }
 }
 .ext-gap { flex: 1; }
 .ext-pick { display: flex; align-items: center; gap: 5px; }
-.ext-select, .ext-input {
-  background: var(--glass); color: var(--fg);
+.ext-input {
+  /* background-color, not the `background` shorthand. The shorthand resets
+     background-image, and the arrow every <select> on this machine wears is
+     drawn with one -- setting it here turned both dropdowns into things that
+     looked exactly like text boxes. */
+  background-color: var(--glass); color: var(--fg);
   border: 1px solid var(--hair-2); border-radius: 5px;
   font-family: var(--mono); font-size: 11px; padding: 3px 6px;
 }
-.ext-select { max-width: 230px; }
+/* A dropdown keeps the global rule's arrow, and the room on the right for it. */
+select.ext-input { padding: 3px 22px 3px 7px; background-color: var(--hair); }
+.ext-select { max-width: 230px; font-family: var(--mono); }
 .ext-go { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
 .ext-work { display: flex; flex: 1; min-height: 0; }
@@ -4067,3 +4073,13 @@ li.dc-list.ordered { list-style: decimal; }
    danger: nothing is wrong, it just needs a person before it counts as done. */
 .ext-row-unsure td { color: var(--warn); }
 .ext-why { white-space: normal; max-width: 32ch; }
+/* The filing plan fills the pane and wraps, rather than growing to fit its
+   longest path and pushing 原因 off the right edge -- which it did, and 原因 is
+   the column somebody opens this table to read. */
+.ext-plan { width: 100%; table-layout: auto; }
+/* Only the reason wraps. Letting everything wrap fixed the overflow and broke
+   "Finished" across two lines, which reads as a rendering fault. */
+.ext-plan th:last-child, .ext-plan td:last-child {
+  white-space: normal; word-break: break-word; width: 38%;
+}
+.ext-plan td:nth-child(4) { text-align: right; }
