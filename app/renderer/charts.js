@@ -1025,6 +1025,41 @@
   }
 
   /**
+   * The workbook a document or a deck carries beside its chart.
+   *
+   * A chart in a .docx or a .pptx has no spreadsheet behind it, so Office's
+   * 「編輯資料」 has nothing to open -- unless the file brings one. The data is
+   * already here, so the workbook is not a guess: it is `toRows` written into
+   * cells, and the chart points at those cells the way it would point at a
+   * sheet. That is what makes the chart editable in Word and PowerPoint
+   * instead of a picture of numbers.
+   *
+   * Returns `{ sheet, cells, refs }`, or null when there is nothing to chart.
+   */
+  function embedPlan(spec, sheetName) {
+    var s = norm(spec);
+    if (!s.series.length || !s.categories.length) return null;
+    var name = sheetName || 'Sheet1';
+    var cells = {};
+    toRows(s, { raw: true }).forEach(function (row, r) {
+      row.forEach(function (v, c) {
+        if (v === '' || v === null || v === undefined) return;
+        var cell = { v: v };
+        // The value cells wear the chart's own format, so the workbook a person
+        // opens reads the way the axis does.
+        if (r > 0 && c > 0 && s.numFmt) cell.numFmt = s.numFmt;
+        cells[indexToCol(c) + (r + 1)] = cell;
+      });
+    });
+    return {
+      sheet: name,
+      cells: cells,
+      refs: rangeRefs(name, { c0: 0, r0: 0, c1: s.series.length, r1: s.categories.length },
+        'cols', { headerRow: true, headerCol: true })
+    };
+  }
+
+  /**
    * The inverse, for a chart read out of an .xlsx: the cell references of its
    * series turned back into a range a spreadsheet chart can bind to.
    * Returns { sheet, range: rect, categories: rect | null, seriesIn,
@@ -2400,6 +2435,7 @@
     parseRange: parseRange,
     rangeText: rangeText,
     rangeRefs: rangeRefs,
+    embedPlan: embedPlan,
     refsToRange: refsToRange,
     indexToCol: indexToCol,
     colToIndex: colToIndex,

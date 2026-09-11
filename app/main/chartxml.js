@@ -38,6 +38,10 @@ const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationship
 const CHART_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml';
 const CHART_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart';
 const CHART_GRAPHIC_URI = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+/* An embedded part that is a package of its own -- the little workbook a chart
+   in a document or a deck keeps its numbers in. */
+const PACKAGE_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/package';
+const SHEET_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';
 
@@ -297,6 +301,13 @@ function chartSpaceXml(rawSpec, opts = {}) {
     '</c:chart>' +
     `<c:spPr>${opts.fill && /^[0-9A-Fa-f]{6}$/.test(opts.fill) ? solid(opts.fill.toUpperCase()) : '<a:noFill/>'}<a:ln><a:noFill/></a:ln></c:spPr>` +
     textPr +
+    /* The workbook this chart was drawn from, when the file carries one.
+       Office greys out 「編輯資料」 without it; with it, the button opens the
+       embedded sheet and the chart follows what is changed there. Last child
+       of the chart space, which is where the schema puts it. */
+    (opts.externalData
+      ? `<c:externalData r:id="${opts.externalData}"><c:autoUpdate val="0"/></c:externalData>`
+      : '') +
     '</c:chartSpace>';
 }
 
@@ -495,7 +506,7 @@ function chartRefXml(rid) {
 
 module.exports = {
   chartSpaceXml, readChartSpace, chartRefXml,
-  CHART_CONTENT_TYPE, CHART_REL_TYPE, CHART_GRAPHIC_URI,
+  CHART_CONTENT_TYPE, CHART_REL_TYPE, CHART_GRAPHIC_URI, PACKAGE_REL_TYPE, SHEET_CONTENT_TYPE,
   NS_C, NS_A, NS_R,
   esc, unesc
 };

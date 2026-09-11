@@ -429,9 +429,18 @@ function writeDocx(blocks, meta = {}) {
       const spec = b.chart && typeof b.chart === 'object' ? b.chart : {};
       const n = chartParts.length + 1;
       const rid = 'rId' + (4 + n);
+      /* The numbers travel twice: cached inside the chart so it draws without
+         opening anything, and as a real little workbook beside it so that the
+         「編輯資料」 button has a sheet to open. The chart points at that sheet,
+         which is what makes editing there change the picture. */
+      const plan = charts.embedPlan(spec, 'Sheet1');
       chartParts.push({
-        name: `charts/chart${n}.xml`, rid,
-        xml: chartxml.chartSpaceXml(spec, { font: docFont, size: docSize ? Math.max(6, docSize - 1) : 10 })
+        name: `charts/chart${n}.xml`, rid, index: n,
+        xml: chartxml.chartSpaceXml(spec, {
+          font: docFont, size: docSize ? Math.max(6, docSize - 1) : 10,
+          refs: plan ? plan.refs : null, externalData: plan ? 'rId1' : null
+        }),
+        book: plan ? writeXlsx({ sheetName: plan.sheet, cells: plan.cells, font: docFont, size: docSize }) : null
       });
       // The drawing spans the text width; the block's aspect ratio sets its height.
       const aspect = Math.max(1.2, Math.min(4, Number(b.aspect) || 1.8));
@@ -617,6 +626,9 @@ function writeDocx(blocks, meta = {}) {
       : '') +
     chartParts.map((c) =>
       `<Override PartName="/word/${c.name}" ContentType="${chartxml.CHART_CONTENT_TYPE}"/>`).join('') +
+    (chartParts.some((c) => c.book)
+      ? `<Default Extension="xlsx" ContentType="${chartxml.SHEET_CONTENT_TYPE}"/>`
+      : '') +
     '</Types>';
 
   const rels = XML_DECL +
@@ -694,7 +706,15 @@ function writeDocx(blocks, meta = {}) {
     parts['word/header1.xml'] = headerXml;
     parts['word/footer1.xml'] = footerXml;
   }
-  chartParts.forEach((c) => { parts['word/' + c.name] = c.xml; });
+  chartParts.forEach((c) => {
+    parts['word/' + c.name] = c.xml;
+    if (!c.book) return;
+    parts[`word/charts/_rels/chart${c.index}.xml.rels`] = XML_DECL +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<Relationship Id="rId1" Type="${chartxml.PACKAGE_REL_TYPE}" Target="../embeddings/chart${c.index}.xlsx"/>` +
+      '</Relationships>';
+    parts[`word/embeddings/chart${c.index}.xlsx`] = c.book;
+  });
   return zip.write(parts, { store: ['[Content_Types].xml'] });
 }
 
@@ -2034,11 +2054,16 @@ function writePptx(deck = {}) {
           return;
         }
         const n = chartParts.length + 1;
+        /* Its own little workbook, as in a document: cached numbers draw the
+           chart, and the sheet beside it is what 「編輯資料」 opens. */
+        const plan = charts.embedPlan(spec, 'Sheet1');
         chartParts.push({
-          name: `chart${n}.xml`,
+          name: `chart${n}.xml`, index: n,
           xml: chartxml.chartSpaceXml(spec, {
-            font, size: at(o.size || 12), colour: o.colour || '404040', fill: o.fill || null
-          })
+            font, size: at(o.size || 12), colour: o.colour || '404040', fill: o.fill || null,
+            refs: plan ? plan.refs : null, externalData: plan ? 'rId1' : null
+          }),
+          book: plan ? writeXlsx({ sheetName: plan.sheet, cells: plan.cells, font }) : null
         });
         const rid = 'rId' + nextRel++;
         rels.push(`<Relationship Id="${rid}" Type="${chartxml.CHART_REL_TYPE}" Target="../charts/chart${n}.xml"/>`);
@@ -2216,6 +2241,9 @@ function writePptx(deck = {}) {
       `<Override PartName="/ppt/slides/slide${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join('') +
     chartParts.map((c) =>
       `<Override PartName="/ppt/charts/${c.name}" ContentType="${chartxml.CHART_CONTENT_TYPE}"/>`).join('') +
+    (chartParts.some((c) => c.book)
+      ? `<Default Extension="xlsx" ContentType="${chartxml.SHEET_CONTENT_TYPE}"/>`
+      : '') +
     (notesParts.length
       ? '<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>' +
         notesParts.map((_, i) =>
@@ -2274,7 +2302,15 @@ function writePptx(deck = {}) {
   slideParts.forEach((xml, i) => { parts[`ppt/slides/slide${i + 1}.xml`] = xml; });
   slideRels.forEach((xml, i) => { parts[`ppt/slides/_rels/slide${i + 1}.xml.rels`] = xml; });
   media.forEach((m) => { parts['ppt/media/' + m.name] = m.buffer; });
-  chartParts.forEach((c) => { parts['ppt/charts/' + c.name] = c.xml; });
+  chartParts.forEach((c) => {
+    parts['ppt/charts/' + c.name] = c.xml;
+    if (!c.book) return;
+    parts[`ppt/charts/_rels/chart${c.index}.xml.rels`] = XML_DECL +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<Relationship Id="rId1" Type="${chartxml.PACKAGE_REL_TYPE}" Target="../embeddings/chart${c.index}.xlsx"/>` +
+      '</Relationships>';
+    parts[`ppt/embeddings/chart${c.index}.xlsx`] = c.book;
+  });
 
   if (notesParts.length) {
     parts['ppt/notesMasters/notesMaster1.xml'] = notesMaster;

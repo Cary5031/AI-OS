@@ -606,6 +606,44 @@ test('a document with a chart carries a chart part, and one without carries noth
   assert.ok(!zip.read(plain).get('[Content_Types].xml').toString('utf8').includes('chart'));
 });
 
+test('a chart in a document or a deck brings the workbook its numbers came from', () => {
+  /* Cached numbers are enough to draw a chart, and that is all this wrote at
+     first -- so Office opened the file, drew it correctly, and greyed out
+     「編輯資料」, because that button needs a sheet to open. The data was
+     already here; the workbook is it, written into cells the chart points at.
+     Verified by pressing the button through COM: Word and PowerPoint both open
+     Sheet1, and changing B2 there moves the bar. */
+  const both = [
+    ['docx', () => office.writeDocx([{ type: 'chart', chart: BOOK, aspect: 1.8 }], { font: '微軟正黑體', size: 11 }), 'word'],
+    ['pptx', () => office.writePptx({ title: 't', slides: [{ layout: 'blank', objects: [{ kind: 'chart', chart: BOOK, x: 10, y: 10, w: 60, h: 50, size: 12 }] }] }).buffer, 'ppt']
+  ];
+  both.forEach(([kind, build, dir]) => {
+    const buf = build();
+    const { files, problems, ct } = opc(buf);
+    assert.deepEqual(problems, [], kind);
+    assert.ok(files.has(`${dir}/embeddings/chart1.xlsx`), kind + ': the workbook is in the package');
+    assert.ok(ct.includes('<Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>'), kind + ': and has a content type');
+    const rels = files.get(`${dir}/charts/_rels/chart1.xml.rels`).toString('utf8');
+    assert.match(rels, /Id="rId1" Type="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/package" Target="\.\.\/embeddings\/chart1\.xlsx"/, kind);
+    const chart = files.get(`${dir}/charts/chart1.xml`).toString('utf8');
+    assert.ok(chart.endsWith('<c:externalData r:id="rId1"><c:autoUpdate val="0"/></c:externalData></c:chartSpace>'),
+      kind + ': the workbook is named last, where the schema puts it');
+    assert.match(chart, /<c:f>&apos;Sheet1&apos;!\$B\$2:\$B\$7<\/c:f>/, kind + ': and the series points into it');
+    assert.match(chart, /<c:f>&apos;Sheet1&apos;!\$A\$2:\$A\$7<\/c:f>/, kind + ': categories too');
+    assert.ok(!chart.includes('<c:numLit'), kind + ': so the numbers are a reference, not a literal');
+    // The sheet says what the chart says, and the values are numbers Excel can edit.
+    const inner = office.readXlsx(files.get(`${dir}/embeddings/chart1.xlsx`)).sheets[0];
+    assert.equal(inner.name, 'Sheet1');
+    assert.deepEqual(['A1', 'B1', 'C1', 'D1'].map((r) => (inner.cells[r] || {}).v), [undefined, '收入', '支出', '淨利']);
+    assert.deepEqual(['A2', 'B2', 'C2', 'D2'].map((r) => (inner.cells[r] || {}).v), ['1月', 120000, 80000, 40000]);
+    assert.equal(inner.cells.B2.numFmt, C.excelFormatCode(BOOK.numFmt), kind + ': the sheet reads the way the axis does');
+  });
+  // Nothing to chart, nothing to embed -- and no dangling relationship.
+  const bare = office.writeDocx([{ type: 'para', text: 'x' }]);
+  assert.ok(![...zip.read(bare).keys()].some((n) => n.includes('embeddings')));
+  assert.ok(!zip.read(bare).get('[Content_Types].xml').toString('utf8').includes('xlsx'));
+});
+
 test('a workbook with charts anchors them on a drawing, live in their cells, and reads them back', () => {
   const cells = { A1: { v: '月份' }, B1: { v: '收入' }, C1: { v: '支出' } };
   ['1月', '2月', '3月'].forEach((c, i) => { cells['A' + (i + 2)] = { v: c }; cells['B' + (i + 2)] = { v: 100 + i }; cells['C' + (i + 2)] = { v: 50 + i }; });
