@@ -197,8 +197,16 @@
       intro.appendChild(el('h3', null, '定時做事'));
       intro.appendChild(el('p', 'sc-note',
         '兩種工作：「程式動作」直接執行某個程式發布的動作，不花模型；「意圖」每次把一句話交給核心規劃，' +
-        '雲端核心就每次花錢。只在 AI-OS 開著時執行；關機期間錯過的會在下次開機後補跑一次。' +
-        '執行時若某個能力的政策是 ASK，會跳出授權視窗等你回答——要無人值守就把那個能力設成 ALLOW。'));
+        '雲端核心就每次花錢。只在 AI-OS 開著時執行；關機期間錯過的會在下次開機後補跑一次。'));
+      /* This paragraph used to say a consent window would open and wait. It no
+         longer does -- a window nobody is there to answer is not a question, it
+         is a fifteen-minute hang -- so what it says now is what actually
+         happens, and the one thing the user can do about it. */
+      intro.appendChild(el('p', 'sc-note',
+        '排程是在你不在的時候跑的，所以碰到需要授權的動作不會跳視窗，會當場擋下來並把原因寫進結果裡。' +
+        '最常見的是：排程讀了信（信是不可信內容），接著要寫檔，而那句話沒說要寫到哪裡。' +
+        '解法是把目標寫進排程的那句話——寫到目錄就夠，例如「…追加到 /notes」。' +
+        '手動按「立即執行」時你在畫面前，那時授權視窗照跳。'));
       ctx.body.appendChild(intro);
 
       /* ------------------------------------------------------------ form */
@@ -399,7 +407,8 @@
       });
 
       ctx.describe(function () {
-        return '排程（只在 AI-OS 開著時執行）：\n' +
+        return '排程（只在 AI-OS 開著時執行；無人值守，需要授權的動作會被擋下而不是跳視窗，' +
+          '所以會寫檔的那句話要自己寫出目標路徑）：\n' +
           (jobs.length ? jobs.map(function (j) {
             return '  ' + j.id + '　' + j.name + '　' + cadence(j) + '　' + describeJob(j) +
               (j.enabled ? '' : '　（已暫停）') +

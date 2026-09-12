@@ -42,9 +42,18 @@ const OPS = {
     desc: '叫某個程式做一件它會做的事（動作名稱因程式而異，action 留空會列出可用的）' },
   /* The machine's own clock. sys.timer, like timer.set: what a job does when
      it fires is gated then, on its own. */
+  /* The tail of this description is the only place a planner is told the
+     unattended rule at the moment it matters -- while it is writing the
+     sentence that will run at eight in the morning with nobody there. A
+     sentence that does not name where the note goes cannot be rescued later:
+     the gate refuses, every day, and the reason arrives in a run result
+     nobody reads. */
   'schedule.set':    { cap: 'sys.timer', sig: '{name, every, at, intent, app, action, args:object}',
     desc: '定時重複做一件事。every 是秒數或 "5m"/"2h"/"1d"，或用 at 給每天的時刻（"08:00"）；給 intent（一句要做的事，每次由核心規劃）' +
-          '或 app+action（直接執行某個程式的動作，不花模型）。只在 AI-OS 開著時執行' },
+          '或 app+action（直接執行某個程式的動作，不花模型）。只在 AI-OS 開著時執行。' +
+          '重要：排程是無人值守執行的，需要授權的動作不會跳視窗問，會直接被擋下。' +
+          '所以 intent 那句話如果會寫檔或刪檔，一定要在句子裡寫出目標路徑（寫到目錄就夠，' +
+          '例如「…追加到 /notes/待辦.md」），否則那一步每次都會失敗' },
   'schedule.list':   { cap: 'sys.timer', sig: '{}', desc: '列出所有排程與下次執行時間' },
   'schedule.cancel': { cap: 'sys.timer', sig: '{id, name}', desc: '取消一個排程（給 id 或名稱）' },
   'surface.close':   { cap: 'ui.surface', sig: '{title}', desc: '關閉視窗' },
