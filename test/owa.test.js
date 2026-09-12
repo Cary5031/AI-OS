@@ -141,7 +141,7 @@ test('InternetMessageId is asked for by name and as extended property 0x1035', (
      request asks for both and the normaliser reads both. */
   const body = owa.findItemBody('inbox', 0, 50);
   const props = body.Body.ItemShape.AdditionalProperties;
-  assert.ok(props.some((p) => p.FieldURI === 'MessageInternetMessageId'), '要用名字問一次');
+  assert.ok(props.some((p) => /InternetMessageId$/.test(String(p.FieldURI || ''))), '要用名字問一次');
   assert.ok(props.some((p) => String(p.PropertyTag).toLowerCase() === '0x1035'), '也要用擴充屬性問一次');
 
   const named = owa.internetMessageIdOf({ InternetMessageId: '<a@b>' });
@@ -150,6 +150,49 @@ test('InternetMessageId is asked for by name and as extended property 0x1035', (
   });
   assert.equal(named, '<a@b>');
   assert.equal(extended, '<a@b>', '只回擴充屬性的伺服器也要讀得到');
+});
+
+test('欄位拼法是量出來的，不是選一種賭', () => {
+  /* Measured against a real Exchange Online tenant: it refused `ItemSubject`
+     with 「invalid argument」 -- naming no argument -- and accepted
+     `item:Subject`. Every request in this module is built from the dialect, so
+     one measurement moves all of them at once, and a tenant that wants the
+     other spelling is a setting rather than a rewrite. */
+  const d = owa.dialect();
+  assert.equal(d.spelling, 'colon', '預設用真的租戶接受的那一種');
+  assert.equal(owa.fieldPath('subject').FieldURI, 'item:Subject');
+  assert.equal(owa.fieldPath('from').FieldURI, 'message:From');
+  assert.equal(owa.fieldPath('subject', { propType: 'PropertyUri:#Exchange', spelling: 'concat' }).FieldURI,
+    'ItemSubject', '另一種拼法還在，探測才有東西可以比');
+
+  const find = owa.findItemBody('inbox', 0, 50);
+  const paths = find.Body.ItemShape.AdditionalProperties.map((p) => p.FieldURI).filter(Boolean);
+  assert.ok(paths.every((x) => x.includes(':')), '整份請求都要用同一種拼法：' + paths.join(', '));
+  assert.equal(find.Body.SortOrder[0].Path.FieldURI, 'item:DateTimeReceived', '排序也是');
+  assert.equal(find.Body.Paging.__type, 'IndexedPageView:#Exchange');
+  assert.equal(find.Body.Paging.Offset, 0);
+  assert.equal(owa.findItemBody('inbox', 100, 50).Body.Paging.Offset, 100, '翻頁要真的翻');
+  assert.equal(find.Header.RequestServerVersion, 'V2018_01_18', '版本跟著真的用戶端走');
+
+  const get = owa.getItemBody('AAA');
+  assert.equal(get.Body.ItemShape.BodyType, 'Text', '內文要純文字：沒有腳本，也沒有遠端圖片');
+  assert.equal(get.Body.ItemShape.BaseShape, 'AllProperties');
+  const gpaths = get.Body.ItemShape.AdditionalProperties.map((p) => p.FieldURI).filter(Boolean);
+  assert.ok(gpaths.includes('item:Body'), '開一封信要問得到內文：' + gpaths.join(', '));
+  /* Measured: the same tenant that accepted `item:Body` refused the request the
+     moment `item:Attachments` was named beside it. The attachments come back
+     under AllProperties anyway -- what it objected to was being asked twice. */
+  assert.ok(!gpaths.includes('item:Attachments'),
+    '附件不能再指名一次，那個租戶會整個請求拒收');
+  assert.equal(owa.dialect().getExtras, 'body');
+
+  /* And the attachment request, which is a third shape with a third answer:
+     an empty AttachmentShape was the 「無效參數」. */
+  const att = owa.getAttachmentBody({ id: 'ATT1' });
+  assert.equal(att.Body.AttachmentShape, undefined, '空的 AttachmentShape 會被拒收，所以根本不送');
+  assert.equal(att.Body.AttachmentIds[0].Id, 'ATT1');
+  assert.equal(att.Body.AttachmentIds[0].__type, 'RequestAttachmentId:#Exchange');
+  assert.ok(owa.ATTACHMENT_SHAPES.length >= 5, '其他幾種寫法要留著，探測才有東西可以比');
 });
 
 /* --------------------------------------------------------------- cursor --- */
@@ -278,24 +321,46 @@ test('attachment metadata and bytes are found in either shape', () => {
 
 /* ------------------------------------------------------------- sign-in ---- */
 
-test('"sign in again" is told apart from "it broke"', () => {
-  /* One of these is the user's Tuesday morning and the other is a bug. A
-     scheduled run that reports the wrong one sends them to the wrong place. */
+test('每一種失敗都指到不同的下一步，不是全部叫人重新登入', () => {
+  /* The first version of this said "sign in again" to every HTML response and
+     every 403. A user who really is signed in then re-enters a password that
+     was never wrong, twice, and the actual problem -- a canary, a wrong path,
+     a tenant that authenticates some other way -- is never looked at. That is
+     the failure this test exists to stop; it was reported from a real tenant.
+
+     The rule: HTML only means "sign in" when the HTML is a sign-in page. */
+  const SVC = 'https://outlook.office.com/owa/service.svc';
+
   assert.equal(owa.needsLogin({ url: 'https://login.microsoftonline.com/common/oauth2/authorize', status: 200 }), true);
-  assert.equal(owa.needsLogin({ url: 'https://outlook.office.com/owa/service.svc', status: 401 }), true);
-  assert.equal(owa.needsLogin({ url: 'https://outlook.office.com/owa/service.svc', status: 440 }), true,
-    '440 是 OWA 自己的「工作階段過期」');
+  assert.equal(owa.needsLogin({ url: SVC, status: 401 }), true);
+  assert.equal(owa.needsLogin({ url: SVC, status: 440 }), true, '440 是 OWA 自己的「工作階段過期」');
   assert.equal(owa.needsLogin({
-    url: 'https://outlook.office.com/owa/service.svc', status: 200, contentType: 'text/html; charset=utf-8'
-  }), true, '回 HTML 就是被導去登入頁了，不是回答');
+    url: SVC, status: 200, contentType: 'text/html; charset=utf-8',
+    text: '<html><head><title>Sign in to your account</title></head>'
+  }), true, '登入頁是 HTML，這個要算');
 
   assert.equal(owa.needsLogin({
-    url: 'https://outlook.office.com/owa/service.svc', status: 200, contentType: 'application/json',
+    url: SVC, status: 404, contentType: 'text/html', text: '<h1>Not Found</h1>'
+  }), false, '找不到路徑也是 HTML，但重新登入一百次都不會變好');
+  assert.equal(owa.needsLogin({ url: SVC, status: 403, contentType: 'application/json' }), false,
+    '403 多半是 canary，不是登入');
+  assert.equal(owa.needsLogin({
+    url: SVC, status: 200, contentType: 'application/json',
     text: '{"Body":{"ResponseMessages":{"Items":[]}}}'
   }), false, '正常的空回應不是要重新登入');
-  assert.equal(owa.needsLogin({
-    url: 'https://outlook.office.com/owa/service.svc', status: 500, contentType: 'application/json'
-  }), false, '伺服器自己壞掉不該叫使用者去重新登入');
+  assert.equal(owa.needsLogin({ url: SVC, status: 500, contentType: 'application/json' }), false,
+    '伺服器自己壞掉不該叫使用者去重新登入');
+
+  /* And the four答案 are four different sentences. */
+  assert.equal(owa.classify({ url: 'https://login.microsoftonline.com/x', status: 200 }).code, 'ENEEDLOGIN');
+  assert.equal(owa.classify({ url: SVC, status: 403, contentType: 'application/json' }).code, 'EFORBIDDEN');
+  assert.equal(owa.classify({ url: SVC, status: 404, contentType: 'text/html', text: '<h1>no</h1>' }).code, 'ESHAPE');
+  assert.equal(owa.classify({ url: SVC, status: 500, contentType: 'application/json' }).code, 'EREMOTE');
+  assert.equal(owa.classify({ url: SVC, status: 200, contentType: 'application/json', text: '{}' }), null,
+    '好的回應不該被分類成失敗');
+
+  const canary = owa.classify({ url: SVC, status: 403, contentType: 'application/json' });
+  assert.ok(canary.message.includes('重新整理'), '403 要說「把分頁重新整理」，那才是能修好它的動作');
 });
 
 test('the mailbox address is where reading happens, and it cannot be turned into somewhere else', () => {
@@ -380,9 +445,19 @@ test('the source is read-only by construction: the verbs simply are not there', 
      message telling the model to delete the audit mail. There is no call in the
      module that could change the real mailbox, and this is the test that
      notices the day somebody adds one. */
+  /* Matched as a verb at the front of the name, not as a substring anywhere in
+     it: the first version of this tripwire fired on `forwardable`, a header
+     filter, which is the kind of false alarm that gets a check deleted rather
+     than fixed. A mutating export is named for what it mutates -- deleteItem,
+     markSeen -- so the verb is at the start. */
+  const MUTATES = /^(send|delete|remove|move|mark|flag|reply|forward|purge|empty|update|create)([A-Z0-9_]|$)/;
   const exported = Object.keys(owa);
-  const writes = exported.filter((k) => /send|delete|remove|move|markSeen|setSeen|flag|reply|forward/i.test(k));
+  const writes = exported.filter((k) => MUTATES.test(k));
   assert.deepEqual(writes, [], '這個模組不該有任何會改動真實信箱的出口：' + writes.join(', '));
+  assert.ok(MUTATES.test('deleteItem') && MUTATES.test('markSeen') && MUTATES.test('sendMail'),
+    '絆線本身要抓得到真的會出事的名字');
+  assert.ok(!MUTATES.test('reusableHeaders') && !MUTATES.test('forgetTemplate'),
+    '也不能一看到 forward/forget 幾個字母就叫');
 
   const src = require('node:fs').readFileSync(require.resolve('../app/main/owa.js'), 'utf8');
   for (const action of ['CreateItem', 'DeleteItem', 'MoveItem', 'UpdateItem', 'SendItem', 'MarkAsRead']) {

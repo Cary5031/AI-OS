@@ -274,6 +274,80 @@ function stop(id) {
   return { ok: true };
 }
 
+/* How long to sit watching a tab before giving up on seeing a matching request.
+   A page that is already open and idle still polls its own server every few
+   seconds; a page that has just been opened has to sign in first, which is why
+   the caller passes a longer wait for that case. */
+const LEARN_TIMEOUT_MS = 20000;
+
+/**
+ * Watch one tab and hand back the headers it sends its own server.
+ *
+ * Some services cannot be asked anything useful without credentials that live
+ * only inside the page -- a bearer token the page fetched, a routing header its
+ * own code computes. Reading the page's DOM does not reach them and neither
+ * does its cookie jar. What does reach them is watching the request go out,
+ * which is what a browser's own network panel does.
+ *
+ * Returns `{url, method, headers}` for the first request whose URL matches, or
+ * null if none went out in time. The caller decides which of those headers it
+ * is willing to reuse; this function makes no judgement and keeps no copy.
+ *
+ * The debugger is detached again on the way out, and never detached if it was
+ * somebody else's -- DevTools open on this tab is a refusal, not a takeover.
+ */
+function learnRequest(id, { match, timeout = LEARN_TIMEOUT_MS } = {}) {
+  const tab = get(id);
+  const wc = tab.view.webContents;
+  const re = match instanceof RegExp ? match : new RegExp(String(match || '.'));
+  const dbg = wc.debugger;
+
+  let mine = false;
+  try {
+    if (!dbg.isAttached()) { dbg.attach('1.3'); mine = true; }
+  } catch (e) {
+    throw Object.assign(new Error('這個分頁已經有別的除錯器連著：' + String(e.message || e)),
+      { code: 'EDEBUGGER' });
+  }
+
+  return new Promise((resolve) => {
+    const pending = new Map();
+    let done = false;
+
+    function finish(value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { dbg.removeListener('message', onMessage); } catch { /* already gone */ }
+      if (mine) { try { dbg.detach(); } catch { /* already gone */ } }
+      resolve(value);
+    }
+
+    function onMessage(_event, method, params) {
+      if (done) return;
+      if (method === 'Network.requestWillBeSent') {
+        if (re.test(params.request.url)) {
+          pending.set(params.requestId, { url: params.request.url, method: params.request.method });
+          /* Bounded: a busy page would otherwise grow this map for as long as
+             nothing matched the extra-info half. */
+          if (pending.size > 64) pending.delete(pending.keys().next().value);
+        }
+        return;
+      }
+      /* The headers actually put on the wire arrive separately from the request
+         itself, and only this half has the ones the network stack added. */
+      if (method === 'Network.requestWillBeSentExtraInfo') {
+        const base = pending.get(params.requestId);
+        if (base) finish({ ...base, headers: params.headers || {} });
+      }
+    }
+
+    const timer = setTimeout(() => finish(null), Math.max(1000, timeout));
+    dbg.on('message', onMessage);
+    dbg.sendCommand('Network.enable').catch(() => finish(null));
+  });
+}
+
 /**
  * The shell's page zoom (系統 → 文字大小), read from the process that set it.
  * 1 when there is no window to ask.
@@ -739,7 +813,7 @@ async function pageNodes(id, limit = 4000) {
 module.exports = {
   init, create, navigate, goBack, goForward, reload, stop,
   setBounds, show, hide, hideAll, suspend, destroy, destroyAll,
-  runIsolated, setPageReadyHook, ISOLATED_WORLD,
+  runIsolated, setPageReadyHook, ISOLATED_WORLD, learnRequest,
   readPage, pageNodes, article, articleImages, printTab, applyToPage,
   openExternal, list, toUrl,
   PARTITION, HOME, BLANK

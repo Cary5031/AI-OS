@@ -87,7 +87,7 @@ function guarded(op, fn, precheck, what) {
       const data = await fn(args);
       return { ok: true, data, verdict: auth.verdict, op };
     } catch (e) {
-      return { ok: false, code: e.code || 'EFAIL', error: e.message, verdict: auth.verdict, op };
+      return { ok: false, code: e.code || 'EFAIL', error: e.message, detail: e.detail, verdict: auth.verdict, op };
     }
   };
 }
@@ -98,7 +98,12 @@ function plain(fn) {
     try {
       return { ok: true, data: await fn(args) };
     } catch (e) {
-      return { ok: false, code: e.code || 'EFAIL', error: e.message };
+      /* `detail` is the evidence a failure carried with it -- what was asked,
+         what came back, what status. Without it every remote failure arrives as
+         one sentence and the window has nothing to show but that sentence, even
+         when the sentence is about the wrong problem. Only set by code that
+         built it deliberately, and it never carries a credential. */
+      return { ok: false, code: e.code || 'EFAIL', error: e.message, detail: e.detail };
     }
   };
 }
@@ -317,7 +322,12 @@ function register(getWindow) {
     } catch (e) {
       // An abort is the stop button working, not a failure to report as one.
       if (e && e.name === 'AbortError') return { ok: false, code: 'EABORT', error: '已中止' };
-      return { ok: false, code: e.code || 'EFAIL', error: e.message };
+      /* `detail` is the evidence a failure carried with it -- what was asked,
+         what came back, what status. Without it every remote failure arrives as
+         one sentence and the window has nothing to show but that sentence, even
+         when the sentence is about the wrong problem. Only set by code that
+         built it deliberately, and it never carries a credential. */
+      return { ok: false, code: e.code || 'EFAIL', error: e.message, detail: e.detail };
     }
   });
 
@@ -937,10 +947,21 @@ function register(getWindow) {
      copies them out to wherever the person said. Origin 'mail' is what makes
      the gate treat the file as untrusted afterwards, wherever it lands. */
   ipcMain.handle('mail:saveAttachment', guarded('fs.write', async ({ messageId, index, to } = {}) => {
-    const a = await mail.store.attachment(messageId, index);
+    let a = await mail.store.attachment(messageId, index);
     if (!a) throw Object.assign(new Error('沒有這個附件'), { code: 'ENOENT' });
     if (!a.data) {
-      throw Object.assign(new Error('這個附件的內容沒有存在本機' + (a.reason ? '（' + a.reason + '）' : '，重新同步一次試試')),
+      /* Fetch it again rather than telling the user to re-sync, which used to be
+         the advice and did nothing: the body is already stored, so the sync that
+         would have re-fetched the attachment returns early. One attempt, then
+         the honest failure with the source's own reason in it. */
+      try {
+        await mail.refreshAttachments({ messageId });
+        a = await mail.store.attachment(messageId, index);
+      } catch (e) { /* the error below is the one worth showing */ }
+    }
+    if (!a || !a.data) {
+      throw Object.assign(
+        new Error('這個附件的內容拿不到' + (a && a.reason ? '（' + a.reason + '）' : '')),
         { code: 'ENODATA' });
     }
     const out = await sandbox.writeBytes(to, a.data.toString('base64'), {
@@ -1019,6 +1040,13 @@ function register(getWindow) {
 
   ipcMain.handle('owa:probe', guarded('mail.list',
     async () => mail.owa.probe(), null, '確認 Outlook 網頁信箱還登入著'));
+
+  /* What is actually happening between here and the mailbox, in facts rather
+     than in one sentence that may be about the wrong problem. Never carries a
+     cookie value, a token or any message content -- see owa.js diagnose(). */
+  ipcMain.handle('owa:diagnose', guarded('mail.list',
+    async ({ shapes } = {}) => mail.owa.diagnose({ shapes: shapes !== false }),
+    null, '檢查 Outlook 網頁信箱的連線與請求形狀'));
 
   /* ------------------------------------------------------------ office ---- */
   /* Format conversion is pure computation on bytes the caller already had, so it

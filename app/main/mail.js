@@ -474,6 +474,29 @@ async function syncBody({ folder = 'INBOX', uid, messageId } = {}) {
 }
 
 /**
+ * Fetch a message's attachments again, for one already opened.
+ *
+ * `syncBody` returns early once the body is stored, so an attachment that could
+ * not be fetched the first time could never be fetched at all -- and the reader
+ * offered the file anyway, with 「重新同步一次試試」 as the advice, which did
+ * nothing at all. This is the something.
+ */
+async function refreshAttachments({ folder = 'INBOX', uid, messageId } = {}) {
+  if (isWeb()) {
+    if (!store.ready()) await store.init(account.email);
+    return owa.refreshAttachments({ messageId });
+  }
+  requireAccount();
+  if (!store.ready()) await store.init(account.email);
+  const held = store.get(messageId);
+  if (!held) throw Object.assign(new Error('本機沒有這封信，先同步一次'), { code: 'ENOMSG' });
+  const full = await read({ folder: folder || held.folder, uid: uid != null ? uid : held.uid, withData: true });
+  const kept = await store.putAttachments(messageId, full.attachments || []);
+  await store.flush();
+  return { messageId, attachments: kept.length, stored: kept.filter((a) => a.stored).length };
+}
+
+/**
  * Mark read, here and -- unless the account says otherwise -- on the server.
  *
  * The one place a local action is allowed out. Without it the phone still shows
@@ -841,7 +864,7 @@ module.exports = {
   folders, list, read, markSeen, send,
   /* The mirror. `list`/`read` above still talk to the server and are what the
      sync uses; everything the application shows comes from these. */
-  syncFolder, syncBody, setSeen, setSyncSeen, store,
+  syncFolder, syncBody, setSeen, setSyncSeen, store, refreshAttachments,
   /* The web source, for the channels that are about it and not about mail in
      general: signing in, and asking whether the session still works. */
   owa, isWeb,

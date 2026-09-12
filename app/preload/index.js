@@ -334,7 +334,8 @@ contextBridge.exposeInMainWorld('aios', {
     /* Outlook on the web: where to sign in, and whether the session still works.
        There is deliberately no channel here that could change the real mailbox. */
     loginUrl: () => invoke('owa:loginUrl'),
-    probe: () => invoke('owa:probe')
+    probe: () => invoke('owa:probe'),
+    diagnose: (opts) => invoke('owa:diagnose', opts || {})
   },
 
   /* ----------------------------------------------------------- bookmarks */
