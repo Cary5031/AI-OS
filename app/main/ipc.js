@@ -967,7 +967,7 @@ function register(getWindow) {
      fetched an hour ago does not make it trusted. */
 
   ipcMain.handle('mail:sync', guarded('mail.list',
-    async ({ folder, limit }) => mail.syncFolder({ folder, limit }),
+    async ({ folder, limit, deep, days }) => mail.syncFolder({ folder, limit, deep, days }),
     null, '把信箱裡的新信同步到本機'));
 
   ipcMain.handle('mail:mirrorList', guarded('mail.list',
@@ -1000,6 +1000,25 @@ function register(getWindow) {
   ipcMain.handle('mail:syncSeenPref', plain(async ({ on }) => mail.setSyncSeen(on)));
   ipcMain.handle('mail:mirrorStats', plain(async () =>
     (mail.store.ready() ? mail.store.stats() : null)));
+  ipcMain.handle('mail:coverage', plain(async ({ folder } = {}) =>
+    (mail.store.ready() ? mail.store.coverage(folder || 'INBOX') : null)));
+
+  /* ------------------------------------------------- Outlook on the web --- */
+  /* Signing in is the user's job in a browser tab, so this channel hands back a
+     URL and nothing else -- no window is opened from here, no form is touched,
+     and no password ever reaches this process. Ungated for the same reason the
+     account form is: it is the user asking where to go.
+
+     Checking the session, on the other hand, makes a real request to the real
+     mailbox, so it answers `mail.list` exactly as an IMAP connection test does. */
+
+  ipcMain.handle('owa:loginUrl', plain(async () => ({
+    url: mail.owa.loginUrl(),
+    configured: mail.owa.configured()
+  })));
+
+  ipcMain.handle('owa:probe', guarded('mail.list',
+    async () => mail.owa.probe(), null, '確認 Outlook 網頁信箱還登入著'));
 
   /* ------------------------------------------------------------ office ---- */
   /* Format conversion is pure computation on bytes the caller already had, so it

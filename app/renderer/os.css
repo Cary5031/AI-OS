@@ -2687,6 +2687,19 @@ select optgroup {
 .ml-attach-row { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); padding: 3px 0; }
 .ml-account, .ml-form { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
 
+/* The second mail source. The account panel for a mailbox read through the
+   browser has to say three things an IMAP panel never has to: there is no
+   password here, the session expires, and nothing on this path can change the
+   real mailbox. The door on the setup form is separated by a rule because it is
+   a different route in, not a variation of the one above it. */
+.ml-web { display: flex; flex-direction: column; gap: 8px; }
+.ml-web-door { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.ml-sep { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 6px 0 2px; }
+.ml-web-state {
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--bg-sunken); font-family: var(--mono); font-size: 10px;
+}
+
 /* ###########################################################################
    Core model provider
    ######################################################################### */

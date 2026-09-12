@@ -113,6 +113,7 @@ async function init(email) {
   local = await readJson(p.local, {});
   cursors = await readJson(p.cursors, {});
   bodyCache.clear();
+  sourceMap = null;
   dirty = false;
   return stats();
 }
@@ -183,6 +184,7 @@ function put(msg) {
     attachments: Array.isArray(before.attachments) ? before.attachments : []
   };
   dirty = true;
+  sourceMap = null;
   return index[id];
 }
 
@@ -231,6 +233,10 @@ async function putAttachments(messageId, list) {
       entry.stored = true;
     } else if (size > MAX_ONE_ATTACHMENT) {
       entry.reason = '超過 ' + Math.round(MAX_ONE_ATTACHMENT / 1048576) + ' MiB，沒有存下來';
+    } else if (a.reason) {
+      /* The feeder knew why it could not get the bytes. Keep its words: 「取不到
+         附件內容」 sends the user somewhere, 「沒有存下來」 with no reason does not. */
+      entry.reason = String(a.reason).slice(0, 200);
     }
     kept.push(entry);
   }
@@ -440,6 +446,56 @@ function unknown(ids) {
   return ids.filter((id) => !index[id]);
 }
 
+/**
+ * The row a source's own id belongs to, if the mirror already has one.
+ *
+ * A feeder whose ids are not Message-IDs asks this before it mints a key. Two
+ * responses about one message can differ in which fields they carry -- a list
+ * request and an open request, or the same request after a server update -- and
+ * without this lookup the second one silently creates a second row, orphaning
+ * the first one's tombstone so a deleted message reappears. Built on demand and
+ * dropped by put(), because it is a view of the index rather than a second copy
+ * of it: the shape that has gone wrong here five times is two states pointing
+ * at one place, and a cache that can drift is exactly that.
+ */
+let sourceMap = null;
+
+function bySource(sourceId) {
+  const want = String(sourceId || '');
+  if (!want) return null;
+  if (!sourceMap) {
+    sourceMap = new Map();
+    for (const id of Object.keys(index)) {
+      const sid = index[id].sourceId;
+      if (sid) sourceMap.set(String(sid), id);
+    }
+  }
+  return sourceMap.get(want) || null;
+}
+
+/** This account's directory, for anything a feeder must keep beside the mirror. */
+function dir() {
+  return ready() ? paths().base : null;
+}
+
+/**
+ * How far back this folder actually reaches, and how much of it is here.
+ *
+ * A mirror is a partial copy by construction, and an answer computed from a
+ * partial copy is a partial answer. Returned so the application and the model
+ * can say 「只到 9 月 1 日」 instead of implying the week is complete.
+ */
+function coverage(folder) {
+  const ids = Object.keys(index).filter((id) => index[id].folder === folder);
+  const dates = ids.map((id) => index[id].date).filter((d) => d > 0);
+  return {
+    folder,
+    messages: ids.length,
+    oldest: dates.length ? Math.min(...dates) : 0,
+    newest: dates.length ? Math.max(...dates) : 0
+  };
+}
+
 function cursor(folder) {
   return cursors[folder] || { uidValidity: 0, highestUid: 0, at: 0 };
 }
@@ -545,14 +601,24 @@ async function trimAttachments() {
   return { bytes, dropped };
 }
 
-/** Forget everything for this account: used when the account is removed. */
+/**
+ * Forget everything for this account: used when the account is removed.
+ *
+ * Leaves the store closed, not empty. An empty-but-open store answers 「零封」 to
+ * a question about a mailbox that no longer exists here, which reads as "your
+ * mail is gone" rather than "there is no account"; closed, every caller gets
+ * the same 「還沒設定帳號」 it gets before the first sync.
+ */
 async function purge() {
   if (!ready()) return false;
   await fs.rm(paths().base, { recursive: true, force: true });
-  index = {};
-  local = {};
-  cursors = {};
+  index = null;
+  local = null;
+  cursors = null;
+  root = null;
+  account = null;
   bodyCache.clear();
+  sourceMap = null;
   dirty = false;
   return true;
 }
@@ -563,7 +629,7 @@ module.exports = {
   putAttachments, attachment,
   search, partyMatches, addressesIn, snippetOf,
   setLocal, localOf,
-  cursor, setCursor,
+  cursor, setCursor, bySource, dir, coverage,
   trim, trimAttachments, purge,
   keyOf, accountKey,
   MAX_ONE_ATTACHMENT, MAX_ATTACHMENTS

@@ -25,6 +25,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const store = require('./mailstore');
+const owa = require('./owa');
 const autoconfig = require('./mailautoconfig');
 
 let ImapFlow = null;
@@ -56,6 +57,11 @@ async function init(userDataDir) {
     const raw = JSON.parse(await fs.readFile(credFile, 'utf8'));
     if (raw && raw.email) {
       account = {
+        /* Which of the two sources this address is read through. Absent in
+           every account written before the web source existed, and those are
+           all IMAP -- so the default is not a guess. */
+        kind: raw.kind === 'owa' ? 'owa' : 'imap',
+        base: raw.base || '',
         provider: raw.provider || 'custom',
         email: raw.email,
         /* Accounts written before autoconfig existed have no `login`, and for
@@ -68,6 +74,13 @@ async function init(userDataDir) {
         savedAt: raw.savedAt || 0
       };
       password = raw.password || null;
+      if (account.kind === 'owa') owa.configure({ email: account.email, base: account.base });
+      /* The mirror is opened here, for either kind, rather than by the first
+         sync. A restart followed by a search used to throw on an index that was
+         null although the files on disk were full, and under the web source the
+         first call of the day may well be the scheduled search rather than a
+         sync. */
+      try { await store.init(account.email); } catch { /* mirror opens on first sync instead */ }
     }
   } catch { /* no account configured */ }
   return status();
@@ -90,9 +103,18 @@ async function discover(email) {
  * The renderer has no use for it and the model must not see it in any form.
  */
 function status() {
+  const kind = account ? (account.kind || 'imap') : null;
   return {
     available: !!(ImapFlow && nodemailer),
-    configured: !!(account && account.email && password),
+    /* An Outlook Web account has no password to hold -- the credential is a
+       cookie in the browser partition -- so "configured" cannot mean the same
+       thing for both. */
+    configured: kind === 'owa' ? true : !!(account && account.email && password),
+    kind,
+    /* Where the second source reads from, and whether writing is possible at
+       all. The web source is read-only by construction, not by setting. */
+    base: account ? (account.base || '') : null,
+    readOnly: kind === 'owa',
     email: account ? account.email : null,
     provider: account ? account.provider : null,
     /* The provider's own name for itself when discovery found one -- "Fastmail"
@@ -111,26 +133,57 @@ function status() {
        which makes this a second inbox rather than a view of the first. */
     syncSeen: account ? account.syncSeen !== false : true,
     mirror: store.ready() ? store.stats() : null,
+    webFolders: kind === 'owa' ? owa.folders() : null,
+    loginUrl: kind === 'owa' ? owa.loginUrl() : null,
     presets: Object.fromEntries(Object.entries(PRESETS).map(([k, v]) => [k, { label: v.label, note: v.note }]))
   };
 }
 
 /** Flip whether reading here also marks read on the server. */
 async function setSyncSeen(on) {
+  if (isWeb()) throw readOnlyError();
   requireAccount();
   account.syncSeen = !!on;
   await fs.writeFile(credFile, JSON.stringify({ ...account, password }, null, 2), 'utf8');
   return status();
 }
 
-async function configure({ provider, email, password: pw, imap, smtp, syncSeen, label, source, username } = {}) {
-  if (!ImapFlow || !nodemailer) throw new Error('缺少 imapflow / nodemailer 套件');
+async function configure({ kind, provider, email, password: pw, imap, smtp, syncSeen, label, source, username, base } = {}) {
   const mail = String(email || '').trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) throw new Error('信箱格式不對');
+
+  /* The web source: an address and where to read it from. No password is asked
+     for, here or anywhere -- see decision 1 in owa.js. Nothing is verified at
+     this point because the only way to verify is to have signed in, and signing
+     in is the user's next step, not this one's. */
+  if (kind === 'owa') {
+    const conf = {
+      kind: 'owa',
+      provider: 'owa',
+      email: mail,
+      login: mail,
+      label: String(label || 'Outlook 網頁信箱').trim().slice(0, 80),
+      source: 'owa',
+      base: owa.sanitiseBase(base),
+      syncSeen: false,
+      savedAt: Date.now()
+    };
+    account = conf;
+    password = null;
+    owa.configure({ email: conf.email, base: conf.base });
+    await fs.mkdir(path.dirname(credFile), { recursive: true });
+    await fs.writeFile(credFile, JSON.stringify(conf, null, 2), 'utf8');
+    cache.clear();
+    if (!store.ready()) await store.init(conf.email);
+    return status();
+  }
+
+  if (!ImapFlow || !nodemailer) throw new Error('缺少 imapflow / nodemailer 套件');
   if (!pw) throw new Error('沒有密碼');
 
   const preset = PRESETS[provider] || PRESETS.custom;
   const conf = {
+    kind: 'imap',
     provider: PRESETS[provider] ? provider : 'custom',
     email: mail,
     /* Nearly always the address itself. A handful of hosts want only the part
@@ -164,17 +217,55 @@ function sanitiseHost(h, defaultPort) {
   };
 }
 
+/**
+ * Remove the account, and with it the copy of the mailbox.
+ *
+ * The mirror used to survive this. `mailstore.purge()` has said 「用於帳號被移除時」
+ * since it was written and nothing ever called it, so 「移除帳號」 deleted a
+ * password and left every message, every body and every attachment byte on
+ * disk -- inherited whole by the next account configured with the same address.
+ * A button that says it removes the account has to remove the mail too; what it
+ * costs is the local-only state (the tombstones, the stars), and re-syncing
+ * brings the messages themselves back from the server.
+ */
 async function forget() {
+  let mirror = null;
+  try {
+    if (store.ready()) {
+      mirror = store.stats();
+      await store.purge();
+    }
+  } catch { /* a mirror that will not open cannot be holding anything either */ }
   account = null;
   password = null;
+  owa.configure(null);
   cache.clear();
   try { await fs.rm(credFile, { force: true }); } catch { /* ignore */ }
-  return status();
+  return { ...status(), purged: mirror ? mirror.messages + mirror.deleted : 0 };
 }
 
 function requireAccount() {
   if (!ImapFlow || !nodemailer) throw Object.assign(new Error('缺少郵件套件'), { code: 'ENODEP' });
   if (!account || !password) throw Object.assign(new Error('還沒設定郵件帳號'), { code: 'ENOACCOUNT' });
+}
+
+/**
+ * Which source this account is read through.
+ *
+ * Every dispatch below asks this and nothing else. The alternative -- deciding
+ * from what a row happens to carry, "it has a uid so it came from IMAP" -- is
+ * wrong the moment a mailbox has been read through both, and a mirror that
+ * outlives an account change is exactly the case where that happens.
+ */
+function isWeb() {
+  return !!(account && account.kind === 'owa');
+}
+
+function readOnlyError() {
+  return Object.assign(
+    new Error('這是 Outlook 網頁信箱帳號，只讀。要回信或刪除真實信件請到 Outlook。'),
+    { code: 'EREADONLY' }
+  );
 }
 
 /**
@@ -218,6 +309,9 @@ async function withImap(fn) {
 }
 
 async function folders() {
+  if (isWeb()) {
+    return owa.folders().map((f) => ({ path: f.name, name: f.label, specialUse: null }));
+  }
   return withImap(async (c) => {
     const list = await c.list();
     return list
@@ -228,6 +322,9 @@ async function folders() {
 
 /** Envelope-only listing: bodies are fetched on demand, one message at a time. */
 async function list({ folder = 'INBOX', limit = 30 } = {}) {
+  /* The live listing is IMAP's. Under the web source the mirror is the only
+     list there is, and mail:mirrorList is the channel that reads it. */
+  if (isWeb()) throw readOnlyError();
   const take = Math.max(1, Math.min(100, limit));
   return withImap(async (c) => {
     const lock = await c.getMailboxLock(folder);
@@ -287,7 +384,11 @@ function messageIdOf(envelope, uid, folder) {
  * that is the server saying "the numbers you have mean nothing now", and
  * carrying on from the old highest UID would silently skip everything.
  */
-async function syncFolder({ folder = 'INBOX', limit = 200 } = {}) {
+async function syncFolder({ folder = 'INBOX', limit = 200, deep = false, days = 0 } = {}) {
+  if (isWeb()) {
+    if (!store.ready()) await store.init(account.email);
+    return owa.syncFolder({ folder, limit, deep, days });
+  }
   requireAccount();
   if (!store.ready()) await store.init(account.email);
 
@@ -350,6 +451,15 @@ async function syncFolder({ folder = 'INBOX', limit = 200 } = {}) {
  * list is what the application needs first.
  */
 async function syncBody({ folder = 'INBOX', uid, messageId } = {}) {
+  /* Dispatch on the account, never on the row. A row synced through IMAP before
+     the tenant switched basic auth off still carries a uid, and following that
+     uid under a web account reaches for a password that no longer exists; the
+     web source refuses it by name instead, which is a sentence the user can act
+     on rather than 「還沒設定郵件帳號」. */
+  if (isWeb()) {
+    if (!store.ready()) await store.init(account.email);
+    return owa.syncBody({ messageId });
+  }
   requireAccount();
   if (!store.ready()) await store.init(account.email);
 
@@ -372,6 +482,15 @@ async function syncBody({ folder = 'INBOX', uid, messageId } = {}) {
  * Deleting and filing stay local, which is what the mirror is for.
  */
 async function setSeen({ folder = 'INBOX', uid, messageId, seen = true } = {}) {
+  if (isWeb()) {
+    if (!store.ready()) await store.init(account.email);
+    store.setLocal(messageId, { seen: !!seen });
+    await store.flush();
+    /* Local and only local, whatever the row carries. An IMAP-era row's uid
+       would otherwise send a mark-read at a server this account has no password
+       for, and the reader would toast a sync failure on every open. */
+    return { messageId, seen: !!seen, pushed: false, readOnly: true };
+  }
   requireAccount();
   if (!store.ready()) await store.init(account.email);
   store.setLocal(messageId, { seen: !!seen });
@@ -396,6 +515,7 @@ async function setSeen({ folder = 'INBOX', uid, messageId, seen = true } = {}) {
  * active content in a privileged window.
  */
 async function read({ folder = 'INBOX', uid, withData = false } = {}) {
+  if (isWeb()) throw readOnlyError();
   const key = folder + ':' + uid;
   if (!withData && cache.has(key)) return cache.get(key);
 
@@ -582,6 +702,7 @@ function htmlToText(html) {
 }
 
 async function markSeen({ folder = 'INBOX', uid, seen = true } = {}) {
+  if (isWeb()) throw readOnlyError();
   return withImap(async (c) => {
     const lock = await c.getMailboxLock(folder);
     try {
@@ -611,6 +732,7 @@ async function markSeen({ folder = 'INBOX', uid, seen = true } = {}) {
  *     because the alternative looks exactly like mail that failed to send.
  */
 async function send({ to, cc, subject, body, inReplyTo, references } = {}) {
+  if (isWeb()) throw readOnlyError();
   requireAccount();
   const recipients = String(to || '').split(/[,;]/).map((s) => s.trim()).filter(Boolean);
   if (!recipients.length) throw new Error('沒有收件人');
@@ -689,6 +811,10 @@ async function appendToSent(info) {
 }
 
 async function verify() {
+  if (isWeb()) {
+    const p = await owa.probe();
+    return { web: p, imap: null, smtp: null };
+  }
   requireAccount();
   const out = { imap: null, smtp: null };
   try {
@@ -716,5 +842,8 @@ module.exports = {
   /* The mirror. `list`/`read` above still talk to the server and are what the
      sync uses; everything the application shows comes from these. */
   syncFolder, syncBody, setSeen, setSyncSeen, store,
+  /* The web source, for the channels that are about it and not about mail in
+     general: signing in, and asking whether the session still works. */
+  owa, isWeb,
   parseSource, PRESETS
 };

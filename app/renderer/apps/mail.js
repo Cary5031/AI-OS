@@ -146,6 +146,14 @@
       btnCompose.type = 'button';
       var btnAccount = el('button', 'fbtn', '\u2699 帳號');
       btnAccount.type = 'button';
+      /* A full rescan, for the one thing an overlapping cursor cannot see: a
+         message moved into the folder with an old received time -- a rule filed
+         it, someone restored it from Deleted Items. Only the web source has
+         that gap; IMAP's UID sync does not. */
+      var btnRescan = el('button', 'fbtn', '\u21ba 完整重掃');
+      btnRescan.type = 'button';
+      btnRescan.hidden = true;
+      btnRescan.title = '重新掃描整個時間範圍，找出被規則搬進來、日期比較舊的信';
       var acct = el('span', 'ml-acct');
       var searchBox = el('input', 'ml-search');
       searchBox.type = 'search';
@@ -155,6 +163,7 @@
       bar.appendChild(btnRefresh);
       bar.appendChild(btnCompose);
       bar.appendChild(btnAccount);
+      bar.appendChild(btnRescan);
       bar.appendChild(searchBox);
       bar.appendChild(acct);
       ctx.body.appendChild(bar);
@@ -183,6 +192,12 @@
 
         if (!status.available) {
           wrap.appendChild(el('p', 'app-error', '缺少 imapflow / nodemailer 套件，郵件功能無法使用。'));
+          readPane.appendChild(wrap);
+          return;
+        }
+
+        if (status.configured && status.kind === 'owa') {
+          wrap.appendChild(webAccountPanel());
           readPane.appendChild(wrap);
           return;
         }
@@ -224,10 +239,11 @@
           var forget = el('button', 'fbtn fbtn-danger', '移除帳號');
           forget.type = 'button';
           forget.addEventListener('click', async function () {
-            await A.mail.forget();
+            var gone = await A.mail.forget();
             setup = { email: '', disco: null, manual: false };
             await boot();
-            ctx.toast('帳號已移除，密碼一併刪除', 't-warn');
+            ctx.toast('帳號已移除，密碼一併刪除，本機那份信件副本也清掉了' +
+              (gone.ok && gone.data.purged ? '（' + gone.data.purged + ' 封）' : ''), 't-warn');
           });
           wrap.appendChild(forget);
           readPane.appendChild(wrap);
@@ -260,6 +276,33 @@
           form.appendChild(email);
           form.appendChild(go);
           form.appendChild(el('p', 'micro', '先找出這個網域的收發信伺服器，再問密碼。'));
+
+          /* The company mailbox door. O365 tenants have basic authentication
+             switched off, so no password typed here would work even if one were
+             asked for; the way in is the browser the user already uses. The
+             address is all this side needs -- it names the mirror, nothing
+             more. */
+          var web = el('div', 'ml-web-door');
+          web.appendChild(el('hr', 'ml-sep'));
+          var webBtn = el('button', 'fbtn', '\u25c8 公司 Outlook（O365 網頁登入）');
+          webBtn.type = 'button';
+          web.appendChild(webBtn);
+          web.appendChild(el('p', 'micro',
+            '公司信箱通常關掉了 IMAP。這條路不問密碼：你在瀏覽器分頁裡自己登入（含 2FA），' +
+            'AI-OS 只讀那個已登入的頁面，而且只讀——寄信、刪信、標記已讀都不會碰到真的信箱。'));
+          form.appendChild(web);
+
+          webBtn.addEventListener('click', async function () {
+            var addr = email.value.trim();
+            if (!addr) { ctx.toast('先填公司信箱地址', 't-warn'); email.focus(); return; }
+            webBtn.disabled = true;
+            var res = await A.mail.configure({ kind: 'owa', email: addr });
+            webBtn.disabled = false;
+            if (!res.ok) { ctx.toast(res.error, 't-err'); return; }
+            await boot();
+            accountForm();
+            openLogin();
+          });
 
           form.addEventListener('submit', async function (e) {
             e.preventDefault();
@@ -451,6 +494,85 @@
         }
       }
 
+      /**
+       * The panel for a mailbox read through the browser.
+       *
+       * Deliberately different from the IMAP one, because the two differ in the
+       * thing the user most needs to know: there is no password here, the
+       * session can expire, and nothing on this path can change the real
+       * mailbox. Saying that plainly is cheaper than a support conversation
+       * about why 「寄信」 is missing.
+       */
+      function webAccountPanel() {
+        var box = el('div', 'ml-web');
+        var dl = el('dl', 'ml-dl');
+        [['帳號', status.email],
+         ['讀取方式', 'Outlook 網頁（你在瀏覽器登入的那個工作階段）'],
+         ['網址', status.base || ''],
+         ['憑證', '沒有存密碼。憑證是瀏覽器分頁裡的 cookie，AI-OS 從頭到尾沒看過你的密碼與 2FA'],
+         ['可以做的事', '讀信、讀附件、搜尋（含內文）、在本機刪除與標記'],
+         ['不會做的事', '寄信、刪除真實信件、搬資料夾、把已讀同步回伺服器——這條路上根本沒有這些呼叫']
+        ].forEach(function (r) {
+          dl.appendChild(el('dt', null, r[0]));
+          dl.appendChild(el('dd', null, r[1] || '—'));
+        });
+        box.appendChild(dl);
+
+        var state = el('p', 'ml-web-state micro', '登入狀態：檢查中…');
+        box.appendChild(state);
+
+        var login = el('button', 'fbtn fbtn-primary', '在瀏覽器登入 Outlook');
+        login.type = 'button';
+        login.addEventListener('click', function () { openLogin(); });
+        box.appendChild(login);
+
+        var check = el('button', 'fbtn', '重新檢查');
+        check.type = 'button';
+        check.addEventListener('click', function () { look(); });
+        box.appendChild(check);
+
+        var forget = el('button', 'fbtn fbtn-danger', '移除帳號');
+        forget.type = 'button';
+        forget.addEventListener('click', async function () {
+          var gone = await A.mail.forget();
+          setup = { email: '', disco: null, manual: false };
+          await boot();
+          ctx.toast('帳號已移除，本機那份信件副本也清掉了' +
+            (gone.ok && gone.data.purged ? '（' + gone.data.purged + ' 封）' : '') +
+            '。瀏覽器裡的登入沒有動，要一併登出請到那個分頁。', 't-warn');
+        });
+        box.appendChild(forget);
+
+        look();
+        return box;
+
+        async function look() {
+          state.textContent = '登入狀態：檢查中…';
+          state.className = 'ml-web-state micro';
+          var r = await A.mail.probe();
+          if (!r.ok) { state.textContent = '登入狀態：檢查不了（' + r.error + '）'; state.className = 'ml-web-state app-error'; return; }
+          var d = r.data;
+          state.textContent = '登入狀態：' + d.detail;
+          state.className = 'ml-web-state ' + (d.ok ? 'micro' : 'app-error');
+        }
+      }
+
+      /**
+       * Open the mailbox in a browser tab so the user can sign in.
+       *
+       * This is the whole of AI-OS's involvement in signing in: it opens a page.
+       * No form is filled, no password is read, no second factor is handled --
+       * and because the tab lives in the same partition every other tab uses,
+       * the cookies it ends up with are the ones the sync will use.
+       */
+      async function openLogin() {
+        var r = await A.mail.loginUrl();
+        var url = r.ok && r.data ? r.data.url : '';
+        if (!url) { ctx.toast('還沒設定網頁信箱帳號', 't-warn'); return; }
+        await AIOS.apps.launch('browser', url);
+        ctx.toast('在瀏覽器分頁裡登入（email → 密碼 → 2FA），完成後回來按「收信」', 't-ok');
+      }
+
       /* ---------------------------------------------------------- reading */
 
       function renderList() {
@@ -507,7 +629,16 @@
         var last = stats.ok && stats.data && stats.data.lastSync
           ? '，上次同步 ' + new Date(stats.data.lastSync).toLocaleString()
           : '，還沒同步過';
-        foot.textContent = folder + '：本機 ' + messages.length + ' 封' + last;
+        /* How far back the copy actually reaches. A mirror is partial by
+           construction, and an answer computed from a partial copy is a partial
+           answer -- 「這禮拜從 ABC 寄來的」 is only trustworthy if this week is
+           in here. Saying the date is the difference between a partial answer
+           and a wrong one. */
+        var cov = await A.mail.coverage(folder);
+        var reach = cov.ok && cov.data && cov.data.oldest
+          ? '，最早到 ' + new Date(cov.data.oldest).toLocaleDateString()
+          : '';
+        foot.textContent = folder + '：本機 ' + messages.length + ' 封' + reach + last;
         ctx.setTitle('郵件 — ' + folder);
         publish();
         ctx.save();
@@ -563,18 +694,33 @@
        * The only thing that reaches the mailbox for reading. Everything the user
        * does afterwards -- deleting, starring, filing -- stays here.
        */
-      async function syncNow() {
+      async function syncNow(opts) {
         if (!status.configured) { accountForm(); return; }
-        foot.textContent = '同步 ' + folder + '…';
-        var res = await A.mail.sync(folder, 200);
+        var deep = !!(opts && opts.deep);
+        foot.textContent = (deep ? '完整重掃 ' : '同步 ') + folder + '…';
+        var res = await A.mail.sync(folder, 600, { deep: deep });
         if (!res.ok) {
           foot.textContent = '';
+          /* Expired sign-in is not a failure to debug, it is Tuesday. Say the
+             one thing that fixes it and put the button next to the words. */
+          if (res.code === 'ENEEDLOGIN') {
+            ctx.toast('Outlook 的登入過期了，要在瀏覽器重新登入一次', 't-warn');
+            accountForm();
+            openLogin();
+            return;
+          }
           ctx.toast('同步失敗：' + res.error, 't-err');
           if (res.code === 'EAUTH') accountForm();
           return;
         }
         if (res.data.reset) {
           ctx.toast('伺服器重新編號過信件（UIDVALIDITY 變了），已重新讀取這個資料夾', 't-warn');
+        }
+        /* A field the web source renamed out from under us shows up here, once,
+           instead of as a column of blanks nobody can explain. */
+        if (res.data.missing && res.data.missing.length) {
+          ctx.toast('這次同步有欄位讀不到：' + res.data.missing.join('、') +
+            '。Outlook 的介面可能改版了。', 't-warn');
         }
         await loadFolder(folder);
         ctx.toast(res.data.fetched
@@ -816,6 +962,9 @@
           return;
         }
 
+        btnRescan.hidden = status.kind !== 'owa';
+        btnCompose.hidden = !!status.readOnly;
+
         var f = await A.mail.folders();
         folders = f.ok ? f.data : [{ path: 'INBOX', name: 'INBOX' }];
         folders.forEach(function (x) {
@@ -831,6 +980,7 @@
       // 收信 now means "go and get new mail", which is the only thing here that
       // touches the server for reading. The list itself is always local.
       btnRefresh.addEventListener('click', function () { syncNow(); });
+      btnRescan.addEventListener('click', function () { syncNow({ deep: true }); });
       btnCompose.addEventListener('click', function () { compose(null); });
       btnAccount.addEventListener('click', accountForm);
 

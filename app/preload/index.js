@@ -317,7 +317,7 @@ contextBridge.exposeInMainWorld('aios', {
 
     /* The local mirror. The application reads these; the live calls above are
        what the sync itself uses. */
-    sync: (folder, limit) => invoke('mail:sync', { folder, limit }),
+    sync: (folder, limit, opts) => invoke('mail:sync', { folder, limit, deep: !!(opts && opts.deep), days: (opts && opts.days) || 0 }),
     mirrorList: (opts) => invoke('mail:mirrorList', opts || {}),
     mirrorRead: (messageId, folder, uid) => invoke('mail:mirrorRead', { messageId, folder, uid }),
     /* Subject, sender and body, over the mirror. `opts` is
@@ -329,7 +329,12 @@ contextBridge.exposeInMainWorld('aios', {
     setSeen: (messageId, seen, folder, uid) =>
       invoke('mail:setSeen', { messageId, seen, folder, uid }),
     syncSeenPref: (on) => invoke('mail:syncSeenPref', { on }),
-    mirrorStats: () => invoke('mail:mirrorStats')
+    mirrorStats: () => invoke('mail:mirrorStats'),
+    coverage: (folder) => invoke('mail:coverage', { folder }),
+    /* Outlook on the web: where to sign in, and whether the session still works.
+       There is deliberately no channel here that could change the real mailbox. */
+    loginUrl: () => invoke('owa:loginUrl'),
+    probe: () => invoke('owa:probe')
   },
 
   /* ----------------------------------------------------------- bookmarks */
