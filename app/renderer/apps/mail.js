@@ -190,8 +190,15 @@
         var wrap = el('div', 'ml-account');
         wrap.appendChild(el('h3', null, status.configured ? '郵件帳號' : '設定郵件帳號'));
 
-        if (!status.available) {
-          wrap.appendChild(el('p', 'app-error', '缺少 imapflow / nodemailer 套件，郵件功能無法使用。'));
+        /* The IMAP packages being absent used to close the whole window. It
+           should not: the web source needs neither of them -- it talks to an
+           already-signed-in browser session over HTTP -- so the door that does
+           work stays open, and the one that does not says why. */
+        if (!status.available && !status.configured) {
+          wrap.appendChild(el('p', 'app-error',
+            '缺少 imapflow / nodemailer 套件，IMAP 收發信不能用。' +
+            '下面那條路不需要那兩個套件。'));
+          wrap.appendChild(webOnlyDoor());
           readPane.appendChild(wrap);
           return;
         }
@@ -492,6 +499,40 @@
           }, 0);
           return form;
         }
+      }
+
+      /**
+       * The web door on its own, for when IMAP is not even an option.
+       *
+       * Same two steps as the one on the setup form: an address, then a browser
+       * tab the user signs into themselves.
+       */
+      function webOnlyDoor() {
+        var box = el('form', 'ml-form');
+        var email = el('input', 'ml-input');
+        email.type = 'email';
+        email.placeholder = '你的公司信箱';
+        email.setAttribute('aria-label', '信箱地址');
+        var go = el('button', 'fbtn fbtn-primary', '◈ 公司 Outlook（O365 網頁登入）');
+        go.type = 'submit';
+        box.appendChild(el('label', 'ml-label', '信箱'));
+        box.appendChild(email);
+        box.appendChild(go);
+        box.appendChild(el('p', 'micro',
+          '不問密碼：你在瀏覽器分頁裡自己登入（含 2FA），AI-OS 只讀那個已登入的頁面，而且只讀。'));
+        box.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var addr = email.value.trim();
+          if (!addr) { ctx.toast('先填公司信箱地址', 't-warn'); email.focus(); return; }
+          go.disabled = true;
+          var res = await A.mail.configure({ kind: 'owa', email: addr });
+          go.disabled = false;
+          if (!res.ok) { ctx.toast(res.error, 't-err'); return; }
+          await boot();
+          accountForm();
+          openLogin();
+        });
+        return box;
       }
 
       /**
