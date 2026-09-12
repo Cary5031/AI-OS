@@ -1645,6 +1645,34 @@
     return shown;
   }
 
+  /**
+   * While the desktop is folded for a maximised window the dock waits just off
+   * the bottom edge; reaching for the command strip brings it back.
+   *
+   * The delay on the way out is what makes it usable: the dock reveals above
+   * the strip, so getting to it means leaving the strip, and a dock that
+   * vanished at that moment would be one nobody could ever click.
+   */
+  function installDockPeek() {
+    var bar = $('intent-form');
+    var dock = $('dock');
+    if (!bar || !dock) return;
+    var away = null;
+    function peek(on) {
+      if (away) { window.clearTimeout(away); away = null; }
+      if (on) { document.body.classList.add('peek'); return; }
+      away = window.setTimeout(function () { document.body.classList.remove('peek'); }, 340);
+    }
+    bar.addEventListener('pointerenter', function () { peek(true); });
+    bar.addEventListener('pointerleave', function () { peek(false); });
+    dock.addEventListener('pointerenter', function () { peek(true); });
+    dock.addEventListener('pointerleave', function () { peek(false); });
+    // Tabbing to the dock has to reveal it too, or the keyboard lands on
+    // buttons that are off screen.
+    dock.addEventListener('focusin', function () { peek(true); });
+    dock.addEventListener('focusout', function () { peek(false); });
+  }
+
   function toggleHud(id) {
     var hud = $(id);
     var narrow = window.innerWidth <= 1040;
@@ -1659,7 +1687,56 @@
     }
     var dk = document.querySelector('.dk[data-dock="' + id + '"]');
     if (dk) dk.setAttribute('aria-pressed', shown ? 'true' : 'false');
+    // The rails are part of what "the whole desktop" means, so anything
+    // maximised has to grow into the space one just gave back.
+    AIOS.wm.refitMax();
   }
+
+  /* Which rails this folded away, so un-maximising restores those and only
+     those. A rail somebody opened while maximised was a decision, and decisions
+     survive -- it is already open when the fold lifts, and nothing here touches
+     it. */
+  var foldedRails = [];
+  var railsFolded = false;
+
+  /**
+   * Fold the HUD rails away for a maximised window, or bring them back.
+   *
+   * Measured on a 1336px desktop: with both rails open a maximised window gets
+   * 50% of the desktop, and folding them takes it to 94%. That gap is the whole
+   * reason maximise did not feel like maximise.
+   *
+   * Idempotent on purpose: the window manager syncs this on every open, close,
+   * minimise and restore, and a second fold must not forget what the first one
+   * put away.
+   */
+  function foldRails(on) {
+    on = !!on;
+    if (on === railsFolded) return foldedRails.length;
+    railsFolded = on;
+    var narrow = window.innerWidth <= 1040;
+    if (on) {
+      foldedRails = [];
+      ['hud-left', 'hud-right'].forEach(function (id) {
+        var hud = $(id);
+        if (!hud) return;
+        var shown = narrow ? hud.classList.contains('forced') : !hud.classList.contains('off');
+        if (!shown) return;
+        foldedRails.push(id);
+        if (narrow) hud.classList.remove('forced'); else hud.classList.add('off');
+      });
+    } else {
+      foldedRails.forEach(function (id) {
+        var hud = $(id);
+        if (!hud) return;
+        if (narrow) hud.classList.add('forced'); else hud.classList.remove('off');
+      });
+      foldedRails = [];
+    }
+    syncHudButtons();
+    return foldedRails.length;
+  }
+  AIOS.foldRails = foldRails;
 
   /** Keep the dock's pressed state honest about what is actually on screen. */
   function syncHudButtons() {
@@ -1927,8 +2004,13 @@
       AIOS.wm.list().forEach(function (w) {
         w.el.style.left = Math.min(w.el.offsetLeft, Math.max(4, desk.offsetWidth - 90)) + 'px';
       });
+      // A maximised window is a claim on the whole desktop, so it follows the
+      // desktop rather than keeping the size the old one happened to have.
+      AIOS.wm.refitMax();
       syncHudButtons();
     });
+
+    installDockPeek();
 
     // Refuse to run outside the desktop shell: without the bridge there is no
     // sandbox, and silently falling back to a fake one would be dishonest.

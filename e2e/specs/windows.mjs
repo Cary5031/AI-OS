@@ -74,6 +74,116 @@ export async function spec(t, app) {
     assert.equal(ok.mtime, 'number', '寫入要回傳新版本，否則下一次存檔會拿到過期的 stamp');
   });
 
+  await t.test('最大化真的填滿桌面：家具收起來，意圖列留著', async () => {
+    /* Maximise used to stop at the top edge of the intent bar and keep a gutter
+       on every other side, so a "maximised" window left a measurable band of
+       desktop unused -- 38% of it on the machine this was first measured on.
+       Now the desktop folds its own furniture away: chips, dock and both HUD
+       rails, with the intent bar staying as a full-width strip flush with the
+       bottom. This starts with the rails OPEN because that is what is on a real
+       screen, and folding them is where most of the space comes from. */
+    const r = await run(cdp, `
+      AIOS.wm.closeAll({ force: true });
+      await new Promise(function (r) { setTimeout(r, 250); });
+
+      function rail(id) { return document.getElementById(id); }
+      function shown(id) {
+        var h = rail(id);
+        return !!h && (window.innerWidth <= 1040
+          ? h.classList.contains('forced') : !h.classList.contains('off'));
+      }
+      function press(id) { document.querySelector('.dk[data-dock="' + id + '"]').click(); }
+      function open_(id) { if (!shown(id)) press(id); }
+
+      open_('hud-left'); open_('hud-right');
+      await new Promise(function (r) { setTimeout(r, 120); });
+      var railsBefore = { left: shown('hud-left'), right: shown('hud-right') };
+
+      var win = AIOS.wm.open({ kind: 'TEXT', title: '最大化測試', render: function (b) {
+        b.textContent = '內容';
+      } });
+      var deskEl = document.getElementById('desktop');
+      var before = AIOS.wm.freeRect();
+
+      AIOS.wm.toggleMax(win);
+      /* Past the dock slide: measuring mid-animation measures nothing. */
+      await new Promise(function (r) { setTimeout(r, 400); });
+
+      function box(e) {
+        var x = e.getBoundingClientRect();
+        return { top: Math.round(x.top), bottom: Math.round(x.bottom),
+                 left: Math.round(x.left), right: Math.round(x.right),
+                 w: Math.round(x.width), h: Math.round(x.height) };
+      }
+      var desk = box(deskEl);
+      var bar = box(document.getElementById('intent-form'));
+      var dock = box(document.getElementById('dock'));
+      var chips = document.getElementById('chips');
+      var maxed = {
+        body: document.body.classList.contains('maxed'),
+        win: box(win.el), desk: desk, bar: bar, dock: dock,
+        chipsShown: !!(chips && getComputedStyle(chips).display !== 'none'),
+        rails: { left: shown('hud-left'), right: shown('hud-right') },
+        dockOff: dock.top >= window.innerHeight - 2,
+        barFullWidth: Math.abs(bar.w - desk.w) <= 2,
+        barAtBottom: Math.abs(bar.bottom - window.innerHeight) <= 2
+      };
+
+      /* Opening a rail while maximised is a decision: the window gives that
+         width back rather than sitting on top of what somebody asked to see. */
+      press('hud-left');
+      await new Promise(function (r) { setTimeout(r, 150); });
+      var withRail = { win: box(win.el), rail: box(rail('hud-left')) };
+
+      AIOS.wm.toggleMax(win);
+      await new Promise(function (r) { setTimeout(r, 150); });
+      var back = {
+        body: document.body.classList.contains('maxed'),
+        chipsShown: !!(chips && getComputedStyle(chips).display !== 'none'),
+        rails: { left: shown('hud-left'), right: shown('hud-right') },
+        win: box(win.el)
+      };
+      AIOS.wm.close(win, { force: true });
+      return { railsBefore: railsBefore, before: before, maxed: maxed,
+               withRail: withRail, back: back };
+    `, { timeout: 60000 });
+
+    assert.deepEqual(r.railsBefore, { left: true, right: true }, '這個測試從兩欄都開著開始');
+
+    const m = r.maxed;
+    assert.equal(m.body, true, '最大化時桌面要進入收起家具的狀態');
+    assert.equal(m.chipsShown, false, '建議詞要收起來，那一排就是被討回來的空間');
+    assert.deepEqual(m.rails, { left: false, right: false }, 'HUD 欄也要跟著收起來');
+    assert.equal(m.dockOff, true, 'dock 要退到畫面外，需要時再伸手叫它出來：' + JSON.stringify(m.dock));
+    assert.equal(m.barFullWidth, true, '意圖列變成整條指令列：' + JSON.stringify(m.bar));
+    assert.equal(m.barAtBottom, true, '而且貼齊底邊，中間不留縫：' + JSON.stringify(m.bar));
+
+    assert.ok(Math.abs(m.win.top - m.desk.top) <= 1,
+      '視窗上緣要貼齊桌面上緣：' + JSON.stringify({ win: m.win, desk: m.desk }));
+    assert.ok(Math.abs(m.win.bottom - m.bar.top) <= 2,
+      '視窗下緣要接在指令列上緣，不是浮在它上面：' + JSON.stringify({ win: m.win, bar: m.bar }));
+    assert.ok(Math.abs(m.win.left - m.desk.left) <= 1 && Math.abs(m.win.right - m.desk.right) <= 1,
+      '左右要貼到桌面的邊：' + JSON.stringify({ win: m.win, desk: m.desk }));
+
+    /* The gain, stated as a number so a future change that quietly gives it back
+       fails here instead of in somebody's eyes. */
+    const fill = (m.win.w * m.win.h) / (m.desk.w * m.desk.h);
+    const was = (r.before.w * r.before.h) / (m.desk.w * m.desk.h);
+    assert.ok(fill > 0.9, '最大化要蓋住九成以上的桌面，實際 ' + Math.round(fill * 100) + '%');
+    assert.ok(fill > was + 0.3,
+      '而且要比舊的可用區大得有感：' + Math.round(was * 100) + '% → ' + Math.round(fill * 100) + '%');
+
+    assert.ok(r.withRail.win.left >= r.withRail.rail.right,
+      '最大化中途打開的 HUD 欄不該被蓋住：' + JSON.stringify(r.withRail));
+    assert.ok(r.withRail.win.w < m.win.w,
+      '視窗要把那塊寬度讓出來：' + JSON.stringify({ maxed: m.win.w, withRail: r.withRail.win.w }));
+
+    assert.equal(r.back.body, false, '取消最大化要把家具放回來');
+    assert.equal(r.back.chipsShown, true, '建議詞也要自己回來，使用者沒有關過它');
+    assert.deepEqual(r.back.rails, { left: true, right: true },
+      '收起來的欄位要原樣回來，自己中途打開的那一欄也還開著');
+  });
+
   await t.test('縮到 Dock 的生成程式，再次啟動會還原而不是開新的', async () => {
     const r = await run(cdp, `
       var apps = await window.aios.forge.list();

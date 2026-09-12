@@ -1064,7 +1064,51 @@ body {
 }
 .win.closing { animation: despawn .16s ease forwards; }
 @keyframes despawn { to { opacity: 0; transform: scale(.97); } }
-.win.max { border-radius: 0; }
+.win.max { border-radius: 0; box-shadow: none; }
+
+/* ############################################################ folded desktop
+   While a window is maximised the desktop folds its own furniture away, so the
+   app fills the window instead of stopping at the intent bar. The bar stays --
+   it is how you talk to the machine -- but it becomes a full-width strip flush
+   with the bottom edge, the suggestion chips go, and the dock waits just below
+   until you reach for it.
+
+   All of it is CSS off one class, which is the point: nothing is persisted, so
+   the chip row the user chose for themselves comes back exactly as they left
+   it. */
+body.maxed .chips { display: none; }
+
+body.maxed .intent {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  transform: none;
+}
+body.maxed .intent-shell {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+body.maxed .dock {
+  bottom: 58px;
+  transform: translateX(-50%) translateY(calc(100% + 58px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .18s cubic-bezier(.2, .9, .3, 1), opacity .18s ease;
+}
+/* Reaching for the strip brings it back above the strip, not over it. The peek
+   class is held for a moment after the pointer leaves, because a dock that
+   vanished the instant you moved towards it would be a dock you cannot click. */
+body.maxed.peek .dock {
+  transform: translateX(-50%);
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.maxed .dock { transition: none; }
+}
 
 .win-bar {
   display: flex; align-items: center; gap: 9px;

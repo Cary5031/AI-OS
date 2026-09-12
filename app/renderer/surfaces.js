@@ -192,6 +192,83 @@
       };
     }
 
+    /**
+     * The rectangle a maximised window gets.
+     *
+     * Maximise used to stop at the top edge of the intent bar: on a 1336x793
+     * window that left 138px of desktop below the app plus a 14-16px gutter on
+     * every other side, and a maximised window that does not fill the screen is
+     * just a big window. So while anything is maximised the desktop folds its
+     * own furniture away (see `.maxed` in os.css) -- the suggestion chips go,
+     * the dock waits just off the bottom edge until you reach for it, and the
+     * intent bar becomes a full-width strip flush with the bottom. The bar
+     * itself stays: it is how you talk to the machine, and a mode that takes it
+     * away is a mode you have to leave to get anything done.
+     *
+     * What is still reserved is that strip, and any HUD rail the user has
+     * deliberately opened -- covering those would hide something somebody asked
+     * to see. Closing the rails is what makes it edge-to-edge horizontally, and
+     * that stays their decision, not this function's.
+     */
+    function maxRect() {
+      if (!desk) init();
+      var r = desk.getBoundingClientRect();
+      var left = 0, right = 0;
+
+      var visible = window.innerWidth > 1040;
+      var hl = document.getElementById('hud-left');
+      var hr = document.getElementById('hud-right');
+      if (visible && hl && !hl.classList.contains('off')) left = hl.offsetWidth + 12;
+      if (visible && hr && !hr.classList.contains('off')) right = hr.offsetWidth + 12;
+
+      /* Measured, not assumed: the strip is a different height once the chips
+         are gone, and this runs after the fold. */
+      var bar = document.getElementById('intent-form');
+      var strip = bar ? Math.round(bar.getBoundingClientRect().height) : 46;
+
+      return {
+        x: left,
+        y: 0,
+        w: Math.max(260, r.width - left - right),
+        h: Math.max(180, r.height - strip)
+      };
+    }
+
+    /**
+     * Fold the desktop furniture away, or bring it back.
+     *
+     * The state is one class on <body>, so it is CSS that does the folding:
+     * there is nothing to persist, and the chip row the user chose for
+     * themselves is never written to -- it comes back exactly as they left it.
+     */
+    function syncMaxed() {
+      var any = wins.some(function (w) {
+        return !w.minimized && w.el && w.el.classList.contains('max');
+      });
+      document.body.classList.toggle('maxed', any);
+      /* The rails are furniture too, and they are most of the cost: a maximised
+         window gets 50% of a 1336px desktop with both of them open and 94% with
+         them folded. They come back the moment nothing is maximised, and the
+         dock buttons still work while it is -- opening one then makes the window
+         give that width back rather than sit on top of it. */
+      if (AIOS.foldRails) AIOS.foldRails(any);
+      return any;
+    }
+
+    /** Re-fit whatever is maximised: the viewport changed, or a rail opened. */
+    function refitMax() {
+      if (!syncMaxed()) return 0;
+      var f = maxRect();
+      var n = 0;
+      wins.forEach(function (w) {
+        if (w.minimized || !w.el.classList.contains('max')) return;
+        w.el.style.left = f.x + 'px'; w.el.style.top = f.y + 'px';
+        w.el.style.width = f.w + 'px'; w.el.style.height = f.h + 'px';
+        n++;
+      });
+      return n;
+    }
+
     function place(w, h) {
       var f = freeRect();
       w = Math.min(w, f.w); h = Math.min(h, f.h);
@@ -349,11 +426,13 @@
     }
 
     function toggleMax(win) {
-      var f = freeRect();
       // Maximising is the user deciding on a size, same as dragging the handle.
       win.userSized = true;
       if (win.el.classList.contains('max')) {
         win.el.classList.remove('max');
+        /* Unfold first, then restore: the furniture coming back is what the
+           window is being sized against. */
+        syncMaxed();
         if (win.prev) {
           win.el.style.left = win.prev.x + 'px'; win.el.style.top = win.prev.y + 'px';
           win.el.style.width = win.prev.w + 'px'; win.el.style.height = win.prev.h + 'px';
@@ -361,6 +440,11 @@
       } else {
         win.prev = { x: win.el.offsetLeft, y: win.el.offsetTop, w: win.el.offsetWidth, h: win.el.offsetHeight };
         win.el.classList.add('max');
+        /* Fold before measuring, in that order: the strip is only 46px tall
+           once the chips have gone, and measuring first would leave a gap
+           exactly the height of the row that is no longer there. */
+        syncMaxed();
+        var f = maxRect();
         win.el.style.left = f.x + 'px'; win.el.style.top = f.y + 'px';
         win.el.style.width = f.w + 'px'; win.el.style.height = f.h + 'px';
       }
@@ -369,6 +453,10 @@
     function minimize(win) {
       win.minimized = true;
       win.el.hidden = true;
+      /* Putting the only maximised window away has to give the desktop its
+         furniture back, or the chips stay hidden with nothing on screen to
+         explain why. */
+      syncMaxed();
       if (AIOS.ui && AIOS.ui.syncDock) AIOS.ui.syncDock();
     }
 
@@ -376,6 +464,9 @@
       win.minimized = false;
       win.el.hidden = false;
       focus(win);
+      /* It may have been maximised when it was put away, and the viewport may
+         have changed since. */
+      refitMax();
       if (AIOS.ui && AIOS.ui.syncDock) AIOS.ui.syncDock();
     }
 
@@ -385,6 +476,7 @@
       window.setTimeout(function () {
         if (win.el.parentNode) win.el.parentNode.removeChild(win.el);
         wins = wins.filter(function (x) { return x !== win; });
+        syncMaxed();
         if (AIOS.ui && AIOS.ui.syncDock) AIOS.ui.syncDock();
         wallmark();
       }, 160);
@@ -437,6 +529,11 @@
       init();
       var vis = wins.filter(function (w) { return !w.minimized; });
       if (!vis.length) return 0;
+      /* Arranging is deciding these are not maximised more, so the
+         desktop unfolds first -- measuring against folded furniture would lay
+         the grid out against a bottom edge that is about to move. */
+      vis.forEach(function (w) { w.el.classList.remove('max'); });
+      syncMaxed();
       var f = freeRect();
       var cols = Math.ceil(Math.sqrt(vis.length));
       var rows = Math.ceil(vis.length / cols);
@@ -444,7 +541,6 @@
       var w = Math.floor((f.w - gap * (cols - 1)) / cols);
       var h = Math.floor((f.h - gap * (rows - 1)) / rows);
       vis.forEach(function (win, i) {
-        win.el.classList.remove('max');
         // An arranged window keeps its slot; a generated app must not shrink out
         // of the grid the user just asked for.
         win.userSized = true;
@@ -459,9 +555,13 @@
     function stack() {
       init();
       var vis = wins.filter(function (w) { return !w.minimized; });
+      /* Arranging is deciding these are not maximised more, so the
+         desktop unfolds first -- measuring against folded furniture would lay
+         the grid out against a bottom edge that is about to move. */
+      vis.forEach(function (w) { w.el.classList.remove('max'); });
+      syncMaxed();
       var f = freeRect();
       vis.forEach(function (win, i) {
-        win.el.classList.remove('max');
         win.userSized = true;
         win.el.style.left = (f.x + i * 30) + 'px';
         win.el.style.top = (f.y + i * 30) + 'px';
@@ -475,9 +575,13 @@
       init();
       var vis = wins.filter(function (w) { return !w.minimized; });
       if (!vis.length) return 0;
+      /* Arranging is deciding these are not maximised more, so the
+         desktop unfolds first -- measuring against folded furniture would lay
+         the grid out against a bottom edge that is about to move. */
+      vis.forEach(function (w) { w.el.classList.remove('max'); });
+      syncMaxed();
       var f = freeRect();
       var top = vis.reduce(function (a, b) { return (a.z || 0) > (b.z || 0) ? a : b; });
-      top.el.classList.remove('max');
       top.el.style.left = f.x + 'px'; top.el.style.top = f.y + 'px';
       top.el.style.width = f.w + 'px'; top.el.style.height = f.h + 'px';
       vis.forEach(function (w) { if (w !== top) minimize(w); });
@@ -509,6 +613,7 @@
       open: open, close: close, find: find, focus: focus,
       minimize: minimize, restore: restore, tile: tile, stack: stack,
       focusLayout: focusLayout, closeAll: closeAll, freeRect: freeRect,
+      maxRect: maxRect, refitMax: refitMax, toggleMax: toggleMax,
       list: function () { return wins.slice(); },
 
       /* Highest window that is actually on screen. Minimised windows are
