@@ -148,6 +148,10 @@
         args: '{}', desc: '跟工作室重新同步大類、廠商、欄位與提示詞',
         run: async function (args, ctx) { return { note: await ctx.api.sync() }; }
       },
+      resume: {
+        args: '{jobId}', desc: '把沒收尾的批次從工作室接回來',
+        run: async function (args, ctx) { return { note: await ctx.api.resumeJob(args.jobId) }; }
+      },
       clear: {
         args: '{}', desc: '清掉目前的文件與結果',
         run: async function (args, ctx) { return { note: await ctx.api.clearAll() }; }
@@ -188,6 +192,10 @@
          unresolved and get an answer computed from 'none'. */
       var booted = null;
       var page = 'work';
+      /* A job the studio may still be holding. It outlives this window: the
+         studio does the work and charges for it whether or not anybody is
+         watching, so losing the id is losing the result. */
+      var orphan = String(saved.jobId || '');
 
       /* ---------------------------------------------------------------- UI */
 
@@ -397,6 +405,10 @@
       }
 
       function autoOffered(cat) {
+        /* Telling one vendor's paperwork from another is what the studio's
+           identity rules are for, so the fallback cannot do it -- and offering a
+           choice that can only ever answer "no" is worse than not offering it. */
+        if (mode !== 'service') return false;
         var id = catalog.identities[cat];
         return !!(id && Array.isArray(id.auto_detectable) && id.auto_detectable.length);
       }
@@ -413,9 +425,18 @@
       function buildProfile() {
         profileIssues = null;
         if (mode === 'fallback') {
+          if (auto) { auto = false; pickDefaultVendor(); }
           var local = fallbackProfile();
-          profile = local ? local.parsed.profile : null;
-          profileIssues = local ? local.parsed : null;
+          if (local) {
+            profile = local.parsed.profile;
+            profileIssues = local.parsed;
+            return;
+          }
+          /* No hand-written file, but the columns came down with the last sync
+             and are still good. Showing them beats showing nothing: the operator
+             can see what this combination produces, and the only thing actually
+             missing -- the prompt -- is reported when they press parse. */
+          buildProfileFromCache(catalog.prompts[category + '/' + vendor] || '');
           return;
         }
         var schema = catalog.schemas[category + '/' + (auto ? '' : vendor)] ||
@@ -581,7 +602,14 @@
       }
 
       async function clearAll() {
-        if (batch) { await A.extract.endBatch(batch.token); batch = null; }
+        if (batch) {
+          /* A job the studio may still be working on outlives this list. Kept so
+             the banner can offer it back rather than losing work already paid
+             for. */
+          if (batch.which === 'service' && batch.jobId && !rows.length) orphan = batch.jobId;
+          await A.extract.endBatch(batch.token);
+          batch = null;
+        }
         docs = [];
         rows = [];
         failedFiles = [];
@@ -613,6 +641,16 @@
         if (!batch) await refreshMode(true);
         var which = batch ? batch.which : mode;
         if (which === 'none') throw new Error(modeReason);
+
+        /* One job per batch, always. A second job would take over batch.jobId,
+           and the filing plan is keyed to a job id -- so the documents from the
+           first job could no longer be named or filed in the same pass. The way
+           to retry is the studio's own retry, on the same job. */
+        if (which === 'service' && batch && batch.jobId) {
+          throw new Error('這一批已經有工作編號 ' + batch.jobId +
+            ' 了。要再跑失敗的那幾份請按「重跑失敗的」，' +
+            '重開一個工作會讓交付計畫對不上這一批。');
+        }
 
         if (which === 'fallback') {
           /* Auto-detect is the studio's, and it is the studio's because telling
@@ -864,6 +902,71 @@
         return note2;
       }
 
+      /**
+       * Pick up a job this window lost track of.
+       *
+       * The studio keeps working through a batch whether or not anybody is
+       * watching, and it charges for it either way. A network blip at minute
+       * six of a twelve-minute job, a reload, a closed window -- without this,
+       * all of that work is done, paid for, and unreachable.
+       */
+      async function resumeJob(id) {
+        await booted;
+        var jobId = String(id || orphan || '').trim();
+        if (!jobId) throw new Error('沒有可以接回來的批次');
+        if (busy) throw new Error('還在跑');
+        await refreshMode(false);
+        if (mode !== 'service') throw new Error('要接回批次得先連上工作室');
+        buildProfile();
+        if (!profile) throw new Error('先選好這一批當初用的大類與廠商，再接回來');
+
+        var bound = await A.extract.beginBatch('service');
+        if (!bound || !bound.ok) throw new Error((bound && bound.error) || '無法開始');
+        batch = {
+          token: bound.data.token, which: 'service', jobId: jobId,
+          label: (svc && svc.service && svc.service.label) || '提示詞工作室',
+          at: Date.now(), columns: profile.columns.slice(),
+          schemaLabel: profile.schemaLabel || '', renameField: ''
+        };
+        busy = true;
+        renderAll();
+        try {
+          var job = await ask('/jobs/' + enc(jobId));
+          /* Put the document list back from what the studio remembers, so the
+             rows have something to be filed against. Anything it names that
+             this machine no longer has is reported by the plan, not guessed. */
+          (job.files || []).forEach(function (f) {
+            if (docs.some(function (d) { return d.name === f.filename; })) return;
+            /* The studio only ever knew the basename, so finding the document
+               again is a search of the sandbox. Exactly one match is the answer;
+               none or several is said out loud rather than guessed at, because
+               the wrong guess files somebody else's document. */
+            var hits = AIOS.fs.paths().filter(function (v) { return X.baseName(v) === f.filename; });
+            var where = hits.length === 1 ? hits[0] : '/inbox/' + f.filename;
+            var entry = AIOS.fs.entry(where);
+            var lost = hits.length !== 1
+              ? (hits.length ? '沙箱裡有 ' + hits.length + ' 份同名檔案，認不出是哪一份'
+                : '這台機器上找不到這個檔案了，結果還在但沒辦法歸檔')
+              : '';
+            docs.push({
+              path: where, name: f.filename,
+              bytes: (entry && entry.bytes) || 0,
+              status: f.status === 'done' ? 'done' : (f.status === 'failed' ? 'failed' : 'running'),
+              rows: 0, error: lost || String(f.error || ''),
+              vendor: String(f.vendor || ''), tokens: 0
+            });
+          });
+          if (Number(job.pending) > 0) job = await pollJob(jobId);
+          orphan = '';
+          var note2 = await collect(jobId, job);
+          ctx.save();
+          return '接回批次 ' + jobId + '：' + note2;
+        } finally {
+          busy = false;
+          renderAll();
+        }
+      }
+
       /** Ask the studio to have another go at the ones that failed. */
       async function retryFailed() {
         if (!batch || !batch.jobId) throw new Error('沒有可以重跑的批次');
@@ -980,12 +1083,19 @@
         if (!docs.length) throw new Error('清單裡沒有文件');
         var files = docs.map(function (d) { return { path: d.path }; });
         var at = new Date();
+        /* Everything already in the sandbox, so a name that last month's batch
+           is using gets numbered around rather than replaced. Refreshed here
+           because filing is the one moment it has to be current. */
+        await AIOS.afterFsChange();
+        var occupied = AIOS.fs.paths();
 
         if (batch && batch.which === 'service' && batch.jobId) {
           try {
             var pv = await give('/jobs/' + enc(batch.jobId) + '/package/preview', { json: { rows: rows } });
             batch.renameField = String((pv && pv.rename_field) || batch.renameField || '');
-            return X.planFromPreview({ preview: pv, files: files, rows: rows, profile: profile, at: at });
+            return X.planFromPreview({
+              preview: pv, files: files, rows: rows, profile: profile, at: at, occupied: occupied
+            });
           } catch (e) {
             ctx.toast('拿不到工作室的命名計畫（' + (e.message || e) + '），改用本機規則。', 't-warn');
           }
@@ -998,7 +1108,7 @@
         if (batch && batch.renameField && !p.rename) {
           p = Object.assign({}, profile, { rename: '{' + batch.renameField + '}' });
         }
-        return X.planDelivery({ files: files, rows: rows, profile: p, at: at });
+        return X.planDelivery({ files: files, rows: rows, profile: p, at: at, occupied: occupied });
       }
 
       async function previewDelivery() {
@@ -1103,6 +1213,20 @@
           banner.appendChild(el('div', 'ext-banner-note micro',
             '這一批綁在「' + batch.label + '」上' +
             (batch.jobId ? '，工作室編號 ' + batch.jobId : '') + '。中途不會換引擎。'));
+        } else if (orphan && mode === 'service') {
+          var back = el('div', 'ext-banner-note micro');
+          back.appendChild(document.createTextNode('上次有一個批次沒有收尾（編號 ' + orphan + '）。'));
+          var pick = btn('接回這一批', '工作室那邊多半已經跑完了', 'ext-mini');
+          pick.disabled = busy;
+          pick.addEventListener('click', async function () {
+            try { ctx.toast(await resumeJob(orphan), 't-ok'); }
+            catch (e) { ctx.toast(e.message || String(e), 't-err'); }
+          });
+          back.appendChild(pick);
+          var forget = btn('不用了', '忘掉這個編號', 'ext-mini');
+          forget.addEventListener('click', function () { orphan = ''; renderAll(); ctx.save(); });
+          back.appendChild(forget);
+          banner.appendChild(back);
         }
 
         if (catalog.at) {
@@ -1305,6 +1429,16 @@
               ? '再同步一次，或換一個大類與廠商。'
               : '備援模式要有同步下來的欄位，或在 ' + X.PROFILE_DIR + ' 底下有一份對應的設定檔。'));
           return;
+        }
+
+        if (mode === 'fallback' && !X.asText(profile.prompt).trim()) {
+          var bare = el('div', 'ext-note ext-bad');
+          bare.appendChild(el('h3', null, '「' + (vendor || category) + '」這一家沒有提示詞，備援跑不了'));
+          bare.appendChild(el('p', 'micro',
+            '欄位是同步下來的，看得到；但提示詞工作室沒有交出來，所以備援模式不知道要從文件裡抓什麼。\n' +
+            '可以在 ' + X.PROFILE_DIR + ' 底下放一份含提示詞的設定檔，或等端點恢復。'));
+          bare.querySelector('p').style.whiteSpace = 'pre-wrap';
+          grid.appendChild(bare);
         }
 
         if (profileIssues && !profileIssues.ok) {
@@ -1829,7 +1963,8 @@
         sync: sync,
         clearAll: clearAll,
         refreshMode: refreshMode,
-        retryFailed: retryFailed
+        retryFailed: retryFailed,
+        resumeJob: resumeJob
       };
 
       booted = (async function start() {
@@ -1855,11 +1990,12 @@
         getState: function () {
           return {
             category: category, vendor: vendor, auto: auto, page: page,
-            jobId: batch ? batch.jobId : ''
+            jobId: (batch && batch.jobId) || orphan || ''
           };
         },
         onClose: function () {
           stop = true;
+          if (batch && batch.jobId && !rows.length) orphan = batch.jobId;
           if (batch) A.extract.endBatch(batch.token);
           ctx.publish(null);
         }

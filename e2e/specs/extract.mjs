@@ -37,12 +37,14 @@ const MODEL = 'e2e-reader';
 const DOC_A = '/inbox/e2e-甲.pdf';
 const DOC_B = '/inbox/e2e-乙.pdf';
 const DOC_C = '/inbox/e2e-丙.pdf';
+const DOC_D = '/inbox/e2e-丁.pdf';
 const SHEET = '/notes/e2e-extract.xlsx';
 const LOCAL_PROFILE = '/檔案/萃取設定/e2e-備援.json';
 
 const PDF_A = '%PDF-1.4 marker-A';
 const PDF_B = '%PDF-1.4 marker-B';
 const PDF_C = '%PDF-1.4 marker-C';
+const PDF_D = '%PDF-1.4 marker-D';
 
 /* 爐號 sits inside the repeating block, so it is required per repetition and
    therefore NOT required in the flat table. Included so the window's red cells
@@ -389,6 +391,42 @@ export async function spec(t, app) {
       assert.match(r.out[0], /解析完成/, r.out[0]);
     });
 
+    await t.test('視窗把批次弄丟了也接得回來：工作室那邊做完了也收了錢', async () => {
+      /* The studio works through a batch whether or not anybody is watching. A
+         blip at minute six of a twelve-minute job, a reload, a closed window --
+         without a way back, all of that is done, paid for, and unreachable. */
+      const r = await run(cdp, via(`
+        out.push(await inst.ctx.api.clearAll());
+        out.push(document.querySelectorAll('.ext-table tbody tr').length);
+        out.push(await inst.ctx.api.resumeJob('job-1'));
+        out.push(document.querySelectorAll('.ext-table tbody tr').length);
+        out.push(document.querySelector('.ext-banner-note').textContent);
+      `), { timeout: 120000 });
+      assert.equal(r.error, undefined, r.error);
+      assert.equal(r.out[1], 0, '清空之後表格是空的');
+      assert.match(r.out[2], /接回批次 job-1/, r.out[2]);
+      assert.ok(r.out[3] > 0, '接回來之後列又在了：' + r.out[3]);
+      assert.match(r.out[4], /job-1/, '橫幅要說這一批的編號：' + r.out[4]);
+    });
+
+    await t.test('一批只開一個工作，不然交付計畫會對不上這一批', async () => {
+      const r = await run(cdp, via(`
+        await window.aios.taint.clear();
+        await window.aios.fs.write(${JSON.stringify(DOC_D)}, ${JSON.stringify(PDF_D)});
+        await AIOS.afterFsChange();
+        out.push(await inst.ctx.api.addDocs([${JSON.stringify(DOC_D)}]));
+        try {
+          out.push(await inst.ctx.api.runAll());
+        } catch (e) {
+          out.push('REFUSED: ' + e.message);
+        }
+      `), { timeout: 60000 });
+      assert.equal(r.error, undefined, r.error);
+      assert.ok(String(r.out[1]).startsWith('REFUSED:'),
+        '已經有工作編號了就不該再開一個：' + r.out[1]);
+      assert.match(String(r.out[1]), /重跑失敗的/, r.out[1]);
+    });
+
     await t.test('交付：工作室決定檔名，這台機器決定桶子與去處', async () => {
       const r = await run(cdp, via(`
         var plan = await inst.ctx.api.previewDelivery();
@@ -405,7 +443,11 @@ export async function spec(t, app) {
       const rowsOut = r.out[1];
       const a = rowsOut.find((e) => e[0] === 'e2e-甲.pdf');
       const b = rowsOut.find((e) => e[0] === 'e2e-乙.pdf');
-      assert.equal(a[1], VENDOR_A + '-A-001.pdf', '檔名是工作室給的');
+      /* The stem is what the studio chose. A run against a sandbox that already
+         holds last time's delivery legitimately gets a -2, which is the point of
+         numbering against the destination rather than only against the batch. */
+      assert.ok(a[1].startsWith(VENDOR_A + '-A-001') && a[1].endsWith('.pdf'),
+        '檔名要是工作室給的：' + a[1]);
       assert.equal(a[2], 'finished');
       /* The studio called this one finished. This machine does not, because a
          mandatory cell is empty -- and the operator's triage habit is that

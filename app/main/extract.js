@@ -658,9 +658,8 @@ async function request(url, opts = {}) {
     if (e && e.name === 'AbortError') {
       throw Object.assign(new Error('回應逾時（等了 ' + Math.round(limit / 1000) + ' 秒）'), { code: 'ETIMEDOUT' });
     }
-    throw Object.assign(new Error(
-      '連不上（' + (opts.what || url) + '）：' + (e && e.message ? e.message : '無法連線')
-    ), { code: 'ECONNREFUSED' });
+    throw Object.assign(new Error('連不上' + (opts.what || url) + '，它可能沒有啟動'),
+      { code: 'ECONNREFUSED' });
   }
   clearTimeout(timer);
 
@@ -988,12 +987,12 @@ async function resolve(opts = {}) {
       return remember('none', reasonFor(h), false, h);
     }
     if (!conf.autoFallback) {
-      return remember('none', '連不上' + conf.service.label + '：' + h.reason + '（自動改用備援是關著的）', false, h);
+      return remember('none', h.reason + '（自動改用備援是關著的）', false, h);
     }
     if (canFall) {
-      return remember('fallback', '連不上' + conf.service.label + '：' + h.reason + '，這一批改用備援模型', true, h);
+      return remember('fallback', h.reason + '，改用備援模型', true, h);
     }
-    return remember('none', '連不上' + conf.service.label + '：' + h.reason + '，而備援模型也還沒設定', false, h);
+    return remember('none', h.reason + '，而備援模型也還沒設定', false, h);
   }
 
   if (canFall) {

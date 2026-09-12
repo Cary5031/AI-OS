@@ -305,7 +305,7 @@ test('two documents that rename onto each other are numbered, and told about', (
 
   assert.notEqual(out.plan[0].to, out.plan[1].to);
   assert.ok(out.plan[1].to.endsWith('-2.pdf'), out.plan[1].to);
-  assert.ok(out.plan[1].reason.includes('重複'), out.plan[1].reason);
+  assert.ok(out.plan[1].reason.includes('已經有人用了'), out.plan[1].reason);
 });
 
 test('the file keeps its extension when the name is rebuilt', () => {
@@ -876,4 +876,32 @@ test('a delivery template is checked when it is saved, not when a file will not 
   assert.equal(M.validateDeliver('/檔案/{大類}/'), '/檔案/{大類}');
   assert.throws(() => M.validateDeliver('檔案/x'), /\//);
   assert.throws(() => M.validateDeliver('/檔案/../../x'), /不能用/);
+});
+
+test('a name already sitting in the destination is numbered around, not written over', () => {
+  /* Two deliveries a month apart can carry the same order number. Numbering
+     only against this batch would hand the second document the first one's
+     path, the move would replace it, and the plan would report success --
+     nobody finds out until they go looking for the older one. */
+  const p = X.fromSchema({
+    category: '進貨單', vendor: '大同',
+    schema: { export_columns: ['單號', '料號'], master_required: ['單號'] }
+  }).profile;
+  const rows = X.adoptRows([{ 單號: 'A-001', 料號: '1', _檔名: 'x.pdf', _廠商: '大同' }],
+    p, { source: 's' }).rows;
+  const already = ['/檔案/進貨單/大同/2026-09/Finished/大同-A-001.pdf'];
+
+  const out = X.planFromPreview({
+    preview: { finished: [{ old: 'x.pdf', new: '大同-A-001.pdf', status: 'ok' }], undefined: [] },
+    files: ['/inbox/x.pdf'], rows, profile: p, at: AT, occupied: already
+  });
+  assert.equal(out.plan[0].to, '/檔案/進貨單/大同/2026-09/Finished/大同-A-001-2.pdf');
+  assert.ok(out.plan[0].reason.includes('已經有人用了'), out.plan[0].reason);
+
+  // And with nothing in the way it keeps the name the studio chose.
+  const clean = X.planFromPreview({
+    preview: { finished: [{ old: 'x.pdf', new: '大同-A-001.pdf', status: 'ok' }], undefined: [] },
+    files: ['/inbox/x.pdf'], rows, profile: p, at: AT
+  });
+  assert.equal(clean.plan[0].newName, '大同-A-001.pdf');
 });

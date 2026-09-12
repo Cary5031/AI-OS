@@ -578,6 +578,27 @@
   /* -------------------------------------------------------------- delivery */
 
   /**
+   * The names already spoken for before this batch adds any.
+   *
+   * Numbering only against the batch itself is not enough. The destination is a
+   * folder that already holds last month's work, and two deliveries a month
+   * apart can legitimately carry the same order number -- so a plan that only
+   * checked its own entries would hand two documents the same path and the
+   * second move would replace the first. The file would be gone, the plan would
+   * report success, and nobody would find out until somebody went looking for
+   * the older one.
+   */
+  function occupiedBy(list) {
+    var taken = Object.create(null);
+    (list || []).forEach(function (v) {
+      var path = asText(v).trim();
+      if (path) taken[path.toLowerCase()] = true;
+    });
+    return taken;
+  }
+
+
+  /**
    * What filing this batch would do, before anything is moved.
    *
    * One entry per source document: where it is, where it would go, which bin,
@@ -623,7 +644,7 @@
       if (blanksBy[b.file].indexOf(b.column) < 0) blanksBy[b.file].push(b.column);
     });
 
-    var taken = Object.create(null);
+    var taken = occupiedBy(o.occupied);
     var plan = files.map(function (f) {
       var name = baseName(f.path);
       var mine = byFile[name] || [];
@@ -659,9 +680,10 @@
       var bin = status === 'finished' ? (p.finished || FINISHED) : (p.unsure || UNSURE);
       var target = joinPath(dir.text || DELIVER_DEFAULT, [bin, newName]);
 
-      /* Two documents that rename to the same thing. Numbering rather than
-         refusing, because the usual cause is two pages of one delivery -- and
-         refusing would strand both. Said out loud so nobody assumes -2 was
+      /* A name already in use -- by another document in this batch, or by one
+         already sitting in the destination from an earlier one. Numbering rather
+         than refusing, because the usual cause is two pages of one delivery and
+         refusing would strand both. Said out loud so nobody assumes the -2 was
          theirs by design. */
       if (taken[target.toLowerCase()]) {
         var n = 2;
@@ -669,7 +691,7 @@
         var ext = extOf(target);
         while (taken[(stem + '-' + n + ext).toLowerCase()]) n++;
         target = stem + '-' + n + ext;
-        reason = reason || ('檔名和另一份文件重複，加了 -' + n);
+        reason = reason || ('這個檔名已經有人用了（這一批裡，或是目的地資料夾裡），加了 -' + n);
       }
       taken[target.toLowerCase()] = true;
 
@@ -888,7 +910,7 @@
       if (blanksBy[b.file].indexOf(b.column) < 0) blanksBy[b.file].push(b.column);
     });
 
-    var taken = Object.create(null);
+    var taken = occupiedBy(o.occupied);
     var claimed = Object.create(null);
     var plan = [];
     var missing = [];
@@ -948,7 +970,7 @@
           var n = 2;
           while (taken[(stem + '-' + n + ext).toLowerCase()]) n++;
           target = stem + '-' + n + ext;
-          reason = reason || ('檔名和另一份文件重複，加了 -' + n);
+          reason = reason || ('這個檔名已經有人用了（這一批裡，或是目的地資料夾裡），加了 -' + n);
         }
         taken[target.toLowerCase()] = true;
 
@@ -1148,6 +1170,7 @@
     extOf: extOf,
 
     planDelivery: planDelivery,
+    occupiedBy: occupiedBy,
     planFromPreview: planFromPreview,
 
     toCells: toCells,
