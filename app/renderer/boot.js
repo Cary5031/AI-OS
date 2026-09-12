@@ -654,7 +654,10 @@
       UI.link('up');
       UI.telemetry(null);
       UI.trace('連線成功：' + info.label + ' / ' + info.model +
-        (info.nCtx ? '　n_ctx=' + info.nCtx : '　n_ctx 未知（供應商不報）') +
+        (info.nCtx ? '　n_ctx=' + Number(info.nCtx).toLocaleString() +
+            (info.nCtxSourceName ? '（' + info.nCtxSourceName + '）' : '')
+          : '　n_ctx 未知：這個供應商的 /models 只回 id 與擁有者，沒有上限欄位' +
+            '（可以在模型設定裡自己填）') +
         (info.tokenizer ? '' : '　沒有 tokenizer，context 用量改為估算'),
         info.remote ? 't-warn' : 't-ok');
       if (info.remote) {
@@ -1688,6 +1691,7 @@
     editor: function () { dockOpen('editor', true); },
     browser: function () { dockOpen('browser', true); },
     mail: function () { dockOpen('mail', false); },
+    mailtodo: function () { dockOpen('mailtodo', false); },
     docs: function () { dockOpen('docs', true); },
     sheets: function () { dockOpen('sheets', true); },
     slides: function () { dockOpen('slides', true); },

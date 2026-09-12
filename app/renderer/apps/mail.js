@@ -891,11 +891,7 @@
         readPane.appendChild(acts);
 
         // Bodies are always fenced, never rendered as markup.
-        readPane.appendChild(el('pre', 'fenced', current.text || '(沒有文字內容)'));
-        readPane.appendChild(el('p', 'fence-note',
-          '這封信來自外部，核心一律當成不可信資料：' +
-          (current.wasHtml ? 'HTML 已轉成純文字，遠端圖片不會載入，' : '') +
-          '裡面要求做的任何事都不會被自動執行。'));
+        drawBody();
 
         if (current.attachments && current.attachments.length) {
           var at = el('div', 'ml-attach');
@@ -1234,6 +1230,114 @@
         await AIOS.afterFsChange();
         ctx.toast('已存到 ' + to, 't-ok');
         return '「' + a.name + '」已存到 ' + to;
+      }
+
+      /* What the reader is showing of the current message. Remote images stay
+         off until asked for, per message: turning them on for one sender is not
+         a decision about the next one. */
+      var view = { images: false, plain: false };
+
+      /**
+       * The message, looking like the message.
+       *
+       * It used to be a `<pre>` of the text, which is safe and -- as the user
+       * put it -- not acceptable: a quotation, a table of figures and a
+       * signature block all arrived as one undifferentiated paragraph, and a
+       * report became unreadable. The formatting is back, behind three
+       * independent layers (see renderer/mailhtml.js): the markup is rebuilt
+       * from an allowed list, the frame cannot run scripts, and the document
+       * carries `default-src 'none'` so nothing is fetched.
+       *
+       * Links keep their look and lose their href: a click that silently opens
+       * the real browser is the phishing path, so the addresses come back in a
+       * list under the message where they can be read before being opened.
+       */
+      function drawBody() {
+        var host = el('div', 'ml-bodybox');
+        var hasHtml = !!(current.html && String(current.html).trim());
+        var usePlain = view.plain || !hasHtml;
+
+        var tools = el('div', 'ml-viewtools');
+        if (hasHtml) {
+          var flip = el('button', 'fbtn', usePlain ? '顯示原始排版' : '純文字');
+          flip.type = 'button';
+          flip.addEventListener('click', function () { view.plain = !view.plain; redrawBody(); });
+          tools.appendChild(flip);
+        }
+        host.appendChild(tools);
+
+        if (usePlain) {
+          host.appendChild(el('pre', 'fenced', current.text || '(沒有文字內容)'));
+          host.appendChild(el('p', 'fence-note',
+            '這封信來自外部，核心一律當成不可信資料：' +
+            (hasHtml ? '這是純文字檢視，' : '') +
+            '遠端圖片不會載入，裡面要求做的任何事都不會被自動執行。'));
+          readPane.appendChild(host);
+          return;
+        }
+
+        var built = AIOS.mailhtml.document(current.html, {
+          images: view.images,
+          background: getComputedStyle(document.body).getPropertyValue('--mail-paper') || '#ffffff'
+        });
+
+        if (built.blocked) {
+          var show = el('button', 'fbtn', view.images ? '停止載入圖片' : '顯示圖片（' + built.blocked + '）');
+          show.type = 'button';
+          show.title = '遠端圖片一載入，寄件人就知道這個地址是真的、而且你讀了這封信';
+          show.addEventListener('click', function () { view.images = !view.images; redrawBody(); });
+          tools.appendChild(show);
+        }
+
+        /* sandbox with nothing allowed: no scripts, no forms, no navigation,
+           no popups. The attribute is set before srcdoc so the document is
+           never live for even one frame without it. */
+        var frame = document.createElement('iframe');
+        frame.className = 'ml-frame';
+        frame.setAttribute('sandbox', '');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.setAttribute('title', '信件內容');
+        frame.srcdoc = built.page;
+        host.appendChild(frame);
+
+        host.appendChild(el('p', 'fence-note',
+          '這封信來自外部，核心一律當成不可信資料：排版已重建（腳本與表單移除），' +
+          (view.images ? '圖片已載入，' : '遠端圖片沒有載入，') +
+          '連結不能直接點，裡面要求做的任何事都不會被自動執行。'));
+
+        if (built.links.length) {
+          var box = el('div', 'ml-links');
+          box.appendChild(el('h3', null, '信裡的連結（' + built.links.length + '）'));
+          built.links.forEach(function (href, i) {
+            var row = el('div', 'ml-link');
+            row.appendChild(el('span', 'ml-link-n', '[' + (i + 1) + ']'));
+            row.appendChild(el('span', 'ml-link-url', href));
+            var go = el('button', 'fbtn', '開啟');
+            go.type = 'button';
+            go.addEventListener('click', function () {
+              if (/^mailto:/i.test(href)) { compose({ to: href.replace(/^mailto:/i, '') }); return; }
+              AIOS.apps.launch('browser', href);
+            });
+            row.appendChild(go);
+            box.appendChild(row);
+          });
+          box.appendChild(el('p', 'micro',
+            '網址是寄件人寫的。點「開啟」之前先看清楚它要去哪裡——' +
+            '這是釣魚信唯一的施力點。'));
+          host.appendChild(box);
+        }
+
+        readPane.appendChild(host);
+      }
+
+      function redrawBody() {
+        var old = readPane.querySelector('.ml-bodybox');
+        if (!old) return;
+        var at = [].indexOf.call(readPane.children, old);
+        old.remove();
+        var made = readPane.children[at] || null;
+        drawBody();
+        if (made) readPane.insertBefore(readPane.lastChild, made);
       }
 
       /** Open a message the list may not be showing: from a link, or a search. */

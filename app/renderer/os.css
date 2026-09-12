@@ -2711,6 +2711,24 @@ select optgroup {
 .dk-count { right: 1px; bottom: 1px; min-width: 13px; height: 13px; line-height: 11px; font-size: 8px; }
 .dk.mini.more { font-family: var(--mono); }
 
+/* The message, looking like the message. The frame is white paper on purpose:
+   mail is written against a light background and forcing it into the shell's
+   palette is how a signature block becomes invisible. */
+.ml-bodybox { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.ml-viewtools { display: flex; gap: 6px; flex-wrap: wrap; }
+.ml-frame {
+  width: 100%; min-height: 320px; height: 52vh; border: 1px solid var(--line);
+  border-radius: 6px; background: #fff;
+}
+.ml-links { border-top: 1px solid var(--line); padding-top: 8px; }
+.ml-links h3 { margin: 0 0 6px; font-size: 11px; color: var(--fg-faint); font-family: var(--mono); }
+.ml-link { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.ml-link-n { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); flex: none; }
+.ml-link-url {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0;
+}
+
 .ml-web { display: flex; flex-direction: column; gap: 8px; }
 .ml-web-door { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .ml-sep { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 6px 0 2px; }

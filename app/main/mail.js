@@ -469,10 +469,11 @@ async function syncBody({ folder = 'INBOX', uid, messageId } = {}) {
   if (!store.ready()) await store.init(account.email);
 
   const held = store.get(messageId);
-  if (held && held.hasBody) return { messageId, cached: true };
+  if (held && held.hasBody && held.htmlTried) return { messageId, cached: true };
 
   const full = await read({ folder, uid, withData: true });
   await store.putBody(messageId, full.text || '');
+  await store.putHtml(messageId, full.html || '');
   const kept = await store.putAttachments(messageId, full.attachments || []);
   await store.flush();
   return { messageId, cached: false, bytes: (full.text || '').length, attachments: kept.length };
@@ -605,11 +606,15 @@ function parseSource(src) {
   const attachments = [];
   let text = '';
   let wasHtml = false;
+  /* Hoisted: the markup is found inside the multipart branch but returned from
+     the end of the function, because the reader needs it whichever branch a
+     given message took. */
+  let html = '';
+  let decodedWhole = '';
 
   if (boundary) {
     const parts = body.split(new RegExp('--' + boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     let plain = '';
-    let html = '';
     for (const part of parts) {
       if (!part.trim() || part.trim() === '--') continue;
       const pSplit = part.indexOf('\r\n\r\n') >= 0 ? '\r\n\r\n' : '\n\n';
@@ -646,11 +651,20 @@ function parseSource(src) {
     else if (html) { text = htmlToText(html); wasHtml = true; }
   } else {
     const decoded = decodeBody(body, headers['content-transfer-encoding'], ctype);
+    decodedWhole = decoded;
     if (ctype.startsWith('text/html')) { text = htmlToText(decoded); wasHtml = true; }
     else text = decoded;
   }
 
-  return { text: text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 100000), wasHtml, attachments };
+  return {
+    text: text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 100000),
+    /* The markup as it arrived, when the message had any. The reader shows this
+       one and the text is what search and the model read -- see
+       mailstore.putHtml for why both, and why the text is the derived one. */
+    html: String(html || (ctype.startsWith('text/html') ? decodedWhole : '')).slice(0, 400000),
+    wasHtml,
+    attachments
+  };
 }
 
 function unfold(head) {

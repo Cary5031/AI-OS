@@ -36,6 +36,7 @@
    =========================================================================== */
 
 const { spawn, spawnSync } = require('node:child_process');
+const models = require('./models');
 const fsc = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -853,11 +854,18 @@ async function probeActive() {
   var wanted = String(confOf(id).model || '').trim();
   var model = wanted;
   var listed = [];
+  /* The whole record for the model we end up using, not just its name. OpenAI's
+     own listing carries nothing but id/created/owned_by, but most
+     OpenAI-compatible gateways put the context window in there under one name
+     or another -- and reading it costs nothing, while assuming OpenAI's shape
+     is the only one costs the number. */
+  var records = [];
   try {
     var r2 = await fetch(base + '/models', { headers: headers });
     if (r2.ok) {
       var body = await r2.json();
-      listed = ((body && body.data) || []).map(function (m) { return String(m.id); });
+      records = (body && body.data) || [];
+      listed = records.map(function (m) { return String(m.id); });
     } else if (!wanted) {
       throw new Error('/models HTTP ' + r2.status);
     }
@@ -872,9 +880,17 @@ async function probeActive() {
   // needs the directory and the .gguf suffix taken off.
   if (id === 'local') model = model.split(/[\\/]/).pop().replace(/\.gguf$/i, '');
 
-  var nCtx =
+  /* llama.cpp answers /props, which is the provider reporting it directly. */
+  var localCtx =
     (propsData && propsData.default_generation_settings && propsData.default_generation_settings.n_ctx) ||
     (propsData && propsData.n_ctx) || 0;
+
+  var record = records.find(function (m) { return String(m && m.id) === model; }) || null;
+  var known = models.describe(model, {
+    reported: localCtx ? { n_ctx: localCtx } : record,
+    override: confOf(id).limits || null,
+    measured: measuredCtx[model] || 0
+  });
 
   return {
     provider: id,
@@ -882,10 +898,33 @@ async function probeActive() {
     remote: p.remote,
     model: model,
     models: listed.slice(0, 60),
-    nCtx: nCtx,
+    nCtx: known.ctx,
+    /* Where that number came from, because 「1,050,000」 from a table compiled in
+       September and 「1,050,000」 measured off the server today are worth
+       different amounts, and the window that shows it should say which. */
+    nCtxSource: known.ctxSource,
+    nCtxSourceName: known.ctxSourceName,
+    maxOut: known.out,
+    maxOutSource: known.outSource,
     tokenizer: hasTokenizer(id),
     base: base
   };
+}
+
+/**
+ * A limit the server itself told us about, keyed by model.
+ *
+ * Outranks the table because it is this deployment, this key, today. Filled in
+ * when a request comes back refused for being too long -- which is the one
+ * moment a provider that documents nothing says the number out loud.
+ */
+var measuredCtx = Object.create(null);
+
+function noteLimitFrom(modelId, message) {
+  var n = models.ctxFromError(message);
+  if (!n || !modelId) return 0;
+  measuredCtx[String(modelId)] = n;
+  return n;
 }
 
 /** Real token counts, for the providers that can actually give them. */

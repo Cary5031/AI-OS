@@ -125,6 +125,9 @@
       S.connected = !!(res.ok && res.model);
       S.model = res.model || null;
       S.nCtx = res.nCtx || 0;
+      S.nCtxSource = res.nCtxSource || '';
+      S.nCtxSourceName = res.nCtxSourceName || '';
+      S.maxOut = res.maxOut || 0;
       S.tokenizer = res.tokenizer !== false;
       if (res.providers) {
         var act = (res.providers.providers || []).find(function (p) { return p.id === res.providers.active; });
@@ -217,7 +220,8 @@
       // first thing on screen at boot and said 0 for months.
       if (S.connected) {
         this.trace('模型：' + S.model +
-          (S.nCtx ? '　n_ctx=' + fmt(S.nCtx) : '　n_ctx 未知（供應商不報）'), 't-info');
+          (S.nCtx ? '　n_ctx=' + fmt(S.nCtx) + (S.nCtxSourceName ? '（' + S.nCtxSourceName + '）' : '')
+            : '　n_ctx 未知（這個供應商的 /models 沒有上限欄位，可在模型設定裡自己填）'), 't-info');
       }
       else this.trace('沒有連上模型伺服器，意圖解析會失敗', 't-err');
       return S.connected;

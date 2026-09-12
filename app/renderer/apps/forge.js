@@ -696,6 +696,17 @@
     return out;
   }
 
+  /* The three things the static check refuses for, in the order it finds them.
+     A refusal costs a whole round -- one model call, half a minute, and the
+     user watching a program get rebuilt for a reason nobody told it. */
+  var CHECKLIST = [
+    '輸出之前，自己對照這三件事（建置時會自動檢查，任何一項不過就整份退回重寫）：',
+    '  1. os.actions.selfTest 有沒有在 render() 裡登記？它是必要的，不是選配。',
+    '  2. render(root, os) 有沒有把節點掛進 root？append 到 document.body 不算。',
+    '  3. 有沒有用到 eval、new Function、fetch、XMLHttpRequest、WebSocket、',
+    '     import(、require(、localStorage、parent.、top.？一個都不能出現。'
+  ].join('\n');
+
   var CONTINUE_PROMPT = '你的程式碼還沒寫完就被截斷了。從上一段最後一個字元的下一個字元接著輸出：' +
     '不要重複已經輸出過的內容、不要從頭開始、不要加任何說明或 ``` 圍籬，直接接著寫到程式結束。';
 
@@ -728,7 +739,8 @@
       '- 不要 markdown 圍籬（不要 ```），不要任何說明文字，不要 JSON 包裝。',
       '- 第一行就開始寫程式。',
       '- 程式碼要完整可執行，不要留 TODO 或省略，不要用「…其餘類似」帶過。',
-      '- 錯誤要自己處理：把 await 放在 try/catch 裡，失敗就用 os.ui.toast 告訴使用者。'
+      '- 錯誤要自己處理：把 await 放在 try/catch 裡，失敗就用 os.ui.toast 告訴使用者。',
+      '- **必須**在 render() 裡登記 os.actions.selfTest。沒有它的程式不會安裝，會被退回重寫。'
     ].join('\n');
 
     var parts = ['規格：', JSON.stringify(spec, null, 2)];
@@ -758,6 +770,19 @@
       }
     }
     if (ctx.stage) parts.push('', ctx.stage);
+
+    /* Last, because last is what gets read.
+       Measured on a real build: the system prompt already said 「自我測試（必做）」
+       and the model left it out anyway -- on the first stage and again on the
+       second, costing a repair round each time. The instruction was not missing,
+       it was buried three thousand characters upstream of the thing being asked
+       for. Moved to the end, phrased as the check the machine is about to run,
+       and the staged path says it again because a rewrite drops what it is not
+       told to keep. */
+    parts.push('', CHECKLIST);
+    if (ctx.previousCode) {
+      parts.push('既有的 os.actions.selfTest 一定要保留下來，並涵蓋這次改到的行為。');
+    }
 
     var messages = [{ role: 'system', content: sys }, { role: 'user', content: parts.join('\n') }];
     var res = await K.complete({
@@ -1161,12 +1186,13 @@
         ? {
           mode: 'fresh', request: ctx.request, label: label,
           stage: '分階段建置：這一階段只做規格 plan 列出的這幾項，但架構要留給 comingLater 那些功能擴充。' +
-            'selfTest 只測這一階段做的行為。'
+            'selfTest 只測這一階段做的行為，但一定要登記 os.actions.selfTest。'
         }
         : {
           mode: 'modify', request: '在現有程式碼上加入這些功能：' + items.join('；') + '。既有功能保持不變。',
           previousCode: code, existing: true, label: label,
-          stage: '分階段建置：alreadyBuilt 是已經做好的，這一階段加上 plan 這幾項；selfTest 要一併涵蓋新功能。'
+          stage: '分階段建置：alreadyBuilt 是已經做好的，這一階段加上 plan 這幾項。' +
+            'os.actions.selfTest 一定要留著（上一階段已經有了），並且一併涵蓋新功能。'
         };
       // eslint-disable-next-line no-await-in-loop
       var r = await repairLoop(stageSpec, stageCtx, state, BUILD.STEP_ROUNDS, say, onToken);

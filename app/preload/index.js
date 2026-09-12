@@ -160,6 +160,20 @@ contextBridge.exposeInMainWorld('aios', {
     unattended: (on) => invoke('gate:unattended', { on })
   },
 
+  /* ------------------------------------------------------------ mail todo */
+  /* Rules and the work they turned up. Local state only: the searching goes
+     through `mail.search` and the summarising through the kernel. */
+  mailtodo: {
+    state: () => invoke('mailtodo:state'),
+    addRule: (rule) => invoke('mailtodo:addRule', { rule }),
+    updateRule: (id, patch) => invoke('mailtodo:updateRule', { id, patch }),
+    removeRule: (id) => invoke('mailtodo:removeRule', { id }),
+    putItems: (ruleId, items) => invoke('mailtodo:putItems', { ruleId, items }),
+    patchItem: (id, patch) => invoke('mailtodo:patchItem', { id, patch }),
+    removeItem: (id) => invoke('mailtodo:removeItem', { id }),
+    clearDone: (ruleId) => invoke('mailtodo:clearDone', { ruleId })
+  },
+
   taint: {
     state: () => invoke('taint:state'),
     add: (source, label) => invoke('taint:add', { source, label }),

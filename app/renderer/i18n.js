@@ -187,6 +187,7 @@
     'dock.intent': 'Intent bar (Ctrl+K)', 'dock.apps': 'All applications',
     'dock.files': 'File manager (sandbox)', 'dock.editor': 'Editor', 'dock.browser': 'Browser',
     'dock.mail': 'Mail', 'dock.docs': 'Documents', 'dock.sheets': 'Spreadsheet', 'dock.slides': 'Slides',
+    'dock.mailtodo': 'Mail to-do',
     'dock.pdf': 'PDF viewer', 'dock.markdown': 'Markdown viewer', 'dock.photos': 'Image viewer',
     'dock.memory': 'Long-term memory', 'dock.forge': 'App Forge: the core writes programs',
     'dock.schedule': 'Scheduler: run programs or intents on a timer',
@@ -199,6 +200,7 @@
 
     /* ------------------------------------------------------- applications */
     'app.files': 'Files', 'app.editor': 'Editor', 'app.browser': 'Browser', 'app.mail': 'Mail',
+    'app.mailtodo': 'Mail to-do',
     'app.docs': 'Documents', 'app.sheets': 'Spreadsheet', 'app.slides': 'Slides', 'app.pdf': 'PDF viewer',
     'app.markdown': 'Markdown', 'app.memory': 'Memory', 'app.forge': 'App Forge', 'app.schedule': 'Scheduler',
     'app.photos': 'Image viewer', 'app.extract': 'Document extraction',

@@ -193,6 +193,8 @@ function put(msg) {
     date: msg.date || before.date || 0,
     seen: msg.seen !== undefined ? !!msg.seen : !!before.seen,
     hasBody: before.hasBody || false,
+    hasHtml: before.hasHtml || false,
+    htmlTried: before.htmlTried || false,
     inReplyTo: msg.inReplyTo || before.inReplyTo || '',
     references: msg.references || before.references || '',
     /* Where the message can be opened in the source's own client, when the
@@ -210,6 +212,44 @@ function put(msg) {
   sourceMap = null;
   handleMap = null;
   return index[id];
+}
+
+/**
+ * Keep the message as it was written, alongside the text of it.
+ *
+ * Two copies of one thing, which this file is otherwise careful not to have --
+ * and the reason it is not the usual mistake: they answer different questions
+ * and only one of them is authoritative. The text is what search reads and what
+ * the model is given, because both need words without markup. The HTML is what
+ * a person looks at, because a quotation, a table of figures and a signature
+ * block are not the same paragraph and reading them as one is what the user
+ * called unacceptable. The text is derived from the HTML, never the other way
+ * round, so they cannot disagree about what the message said.
+ */
+async function putHtml(messageId, html) {
+  if (!index[messageId]) return false;
+  const raw = String(html == null ? '' : html).slice(0, MAX_MESSAGE_BYTES * 4);
+  const p = paths();
+  await fs.mkdir(p.bodies, { recursive: true });
+  await fs.writeFile(path.join(p.bodies, keyOf(messageId) + '.html'), raw, 'utf8');
+  index[messageId].hasHtml = raw.length > 0;
+  /* Asked for, whether or not there was any. A plain-text message has no markup
+     and never will, so without this the reader would re-fetch it on every open
+     looking for something that does not exist. */
+  index[messageId].htmlTried = true;
+  dirty = true;
+  return true;
+}
+
+/** The message as it was written, or '' when only the text was kept. */
+async function html(messageId) {
+  const m = index[messageId];
+  if (!m || !m.hasHtml) return '';
+  try {
+    return await fs.readFile(path.join(paths().bodies, keyOf(messageId) + '.html'), 'utf8');
+  } catch (e) {
+    return '';
+  }
 }
 
 async function putBody(messageId, body) {
@@ -733,7 +773,7 @@ async function purge() {
 
 module.exports = {
   init, ready, flush, stats,
-  put, putBody, body, get, list, unknown,
+  put, putBody, body, putHtml, html, get, list, unknown,
   putAttachments, attachment,
   search, partyMatches, addressesIn, snippetOf,
   setLocal, localOf,

@@ -175,7 +175,10 @@ test('欄位拼法是量出來的，不是選一種賭', () => {
   assert.equal(find.Header.RequestServerVersion, 'V2018_01_18', '版本跟著真的用戶端走');
 
   const get = owa.getItemBody('AAA');
-  assert.equal(get.Body.ItemShape.BodyType, 'Text', '內文要純文字：沒有腳本，也沒有遠端圖片');
+  /* HTML now, and the text is derived from it: a report read as one flat
+     paragraph is unreadable, so the formatting is kept and made safe where it
+     is shown (renderer/mailhtml.js) rather than thrown away here. */
+  assert.equal(get.Body.ItemShape.BodyType, 'HTML', '要原始排版，純文字由它推導');
   assert.equal(get.Body.ItemShape.BaseShape, 'AllProperties');
   const gpaths = get.Body.ItemShape.AdditionalProperties.map((p) => p.FieldURI).filter(Boolean);
   assert.ok(gpaths.includes('item:Body'), '開一封信要問得到內文：' + gpaths.join(', '));
@@ -514,8 +517,10 @@ test('學到的憑證綁在一個信箱上，換帳號不會跟著走', () => {
      read into account B's mirror, where nothing can tell it apart from B's own
      mail. */
   const src = require('node:fs').readFileSync(require.resolve('../app/main/owa.js'), 'utf8');
-  assert.ok(/function configure\(conf\) \{[\s\S]{0,400}?forgetTemplate\(\);/.test(src),
-    'configure 一開始就要把舊樣板丟掉');
+  assert.ok(/function configure\(conf\) \{[\s\S]{0,400}?release\(\);/.test(src),
+    'configure 一開始就要把舊樣板與開著的分頁一起丟掉');
+  assert.ok(/function release\(\) \{[\s\S]{0,200}?forgetTemplate\(\);[\s\S]{0,120}?dropWorker\(\);/.test(src),
+    '換帳號時，上一個信箱的分頁也不該留著');
   assert.ok(/template\.email !== \(account \? account\.email : ''\)/.test(src),
     '樣板要記得自己屬於哪個信箱');
 });
@@ -629,7 +634,14 @@ test('同時要樣板的兩個人共用一次學習，而且不會撿到對方�
   const src = require('node:fs').readFileSync(require.resolve('../app/main/owa.js'), 'utf8');
   assert.ok(/if \(learning\) return learning;/.test(src), '一次只學一次');
   assert.ok(/ownTabs\.has\(t\.id\)/.test(src), '自己開的暫時分頁不算「已經開著的信箱分頁」');
-  assert.ok(/ownTabs\.delete\(ours\)/.test(src), '收工要把記號拿掉');
+  assert.ok(/ownTabs\.delete\(id\)/.test(src), '收掉分頁時要把記號一起拿掉');
+  /* The tab is kept between learns rather than opened and destroyed each time:
+     每次重開一次微軟的網頁信箱，成功要十幾秒，慢的時候就是六十秒的逾時加上一句
+     「沒有送出任何請求」——使用者連讀幾封信之後就會遇到。 */
+  assert.ok(/let workerTab = null;/.test(src), '學習用的分頁要留著');
+  assert.ok(/workerTab && stillOpen\(workerTab\)/.test(src), '而且下次要先看它還在不在');
+  assert.ok(/browser\.reload\(tab\.id\);/.test(src),
+    '留著的分頁如果閒到不送請求，就重新整理讓它說話');
 });
 
 test('回應的大小上限要容得下鏡像願意保存的最大附件', () => {

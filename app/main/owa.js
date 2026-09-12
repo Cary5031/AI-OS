@@ -210,6 +210,18 @@ let seq = 1;
    the mailbox": a second learner would otherwise take over the first learner's
    throwaway tab and then have it destroyed underneath it. */
 const ownTabs = new Set();
+
+/* The tab kept open to learn from, and not shown anywhere -- the browser window
+   builds its strip from its own state, so this is invisible.
+
+   It used to be created and destroyed for every learn, and that is a page load
+   of Microsoft's web mail each time: about fifteen seconds when it works, and a
+   sixty-second timeout with 「Outlook 分頁沒有送出任何請求」 when the load is slow
+   or the burst of requests happens to fall outside the window. Reported after
+   reading a handful of messages: the first few opened and the next one did not.
+   Keeping the tab makes the second learn cost nothing and removes the failure
+   entirely, at the price of one background page. */
+let workerTab = null;
 /* One learn at a time. Two callers needing a template at once -- the scheduled
    sync and a person pressing 收信 -- used to open two tabs and race. */
 let learning = null;
@@ -475,6 +487,17 @@ function htmlToText(html) {
     .trim();
 }
 
+/** The message exactly as it arrived, when it arrived as markup. */
+function rawHtmlOf(item) {
+  const body = pick(item, ['NormalizedBody', 'Body', 'body', 'UniqueBody']);
+  if (!body) return '';
+  if (typeof body === 'string') return /<[a-z!/]/i.test(body) ? body : '';
+  const type = String(pick(body, ['BodyType', 'bodyType', 'ContentType']) || '');
+  if (/text|plain/i.test(type)) return '';
+  const value = pick(body, ['Value', 'value', 'Content', 'content']);
+  return value == null ? '' : String(value);
+}
+
 /** The readable text of one message, whichever body field this version used. */
 function bodyTextOf(item) {
   const body = pick(item, ['NormalizedBody', 'Body', 'body', 'UniqueBody', 'TextBody']);
@@ -658,9 +681,14 @@ function listProperties(d) {
 function getItemBody(sourceId, over) {
   const d = { ...DIALECT, ...(over || {}) };
   const shape = { __type: 'ItemResponseShape:#Exchange', BaseShape: d.getBaseShape || 'AllProperties' };
-  /* Text rather than HTML: the body is a stranger's writing on its way into a
-     privileged window, and text has no script and no remote image in it. */
-  if (d.getBodyType) shape.BodyType = 'Text';
+  /* HTML, and the text is derived from it here.
+     It used to ask for Text, on the reasoning that text has no script and no
+     remote image in it -- true, and it also has no table, no quotation and no
+     heading, which made a report unreadable. The formatting is kept and made
+     safe where it is shown instead: app/renderer/mailhtml.js rebuilds it from
+     an allowed list, inside a frame that cannot run scripts, under a policy
+     that fetches nothing. */
+  if (d.getBodyType) shape.BodyType = 'HTML';
 
   const extras = [];
   if (d.namedProps && d.getExtras && d.getExtras !== 'none') {
@@ -876,7 +904,7 @@ function configure(conf) {
      dropping it meant the next sync ran for fifteen minutes with the previous
      account's bearer and anchor-mailbox headers, reading mailbox A into account
      B's mirror -- which the mirror cannot tell apart from B's own mail. */
-  forgetTemplate();
+  release();
   account = conf && conf.email
     ? { email: String(conf.email), base: sanitiseBase(conf.base) }
     : null;
@@ -998,8 +1026,15 @@ async function learnTemplate(opts) {
 
 async function learnOnce({ allowOpen = true } = {}) {
   const origin = base();
+  /* A tab the user has open is preferred: it is already signed in, already
+     loaded, and costs nothing. */
   let tab = mailboxTab();
-  let ours = null;
+  let usingWorker = false;
+
+  if (!tab && workerTab && stillOpen(workerTab)) {
+    tab = { id: workerTab };
+    usingWorker = true;
+  }
 
   if (!tab) {
     /* A caller that is watching a sign-in in progress must not open a tab of
@@ -1009,9 +1044,11 @@ async function learnOnce({ allowOpen = true } = {}) {
        their phone. */
     if (!allowOpen) throw fail('ENOTAB', '現在沒有開著的 Outlook 信箱分頁');
     try {
-      tab = browser.create({ url: loginUrl() });
-      ours = tab.id;
-      ownTabs.add(ours);
+      const made = browser.create({ url: loginUrl() });
+      workerTab = made.id;
+      ownTabs.add(workerTab);
+      tab = made;
+      usingWorker = true;
     } catch (e) {
       throw fail('ENOTAB', '沒有開著的 Outlook 分頁，也開不了新的：' + String(e.message || e));
     }
@@ -1024,24 +1061,55 @@ async function learnOnce({ allowOpen = true } = {}) {
   const wanted = /^https?:\/\/[^/]+\/owa\/service\.svc/i;
 
   try {
-    let seen = await browser.learnRequest(tab.id, {
-      match: wanted,
-      timeout: ours ? LEARN_FRESH_MS : LEARN_EXISTING_MS
-    });
-    /* An open tab that happened to be idle -- which is the normal state, since
-       a background tab is throttled and may not poll at all. Rather than
-       reloading the page the user is looking at, open one of our own. */
-    if (!seen && !ours) {
-      try {
-        const fresh = browser.create({ url: loginUrl() });
-        ours = fresh.id;
-        ownTabs.add(ours);
-        seen = await browser.learnRequest(ours, { match: wanted, timeout: LEARN_FRESH_MS });
-      } catch (e) { /* the honest failure below */ }
+    /* The two answers race. A tab on the sign-in page will never send a mailbox
+       request, so waiting out the timeout to discover that is a minute the user
+       spends looking at a message that will not open. */
+    const first = await learnOrLogin(tab.id, wanted,
+      usingWorker ? LEARN_FRESH_MS : LEARN_EXISTING_MS);
+    if (first.login) {
+      if (usingWorker) dropWorker();
+      throw fail('ENEEDLOGIN',
+        'Outlook 的登入過期了，分頁被導到微軟的登入頁。' +
+        '請按「帳號」裡的「在瀏覽器登入 Outlook」重新登入一次（email → 密碼 → 2FA），' +
+        '登入完成後它會自己把瀏覽器收起來、把信收進來。');
     }
+    let seen = first.seen;
+
+    /* A tab that is loaded but idle. A background page is throttled and may not
+       poll at all, so rather than waiting longer, make it talk: reloading is
+       what produces the startup burst of service.svc calls. The user's own tab
+       is never reloaded -- it is the page they are looking at -- so a worker
+       tab is opened for that instead. */
+    if (!seen && usingWorker) {
+      try {
+        browser.reload(tab.id);
+        const again = await learnOrLogin(tab.id, wanted, LEARN_FRESH_MS);
+        if (again.login) {
+          dropWorker();
+          throw fail('ENEEDLOGIN',
+            'Outlook 的登入過期了。請按「帳號」裡的「在瀏覽器登入 Outlook」重新登入一次。');
+        }
+        seen = again.seen;
+      } catch (e) {
+        if (isLoginError(e)) throw e;
+        /* anything else falls through to the honest failure below */
+      }
+    }
+    if (!seen && !usingWorker) {
+      try {
+        const made = browser.create({ url: loginUrl() });
+        workerTab = made.id;
+        ownTabs.add(workerTab);
+        usingWorker = true;
+        seen = await browser.learnRequest(workerTab, { match: wanted, timeout: LEARN_FRESH_MS });
+      } catch (e) { /* falls through */ }
+    }
+
     if (!seen) {
       throw fail('ENOLEARN',
-        'Outlook 分頁沒有送出任何請求，學不到怎麼問。請在瀏覽器裡打開信箱，確認看得到信件，再試一次。');
+        '連不上 Outlook 的介面：背景分頁在 ' + Math.round(LEARN_FRESH_MS / 1000) +
+        ' 秒內沒有送出任何請求。多半是登入過期了——按「帳號」裡的「在瀏覽器登入 Outlook」重新登入一次；' +
+        '如果已經登入著，把那個分頁留在信箱畫面上再試一次。');
     }
 
     /* Observed, not assumed. The origin the template is stamped with is the one
@@ -1071,12 +1139,100 @@ async function learnOnce({ allowOpen = true } = {}) {
       at: Date.now()
     };
     return template;
-  } finally {
-    if (ours) {
-      ownTabs.delete(ours);
-      try { browser.destroy(ours); } catch (e) { /* already gone */ }
-    }
+  } catch (e) {
+    /* A worker tab that could not teach us anything is not worth keeping: the
+       next attempt should start from a fresh load rather than inherit whatever
+       state this one is stuck in. */
+    if (usingWorker) dropWorker();
+    throw e;
   }
+}
+
+/**
+ * Where a tab has actually landed, once it has landed anywhere.
+ *
+ * A tab opened at the mailbox and redirected to Microsoft's sign-in page looks,
+ * to a request watcher, exactly like a mailbox that is being slow: nothing
+ * matches, and the wait runs to its timeout. Twice, because the retry reloads
+ * and waits again. Two minutes to conclude something the URL said in three
+ * seconds -- and the user meets it as 「有些郵件會無法讀取」, one message at a
+ * time.
+ */
+async function settledUrl(id, ms) {
+  const until = Date.now() + (ms || 8000);
+  let seen = '';
+  while (Date.now() < until) {
+    let url = '';
+    try {
+      const tab = (browser.list() || []).find((t) => t && t.id === id);
+      url = tab ? String(tab.url || '') : '';
+    } catch (e) { return seen; }
+    if (url && url !== 'about:blank') {
+      /* The same URL twice running is a page that has stopped moving. */
+      if (url === seen) return url;
+      seen = url;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  return seen;
+}
+
+/** Did this tab end up at the sign-in page rather than at the mailbox? */
+async function landedOnLogin(id) {
+  const url = await settledUrl(id, 9000);
+  return !!url && atLoginHost(url);
+}
+
+/**
+ * Watch a tab's address until it is somewhere that will never send a mailbox
+ * request, and say so.
+ *
+ * Run alongside the request watch rather than before it, because a tab that has
+ * just been created is still on about:blank when a one-shot check looks -- and
+ * then the redirect to the sign-in page happens, and the whole minute is spent
+ * waiting for a request from a page that is asking for a password. Measured at
+ * sixty-two seconds for something the URL says in three.
+ */
+function watchForLogin(id, ms) {
+  return new Promise((resolve) => {
+    const until = Date.now() + (ms || LEARN_FRESH_MS);
+    const timer = setInterval(() => {
+      let url = '';
+      try {
+        const tab = (browser.list() || []).find((t) => t && t.id === id);
+        url = tab ? String(tab.url || '') : '';
+        if (!tab) { clearInterval(timer); resolve(null); return; }
+      } catch (e) { clearInterval(timer); resolve(null); return; }
+      if (url && atLoginHost(url)) { clearInterval(timer); resolve('login'); return; }
+      if (Date.now() > until) { clearInterval(timer); resolve(null); }
+    }, 700);
+  });
+}
+
+/** The request, or the discovery that no request is coming. Whichever is first. */
+async function learnOrLogin(id, match, timeout) {
+  const got = await Promise.race([
+    browser.learnRequest(id, { match, timeout }).then((x) => ({ seen: x })),
+    watchForLogin(id, timeout).then((x) => (x === 'login' ? { login: true } : new Promise(() => {})))
+  ]);
+  return got;
+}
+
+function stillOpen(id) {
+  try {
+    return (browser.list() || []).some((t) => t && t.id === id);
+  } catch (e) {
+    return false;
+  }
+}
+
+function dropWorker() {
+  if (!workerTab) return;
+  const id = workerTab;
+  workerTab = null;
+  ownTabs.delete(id);
+  try { browser.destroy(id); } catch (e) { /* already gone */ }
 }
 
 function templateFresh() {
@@ -1095,6 +1251,12 @@ async function ensureTemplate(opts) {
 /** Thrown away when the server says the credential is no longer good. */
 function forgetTemplate() {
   template = null;
+}
+
+/** Everything this module is holding open. Called when the account goes away. */
+function release() {
+  forgetTemplate();
+  dropWorker();
 }
 
 /**
@@ -1974,7 +2136,11 @@ async function syncBody({ messageId } = {}) {
 
   const held = store.get(messageId);
   if (!held) throw fail('ENOMSG', '本機沒有這封信，先同步一次');
-  if (held.hasBody) return { messageId, cached: true };
+  /* A message stored before the reader could show formatting has the text and
+     no markup, and would otherwise never get any: syncBody returns early on
+     hasBody alone. `htmlTried` is the difference between "this message has no
+     markup" and "nobody has asked for it yet". */
+  if (held.hasBody && held.htmlTried) return { messageId, cached: true };
   if (!held.sourceId) {
     throw fail('ENOSOURCE',
       '這封信是以前用別的方式同步進來的，網頁信箱沒有它的編號，開不了。重新同步一次這個資料夾就會有。');
@@ -1986,6 +2152,8 @@ async function syncBody({ messageId } = {}) {
 
   const text = bodyTextOf(item);
   await store.putBody(messageId, text);
+  /* Kept beside the text, not instead of it: see mailstore.putHtml. */
+  await store.putHtml(messageId, rawHtmlOf(item));
 
   const kept = await collectAttachments(item, messageId);
   await store.flush();
@@ -2002,14 +2170,14 @@ async function syncBody({ messageId } = {}) {
 module.exports = {
   /* wiring */
   configure, configured, probe, loginUrl, folders, isLoginError,
-  reusableHeaders, forgetTemplate, templateFresh, originOf, mailboxTab, clean, NOT_A_KEY,
-  knownOrigin, OUTLOOK_ORIGINS, diagnose, probeShapes, faultOf, buildFindItem,
+  reusableHeaders, forgetTemplate, release, templateFresh, originOf, mailboxTab, clean, NOT_A_KEY,
+  knownOrigin, OUTLOOK_ORIGINS, landedOnLogin, settledUrl, diagnose, probeShapes, faultOf, buildFindItem,
   dialect, setDialect, fieldPath, FIELDS, attachmentPlan, ATTACHMENT_SHAPES,
   /* the mirror feeders */
   syncFolder, syncBody, refreshAttachments,
   /* pure, and tested as such */
   distinguished, folderName, normaliseItem, keyFor, idOf, internetMessageIdOf,
-  walkItems, lastPage, attachmentsOf, attachmentContentOf, bodyTextOf, htmlToText,
+  walkItems, lastPage, attachmentsOf, attachmentContentOf, bodyTextOf, rawHtmlOf, htmlToText,
   syncPlan, adoptPage, NO_ANSWER,
   needsLogin, classify, atLoginHost, findItemBody, getItemBody, getAttachmentBody, deepLink, sanitiseBase,
   pick, extendedValue, oneAddress, manyAddresses,

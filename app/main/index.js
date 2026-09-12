@@ -50,6 +50,7 @@ const memory = require('./memory');
 const sessionStore = require('./session');
 const browser = require('./browser');
 const mail = require('./mail');
+const mailtodo = require('./mailtodo');
 const forge = require('./forge');
 const pdf = require('./pdf');
 const bookmarks = require('./bookmarks');
@@ -405,8 +406,11 @@ function wireBoot() {
 
       const mailStatus = await mail.init(userData);
       say(mailStatus.configured
-        ? `mail account: ${mailStatus.email} via ${mailStatus.imapHost}`
+        ? `mail account: ${mailStatus.email} via ${mailStatus.imapHost || mailStatus.base || 'web'}`
         : 'mail account: not configured', mailStatus.configured ? 'ok' : 'info');
+
+      const todo = await mailtodo.init(userData);
+      say(`mail todo: ${todo.rules.length} rules, ${todo.items.length} items`, 'info');
 
       await sessionStore.init(userData);
       const restored = await sessionStore.load();
@@ -459,7 +463,7 @@ function wireBoot() {
          one is fixed in the provider window, and that window is in the shell
          that is trying to come up -- refusing to start would leave the user with
          no way to correct the setting that stopped it. */
-      let p = { model: null, nCtx: 0, tokenizer: true };
+      let p = { model: null, nCtx: 0, nCtxSource: '', nCtxSourceName: '', maxOut: 0, tokenizer: true };
       try {
         p = await llama.probeActive();
         say(`  model .... ${p.model}`, 'ok');
@@ -488,6 +492,10 @@ function wireBoot() {
         sessionFromBackup: !!restored.fromBackup,
         model: p.model,
         nCtx: p.nCtx,
+        /* Where the number came from, so the line that shows it can say. */
+        nCtxSource: p.nCtxSource || '',
+        nCtxSourceName: p.nCtxSourceName || '',
+        maxOut: p.maxOut || 0,
         tokenizer: p.tokenizer !== false,
         providers,
         endpoint: llama.localEndpoint(),

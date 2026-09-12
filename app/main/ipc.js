@@ -29,6 +29,7 @@ const session = require('./session');
 const web = require('./web');
 const browser = require('./browser');
 const mail = require('./mail');
+const mailtodo = require('./mailtodo');
 const office = require('./office');
 const pdf = require('./pdf');
 const pdfedit = require('./pdfedit');
@@ -1048,10 +1049,17 @@ function register(getWindow) {
         { code: 'ENOMSG' });
     }
     messageId = id;
-    if (!held.hasBody) await mail.syncBody({ folder: folder || held.folder, uid: uid != null ? uid : held.uid, messageId });
+    if (!held.hasBody || !held.htmlTried) await mail.syncBody({ folder: folder || held.folder, uid: uid != null ? uid : held.uid, messageId });
     const body = await mail.store.body(messageId);
     gate.addTaint('mail:' + messageId, `信件「${held.subject}」（${held.from}）`);
-    return { ...mail.store.get(messageId), handle: mail.store.shortOf(messageId), text: body || '' };
+    return {
+      ...mail.store.get(messageId),
+      handle: mail.store.shortOf(messageId),
+      text: body || '',
+      /* The message as it was written. The window shows this one and reads the
+         text; both are the same message, and the text is derived from it. */
+      html: await mail.store.html(messageId)
+    };
   }, null, '讀一封本機的信'));
 
   /* Local-only edits: no capability, because nothing leaves this machine and
@@ -1081,6 +1089,52 @@ function register(getWindow) {
 
      Checking the session, on the other hand, makes a real request to the real
      mailbox, so it answers `mail.list` exactly as an IMAP connection test does. */
+
+  /* ------------------------------------------------------- mail todo ---- */
+  /* Rules and the work they turned up. Nothing here reaches the mailbox or the
+     model: the window does the searching through `mail:search` and the
+     summarising through the kernel, and hands the result back to be kept. So
+     these are local edits to local state, which is why they are ungated -- the
+     same reason `mail:mirrorFlag` is. */
+
+  ipcMain.handle('mailtodo:state', plain(async () => ({
+    ...mailtodo.state(), counts: mailtodo.counts()
+  })));
+  ipcMain.handle('mailtodo:addRule', plain(async ({ rule } = {}) => {
+    const out = mailtodo.addRule(rule || {});
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:updateRule', plain(async ({ id, patch } = {}) => {
+    const out = mailtodo.updateRule(id, patch || {});
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:removeRule', plain(async ({ id } = {}) => {
+    const out = mailtodo.removeRule(id);
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:putItems', plain(async ({ ruleId, items } = {}) => {
+    const out = mailtodo.putItems(ruleId, items || []);
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:patchItem', plain(async ({ id, patch } = {}) => {
+    const out = mailtodo.patchItem(id, patch || {});
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:removeItem', plain(async ({ id } = {}) => {
+    const out = mailtodo.removeItem(id);
+    await mailtodo.flush();
+    return out;
+  }));
+  ipcMain.handle('mailtodo:clearDone', plain(async ({ ruleId } = {}) => {
+    const out = mailtodo.clearDone(ruleId || null);
+    await mailtodo.flush();
+    return out;
+  }));
 
   ipcMain.handle('owa:loginUrl', plain(async () => ({
     url: mail.owa.loginUrl(),
