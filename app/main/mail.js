@@ -140,6 +140,7 @@ function status() {
     mirror: store.ready() ? store.stats() : null,
     webFolders: kind === 'owa' ? owa.folders() : null,
     loginUrl: kind === 'owa' ? owa.loginUrl() : null,
+    keepAlive: kind === 'owa' ? owa.keepAlive() : null,
     presets: Object.fromEntries(Object.entries(PRESETS).map(([k, v]) => [k, { label: v.label, note: v.note }]))
   };
 }

@@ -1169,6 +1169,7 @@
         var sel = await window.aios.model.select(p.id);
         if (!sel || !sel.ok) throw new Error(sel && sel.error);
         var ok = await reconnect();
+        if (AIOS.fitBudget) AIOS.fitBudget();
         status.textContent = ok
           ? '已切換到 ' + p.label + '，' + (S.tokenizer ? '有 tokenizer。' : '沒有 tokenizer，排程器改用估算。')
           : '已切換到 ' + p.label + '，但連線沒有成功，看右邊的核心軌跡。';
@@ -1884,6 +1885,13 @@
 
     // budget slider
     var slider = $('budget-slider');
+    /* Sized from the model, not from a number typed into the HTML in 2025.
+       The slider shipped with max 32768 while this machine was connected to a
+       model that holds 1,050,000 -- three per cent of it -- and the user watched
+       a 392-token page get evicted 「超出預算」 with a million tokens of room
+       going spare. See AIOS.fitBudget for why the ceiling is what it is, and
+       why raising it does not by itself make a single request bigger. */
+    AIOS.fitBudget();
     slider.addEventListener('input', function () {
       S.budget = parseInt(slider.value, 10);
       $('budget-out').value = S.budget;

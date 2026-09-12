@@ -349,6 +349,8 @@ contextBridge.exposeInMainWorld('aios', {
        There is deliberately no channel here that could change the real mailbox. */
     loginUrl: () => invoke('owa:loginUrl'),
     probe: (opts) => invoke('owa:probe', opts || {}),
+    keepAlive: () => invoke('owa:keepAlive'),
+    refreshSession: () => invoke('owa:refreshSession'),
     diagnose: (opts) => invoke('owa:diagnose', opts || {})
   },
 

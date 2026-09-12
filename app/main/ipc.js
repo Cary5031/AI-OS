@@ -1141,6 +1141,13 @@ function register(getWindow) {
     configured: mail.owa.configured()
   })));
 
+  /* Keep the mailbox session alive while this machine is open, the way an open
+     Outlook tab does. Reaches the network, so it answers `mail.list` like the
+     other things that do. */
+  ipcMain.handle('owa:keepAlive', plain(async () => mail.owa.keepAlive()));
+  ipcMain.handle('owa:refreshSession', guarded('mail.list',
+    async () => mail.owa.refreshSession(), null, '讓 Outlook 的登入不要過期'));
+
   ipcMain.handle('owa:probe', guarded('mail.list',
     async ({ open } = {}) => mail.owa.probe({ open: open !== false }),
     null, '確認 Outlook 網頁信箱還登入著'));

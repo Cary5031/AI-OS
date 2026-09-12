@@ -557,6 +557,9 @@
          ['網址', status.base || ''],
          ['憑證', '沒有存密碼。憑證是瀏覽器分頁裡的 cookie，AI-OS 從頭到尾沒看過你的密碼與 2FA'],
          ['可以做的事', '讀信、讀附件、搜尋（含內文）、在本機刪除與標記'],
+         ['保持登入', 'AI-OS 開著的時候，每 20 分鐘會在背景把信箱頁面載入一次，' +
+           '讓它自己去續期——這就是你把 Outlook 開在瀏覽器裡不會被登出的原因。' +
+           '能撐多久由貴公司的政策決定；登入時如果有「保持登入」的選項，勾起來會長很多'],
          ['不會做的事', '寄信、刪除真實信件、搬資料夾、把已讀同步回伺服器——這條路上根本沒有這些呼叫']
         ].forEach(function (r) {
           dl.appendChild(el('dt', null, r[0]));
@@ -567,6 +570,17 @@
         var state = el('p', 'ml-web-state micro', '登入狀態：檢查中…');
         box.appendChild(state);
 
+        var keep = el('p', 'micro', '');
+        box.appendChild(keep);
+        drawKeep();
+
+        function drawKeep() {
+          var k = status.keepAlive;
+          if (!k) { keep.textContent = ''; return; }
+          keep.textContent = '續期：' + (k.running ? '開著（每 ' + Math.round(k.everyMs / 60000) + ' 分鐘一次）' : '停著') +
+            (k.at ? '　上次 ' + new Date(k.at).toLocaleTimeString() + '：' + k.note : '');
+        }
+
         var login = el('button', 'fbtn fbtn-primary', '在瀏覽器登入 Outlook');
         login.type = 'button';
         login.addEventListener('click', function () { openLogin(); });
@@ -576,6 +590,19 @@
         check.type = 'button';
         check.addEventListener('click', function () { look(); });
         box.appendChild(check);
+
+        var now = el('button', 'fbtn', '馬上續期一次');
+        now.type = 'button';
+        now.title = '在背景重新載入信箱頁面，讓它更新自己的權杖';
+        now.addEventListener('click', async function () {
+          now.disabled = true;
+          var r = await A.mail.refreshSession();
+          now.disabled = false;
+          if (r.ok) { status.keepAlive = r.data; drawKeep(); ctx.toast(r.data.note, r.data.ok ? 't-ok' : 't-warn'); }
+          else ctx.toast('續期失敗：' + r.error, 't-err');
+          look();
+        });
+        box.appendChild(now);
 
         var forget = el('button', 'fbtn fbtn-danger', '移除帳號');
         forget.type = 'button';
@@ -617,7 +644,9 @@
         if (!url) { ctx.toast('還沒設定網頁信箱帳號', 't-warn'); return; }
 
         var browserWin = await AIOS.apps.launch('browser', url);
-        ctx.toast('在分頁裡登入（email → 密碼 → 2FA）。登入好我就把瀏覽器收起來，換你在這裡看信。', 't-ok');
+        ctx.toast('在分頁裡登入（email → 密碼 → 2FA）。'
+          + '如果問你「要保持登入嗎」，勾起來——那決定這個工作階段能撐多久。'
+          + '登入好我就把瀏覽器收起來，換你在這裡看信。', 't-ok');
         watchLogin(browserWin);
       }
 

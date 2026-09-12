@@ -805,6 +805,89 @@
    * counter, because the counter answers "did this round write something", and a
    * file someone copied in mid-turn is not the round's doing.
    */
+  /**
+   * Size the resident-page budget to the model that is actually connected.
+   *
+   * The slider shipped with `max="32768"`, which was a sensible ceiling for a
+   * local 8k model and is three per cent of what this machine is now connected
+   * to. The user watched a 392-token page evicted 「超出預算」 with a million
+   * tokens of room going spare, and asked for the ceiling raised and the
+   * default set to the top of it.
+   *
+   * Raising it is cheap, and it is worth being clear why: the budget is a
+   * ceiling on what may STAY resident, not an amount that gets sent. A turn
+   * carries the pages that exist; an empty machine sends a few thousand tokens
+   * whether the ceiling is eight thousand or eight hundred thousand. What the
+   * ceiling decides is whether something already read has to be thrown away to
+   * make room -- and throwing away something the user just read, while the
+   * model could have held it, is the failure being fixed.
+   *
+   * The ceiling leaves the reply's worth of room plus a fifth for the parts of
+   * a turn that are not resident pages: the system prompt, the syscall table,
+   * the question itself. With no context window reported there is nothing to
+   * scale to, so the old numbers stand -- a guess dressed as a measurement
+   * would be worse than the honest small default.
+   */
+  AIOS.budgetCeiling = function (nCtx, maxOut) {
+    var ctx = Number(nCtx) || 0;
+    if (ctx <= 0) return 32768;
+    var reply = Math.min(Number(maxOut) || 0, Math.round(ctx * 0.25)) || Math.round(ctx * 0.1);
+    var room = Math.max(1024, ctx - reply);
+    return Math.max(8192, Math.round(room * 0.8 / 256) * 256);
+  };
+
+  /**
+   * Apply that ceiling to the slider and, unless the user has chosen otherwise,
+   * to the budget itself.
+   *
+   * A budget saved by an older session is upgraded rather than honoured when it
+   * is the number that shipped, or when it no longer fits the slider: those are
+   * not choices, they are defaults from a machine that did not know how big the
+   * model was.
+   */
+  AIOS.fitBudget = function (opts) {
+    var S = AIOS.state;
+    var top = AIOS.budgetCeiling(S.nCtx, S.maxOut);
+    var slider = document.getElementById('budget-slider');
+    var out = document.getElementById('budget-out');
+    if (!slider) return top;
+
+    /* Anything at or below the ceiling this slider used to have was chosen on a
+       slider that could not go higher, so it is not evidence that a small budget
+       was wanted -- it is the old maximum, or the old default, wearing the same
+       clothes. Those are raised once. A number picked on the new slider is a
+       real preference and is left alone. */
+    var OLD_CEILING = 32768;
+    var wasDefault = !S.budget || S.budget <= OLD_CEILING || S.budget > top;
+
+    /* The maximum has to be a value the slider can actually stop on. With a min
+       of 640 and a step that does not divide the span, the browser snaps the
+       thumb short of the end and 「最大」 is a number the control cannot reach --
+       off by a step and impossible to explain. */
+    var low = Math.min(640, top);
+    var step = Math.max(256, Math.round(top / 400 / 256) * 256);
+    top = low + Math.floor((top - low) / step) * step;
+
+    slider.max = String(top);
+    slider.min = String(low);
+    slider.step = String(step);
+    if (wasDefault || (opts && opts.force)) S.budget = top;
+    slider.value = String(S.budget);
+    if (out) out.value = S.budget;
+
+    var note = document.querySelector('.hp-note');
+    if (note) {
+      note.textContent = S.nCtx
+        ? '上限跟著模型走：' + Number(S.nCtx).toLocaleString() +
+          ' 的 context，常駐預算最多 ' + top.toLocaleString() + '。' +
+          '預算是「可以留多少」，不是「每次送多少」——調高不會讓平常的請求變大，' +
+          '只會讓已經讀進來的東西不用被丟掉。'
+        : '把預算調低，看核心驅逐分頁 — 模型會當場忘記東西。';
+    }
+    if (AIOS.ui && AIOS.ui.renderContext) AIOS.ui.renderContext(AIOS.kernel.schedule());
+    return top;
+  };
+
   AIOS.afterFsChange = async function (opts) {
     if (!(opts && opts.external)) AIOS.fsWrites++;
     await AIOS.fs.refresh();

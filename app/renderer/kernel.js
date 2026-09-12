@@ -37,7 +37,7 @@ AIOS.state = {
   connected: false,
   busy: false,
 
-  budget: 8192,          // resident-token budget, user adjustable
+  budget: 8192,          // resident-token budget; raised to fit the model at boot
   pages: [],             // context pages (see kernel.page)
   turnSeq: 0,
 

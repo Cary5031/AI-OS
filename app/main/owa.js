@@ -226,6 +226,89 @@ let workerTab = null;
    sync and a person pressing 收信 -- used to open two tabs and race. */
 let learning = null;
 
+/* ------------------------------------------------------------ keeping it ---
+
+   How an Outlook session actually dies, and what can be done about each part:
+
+     the bearer token       about an hour. The page renews it by itself, but
+                            only while the page is running -- and a tab nobody
+                            loads is not running anything.
+     the sign-in cookie     whatever the tenant's policy says: often eight to
+                            twenty-four hours, far longer if the user ticked
+                            「保持登入」 at sign-in.
+
+   So the first one is ours to prevent and the second one is not. Loading the
+   mailbox page every so often is exactly what a browser does while you leave
+   Outlook open in it, and it makes the session last its full allowed span
+   instead of ending the moment the access token does. Beyond that span nothing
+   here can help, and pretending otherwise would mean hammering a sign-in page.
+
+   A user tab already showing the mailbox does this job better than we can, so
+   when there is one, this does nothing. */
+
+const KEEPALIVE_MS = 20 * 60 * 1000;
+let keepTimer = null;
+let keepState = { at: 0, ok: false, note: '' };
+
+function keepAlive() {
+  return { ...keepState, running: !!keepTimer, everyMs: KEEPALIVE_MS };
+}
+
+function startKeepAlive() {
+  stopKeepAlive();
+  if (!configured()) return false;
+  keepTimer = setInterval(() => { refreshSession().catch(() => {}); }, KEEPALIVE_MS);
+  /* One run shortly after starting, so the panel says something true before the
+     first interval and the session is warm before anybody asks it for a message.
+     Not immediately: boot has enough to do. */
+  const first = setTimeout(() => { refreshSession().catch(() => {}); }, 45000);
+  if (first.unref) first.unref();
+  /* Unref so a timer cannot be the reason this process stays alive. */
+  if (keepTimer.unref) keepTimer.unref();
+  return true;
+}
+
+function stopKeepAlive() {
+  if (keepTimer) clearInterval(keepTimer);
+  keepTimer = null;
+}
+
+/**
+ * Give the mailbox page a reason to renew its own token.
+ *
+ * Deliberately not a request of our own: the token this module holds is a copy,
+ * and copying it again does nothing for the session it came from. What keeps
+ * the session alive is the page running its own sign-in machinery, and the way
+ * to make a throttled background page do that is to load it.
+ */
+async function refreshSession() {
+  if (!configured()) { stopKeepAlive(); return keepAlive(); }
+
+  /* Somebody has the mailbox open. Theirs is doing this already, and reloading
+     the page a person is reading would be rude and pointless. */
+  if (mailboxTab()) {
+    keepState = { at: Date.now(), ok: true, note: '有開著的信箱分頁，它自己會續期' };
+    return keepAlive();
+  }
+
+  try {
+    forgetTemplate();
+    await learnTemplate({ allowOpen: true });
+    keepState = { at: Date.now(), ok: true, note: '背景分頁重新載入過，工作階段還活著' };
+  } catch (e) {
+    keepState = {
+      at: Date.now(), ok: false,
+      note: isLoginError(e)
+        ? '登入已經過期，續期停了——要重新登入一次才會再開始'
+        : String(e.message || e).slice(0, 160)
+    };
+    /* A dead session cannot be revived by asking again every twenty minutes; it
+       can only be revived by a person. Stop, and say so. */
+    if (isLoginError(e)) stopKeepAlive();
+  }
+  return keepAlive();
+}
+
 /* --------------------------------------------------------------- errors ---- */
 
 function fail(code, message) {
@@ -909,6 +992,7 @@ function configure(conf) {
     ? { email: String(conf.email), base: sanitiseBase(conf.base) }
     : null;
   sampling = new Set();
+  if (account) startKeepAlive();
   return account;
 }
 
@@ -1126,6 +1210,9 @@ async function learnOnce({ allowOpen = true } = {}) {
       throw fail('ENEEDLOGIN',
         'Outlook 分頁送出的請求沒有帶憑證，表示那個分頁還沒真的登入。請在分頁裡完成登入（含 2FA）再試一次。');
     }
+    /* A learn that worked means the session is alive; if the keeper had given
+       up because it was not, this is the moment it can start again. */
+    if (!keepTimer && configured()) startKeepAlive();
     template = {
       /* Learned from `learnedFrom`, sent to `origin`. They are allowed to
          differ only because both are on the known list and Microsoft serves one
@@ -1255,6 +1342,8 @@ function forgetTemplate() {
 
 /** Everything this module is holding open. Called when the account goes away. */
 function release() {
+  stopKeepAlive();
+  keepState = { at: 0, ok: false, note: '' };
   forgetTemplate();
   dropWorker();
 }
@@ -2170,6 +2259,7 @@ async function syncBody({ messageId } = {}) {
 module.exports = {
   /* wiring */
   configure, configured, probe, loginUrl, folders, isLoginError,
+  keepAlive, startKeepAlive, stopKeepAlive, refreshSession, KEEPALIVE_MS,
   reusableHeaders, forgetTemplate, release, templateFresh, originOf, mailboxTab, clean, NOT_A_KEY,
   knownOrigin, OUTLOOK_ORIGINS, landedOnLogin, settledUrl, diagnose, probeShapes, faultOf, buildFindItem,
   dialect, setDialect, fieldPath, FIELDS, attachmentPlan, ATTACHMENT_SHAPES,

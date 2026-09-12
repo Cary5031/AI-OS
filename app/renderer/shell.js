@@ -275,7 +275,11 @@
         };
       }
       if (sess.budget) {
+        /* Honoured only if it still fits the model in front of us. A session
+           saved against an 8k ceiling would otherwise pin this machine to three
+           per cent of a million-token window forever. */
         S.budget = sess.budget;
+        if (AIOS.fitBudget) AIOS.fitBudget();
         var slider = document.getElementById('budget-slider');
         var out = document.getElementById('budget-out');
         if (slider) slider.value = String(sess.budget);

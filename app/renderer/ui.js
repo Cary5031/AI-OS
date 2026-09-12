@@ -128,6 +128,10 @@
       S.nCtxSource = res.nCtxSource || '';
       S.nCtxSourceName = res.nCtxSourceName || '';
       S.maxOut = res.maxOut || 0;
+      /* Here, not in the event wiring: that runs before the boot reply and would
+         size the slider against an n_ctx of zero -- which is how it stayed at the
+         old 32,768 ceiling in front of a million-token model. */
+      if (AIOS.fitBudget) AIOS.fitBudget();
       S.tokenizer = res.tokenizer !== false;
       if (res.providers) {
         var act = (res.providers.providers || []).find(function (p) { return p.id === res.providers.active; });
