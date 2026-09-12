@@ -72,6 +72,13 @@
           return { note: args.folder || 'INBOX' };
         }
       },
+      check: {
+        args: '{}', desc: '看看有沒有新信（只抓信頭，不會讀內文，所以不會武裝汙染閘門）',
+        run: async function (_a, ctx) {
+          var n = await ctx.api.check();
+          return { note: n ? '收到 ' + n + ' 封新信' : '沒有新信' };
+        }
+      },
       sync: {
         args: '{folder}', desc: '去伺服器收新信到本機（唯一會連線的動作）',
         run: async function (args, ctx) {
@@ -134,6 +141,13 @@
          stops it. */
       var loginWatch = null;
       var closed = false;
+      /* Checking for new mail by itself. A mail program that only shows what
+         arrived the last time you pressed a button is a mail program you have
+         to remember to press a button in. */
+      var watchTimer = null;
+      var watching = false;
+      var lastCheck = 0;
+      var checking = false;
       var folders = [];
       var folder = (ctx.state && ctx.state.folder) || 'INBOX';
       var messages = [];
@@ -176,6 +190,17 @@
       /* What the list is showing: a folder, or the hits for a search. Held so
          the numbered actions and the summary describe what is on screen. */
       var showing = { kind: 'folder', text: '' };
+
+      /* The parts of the footer that come from a round trip, kept so the watcher
+         can move the clock without paying for them again. */
+      var footParts = { reach: '', last: '' };
+
+      function footText() {
+        return folder + '：本機 ' + messages.length + ' 封' + footParts.reach + footParts.last +
+          (watching
+            ? '　·　自動收信中' + (lastCheck ? '（最後檢查 ' + when(lastCheck) + '）' : '')
+            : '');
+      }
 
       var split = el('div', 'ml-split');
       var listPane = el('ul', 'ml-list');
@@ -557,7 +582,7 @@
          ['網址', status.base || ''],
          ['憑證', '沒有存密碼。憑證是瀏覽器分頁裡的 cookie，AI-OS 從頭到尾沒看過你的密碼與 2FA'],
          ['可以做的事', '讀信、讀附件、搜尋（含內文）、在本機刪除與標記'],
-         ['保持登入', 'AI-OS 開著的時候，每 20 分鐘會在背景把信箱頁面載入一次，' +
+         ['保持登入', 'AI-OS 開著的時候，每 10 分鐘會在背景把信箱頁面載入一次，' +
            '讓它自己去續期——這就是你把 Outlook 開在瀏覽器裡不會被登出的原因。' +
            '能撐多久由貴公司的政策決定；登入時如果有「保持登入」的選項，勾起來會長很多'],
          ['不會做的事', '寄信、刪除真實信件、搬資料夾、把已讀同步回伺服器——這條路上根本沒有這些呼叫']
@@ -751,7 +776,8 @@
         var reach = cov.ok && cov.data && cov.data.oldest
           ? '，最早到 ' + new Date(cov.data.oldest).toLocaleDateString()
           : '';
-        foot.textContent = folder + '：本機 ' + messages.length + ' 封' + reach + last;
+        footParts = { reach: reach, last: last };
+        foot.textContent = footText();
         ctx.setTitle('郵件 — ' + folder);
         publish();
         ctx.save();
@@ -800,6 +826,93 @@
         if (e.key === 'Escape') { searchBox.value = ''; searchNow(''); }
       });
       searchBox.addEventListener('search', function () { if (!searchBox.value) searchNow(''); });
+
+      /* How often to look, while the window is open. Two minutes is what a
+         mail client's own polling looks like, and it costs one request that
+         carries no bodies -- measured at 173ms against a real mailbox. It is
+         deliberately NOT a body fetch: reading a message is what arms the taint
+         gate, and a background job that quietly downgraded this session's
+         capabilities without anybody doing anything would be worse than a stale
+         list. Headers only; bodies still wait until someone opens a message. */
+      var WATCH_MS = 2 * 60 * 1000;
+
+      /**
+       * Look for new mail without saying anything unless there is some.
+       *
+       * The quiet half matters: a toast every two minutes saying 「沒有新信」 is
+       * a notification people learn to ignore, and then they ignore the one that
+       * mattered. So a check that finds nothing leaves only the timestamp in the
+       * footer.
+       */
+      async function checkNow(why) {
+        if (closed || checking || !status.configured) return 0;
+        checking = true;
+        try {
+          var res = await A.mail.sync(folder, 200);
+          lastCheck = Date.now();
+          if (!res.ok) {
+            /* An expired sign-in will not fix itself in two minutes, and asking
+               again on a timer would put the same complaint on screen all day.
+               Stop, say it once, and let the login flow restart the watch. */
+            if (res.code === 'ENEEDLOGIN') {
+              stopWatching();
+              ctx.toast('Outlook 的登入過期了，自動收信先停下來。重新登入之後會自己接回去。', 't-warn');
+              accountForm();
+            }
+            return 0;
+          }
+          var got = res.data.fetched || 0;
+          if (got) {
+            /* Not while the list is showing search results: replacing what
+               somebody is reading with a folder they did not ask for is the kind
+               of help nobody wants. The mail is in the mirror either way, and
+               the count says it arrived. */
+            if (showing.kind === 'folder') await loadFolder(folder);
+            ctx.toast('收到 ' + got + ' 封新信' +
+              (showing.kind === 'folder' ? '' : '（目前在看搜尋結果，清掉搜尋就會看到）'), 't-ok');
+          } else if (showing.kind === 'folder') {
+            /* Still redraw the footer so the timestamp moves: a clock that does
+               not move is indistinguishable from a check that is not running. */
+            foot.textContent = footText();
+          }
+          return got;
+        } catch (e) {
+          return 0;
+        } finally {
+          checking = false;
+        }
+      }
+
+      /* Minimising must not stop it. A minimised window here keeps its instance
+         mounted -- minimise only sets hidden on the element -- so this interval
+         goes on running, and that is the case that matters most: a window you
+         put away is exactly the one you are not watching. The measured test
+         below minimises the window first and then waits for a message.
+
+         What can still stall it is the whole AI-OS window being minimised, where
+         the browser throttles background timers. So coming back also checks,
+         when enough time has passed that the timer should already have fired. */
+      function catchUp() {
+        if (!watching || document.hidden) return;
+        if (Date.now() - lastCheck >= WATCH_MS) checkNow('catchup');
+      }
+
+      function startWatching() {
+        stopWatching();
+        if (!status.configured) return;
+        watching = true;
+        watchTimer = window.setInterval(function () { checkNow('timer'); }, WATCH_MS);
+        document.addEventListener('visibilitychange', catchUp);
+        window.addEventListener('focus', catchUp);
+      }
+
+      function stopWatching() {
+        watching = false;
+        if (watchTimer) window.clearInterval(watchTimer);
+        watchTimer = null;
+        document.removeEventListener('visibilitychange', catchUp);
+        window.removeEventListener('focus', catchUp);
+      }
 
       /**
        * Fetch what is new on the server into the mirror, then re-show.
@@ -1077,6 +1190,9 @@
 
         btnRescan.hidden = status.kind !== 'owa';
         btnCompose.hidden = !!status.readOnly;
+        /* Opening the window is itself a reason to look: what the list shows
+           until the first check is whatever arrived before you last closed it. */
+        if (!watching) { startWatching(); window.setTimeout(function () { checkNow('open'); }, 400); }
 
         var f = await A.mail.folders();
         folders = f.ok ? f.data : [{ path: 'INBOX', name: 'INBOX' }];
@@ -1398,6 +1514,7 @@
         search: searchNow,
         saveAttachment: saveAttachment,
         compose: compose,
+        check: function () { return checkNow('asked'); },
         syncNow: async function (name) {
           if (name) folder = name;
           await syncNow();
@@ -1431,6 +1548,7 @@
         },
         onClose: function () {
           closed = true;
+          stopWatching();
           if (loginWatch) { window.clearTimeout(loginWatch); loginWatch = null; }
           ctx.publish(null);
         }

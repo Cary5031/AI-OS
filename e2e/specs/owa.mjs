@@ -628,6 +628,75 @@ export async function spec(t, app) {
       assert.ok(r.frame, '內文在 frame 裡，所以 frame 要在：' + JSON.stringify(r.panes));
     });
 
+    await t.test('縮小起來的郵件視窗，照樣看得到新信進來', async () => {
+      /* A mail program that only shows what arrived the last time you pressed a
+         button is a mail program you have to remember to press a button in.
+
+         The window is minimised first on purpose: that is the case that matters,
+         and it is the one that breaks the day minimising stops being just a
+         hidden element. Headers only, also on purpose -- reading a message is
+         what arms the taint gate, and a background job that quietly downgraded
+         this session's capabilities without anybody doing anything would be
+         worse than a stale list. So the taint count comes out unchanged. */
+      MESSAGES.push({
+        id: 'AAMkOWA-NEW',
+        changeKey: 'CK-N',
+        internetMessageId: '<just-arrived@abc.com>',
+        subject: '剛剛寄到的信',
+        from: { name: '王小明', address: 'ming@abc.com' },
+        received: '2026-09-11T08:00:00Z',
+        body: '<p>這封是在視窗開著的時候才到的。</p>',
+        attachments: []
+      });
+
+      const r = await run(cdp, `
+        (AIOS.apps.instances() || []).forEach(function (i) {
+          if (i && i.def && i.def.id === 'mail' && i.win) { try { AIOS.wm.close(i.win); } catch (e) {} }
+        });
+        await new Promise(function (r) { setTimeout(r, 200); });
+
+        var before = (await window.aios.mail.mirrorList({ folder: 'INBOX', limit: 200 })).data.length;
+        var taintBefore = (await window.aios.taint.state()).data.sources.length;
+
+        var win = await AIOS.apps.launch('mail');
+        var inst = AIOS.apps.instanceFor(win);
+        /* Let the window arm itself, then put it away. */
+        for (var i = 0; i < 60; i++) {
+          var f0 = document.querySelector('.ml-foot');
+          if (f0 && f0.textContent.indexOf('自動收信中') >= 0) break;
+          await new Promise(function (r) { setTimeout(r, 100); });
+        }
+        AIOS.wm.minimize(win);
+
+        /* Exactly what the timer calls, called while the window is hidden. */
+        var got = await inst.ctx.api.check();
+
+        var after = (await window.aios.mail.mirrorList({ folder: 'INBOX', limit: 200 })).data.length;
+        var taintAfter = (await window.aios.taint.state()).data.sources.length;
+        var foot = document.querySelector('.ml-foot');
+        return {
+          got: got, before: before, after: after,
+          minimized: !!win.minimized,
+          mounted: !!AIOS.apps.instanceFor(win),
+          listed: win.el.textContent.indexOf('剛剛寄到的信') >= 0,
+          watching: foot ? foot.textContent.indexOf('自動收信中') >= 0 : false,
+          taintBefore: taintBefore, taintAfter: taintAfter
+        };
+      `, { timeout: 120000 });
+
+      assert.equal(r.minimized, true, '這個測試的前提就是視窗縮起來了');
+      assert.equal(r.mounted, true, '縮小不該把視窗拆掉，拆掉了就沒有人在看了');
+      assert.equal(r.got, 1, '縮小狀態下應該剛好看到那一封新的：' + JSON.stringify(r));
+      assert.equal(r.after, r.before + 1, '而且它要真的進到鏡像裡');
+      assert.equal(r.listed, true, '清單也要跟著更新，不是只有計數對');
+      assert.ok(r.watching, '縮小之後還是要繼續在看');
+      assert.equal(r.taintAfter, r.taintBefore,
+        '只抓信頭不讀內文，所以不該因為背景檢查就把提權能力降級');
+
+      /* Leave the fixture as it was found: the next spec counts what is here. */
+      MESSAGES.pop();
+    });
+
     await t.test('這條路上沒有任何能改動真實信箱的呼叫', async () => {
       /* Read-only by construction. The unit test asserts it against the source;
          this asserts it against the running program, which is where a channel

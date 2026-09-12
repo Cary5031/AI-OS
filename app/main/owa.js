@@ -246,7 +246,11 @@ let learning = null;
    A user tab already showing the mailbox does this job better than we can, so
    when there is one, this does nothing. */
 
-const KEEPALIVE_MS = 20 * 60 * 1000;
+/* Ten minutes. The access token the page renews for itself lasts about an hour,
+   so anything comfortably inside that keeps the session from ever lapsing; the
+   point is not to refresh often, it is to never be late. One page load every ten
+   minutes is cheaper than one expired session, which costs a human a sign-in. */
+const KEEPALIVE_MS = 10 * 60 * 1000;
 let keepTimer = null;
 let keepState = { at: 0, ok: false, note: '' };
 
