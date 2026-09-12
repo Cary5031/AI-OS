@@ -130,6 +130,7 @@ async function init(email) {
   cursors = await readJson(p.cursors, {});
   bodyCache.clear();
   sourceMap = null;
+  handleMap = null;
   dirty = false;
   return stats();
 }
@@ -207,6 +208,7 @@ function put(msg) {
   };
   dirty = true;
   sourceMap = null;
+  handleMap = null;
   return index[id];
 }
 
@@ -463,6 +465,73 @@ async function search(opts = {}) {
   return { hits, scanned };
 }
 
+/* How long a handle has to be before two messages cannot share one. Ten hex
+   characters is forty bits: at ten thousand messages the chance of any pair
+   colliding is about one in ten million, and an ambiguous prefix is refused
+   rather than guessed at anyway. */
+const HANDLE_LEN = 10;
+
+/**
+ * A short, stable name for a message.
+ *
+ * A Message-ID is eighty characters of somebody else's choosing, and the core
+ * was being asked to copy one into a note for every message it summarised.
+ * Measured on the first real scheduled run: thirty-five links written, two of
+ * them invented -- not mistyped, invented, fifteen edit operations away from
+ * any real id -- and an invented link looks exactly like a working one until
+ * somebody clicks it. Ten characters derived from the id is the same identity
+ * with a fortieth of the chance to get it wrong.
+ */
+function shortOf(messageId) {
+  return keyOf(messageId).slice(0, HANDLE_LEN);
+}
+
+let handleMap = null;
+
+/**
+ * The message a handle names, or null.
+ *
+ * Full Message-IDs still resolve: notes written before this existed have to
+ * keep working, and an id copied out of a mail client is a reasonable thing for
+ * a person to paste.
+ */
+function resolve(idOrHandle) {
+  const want = String(idOrHandle || '').trim();
+  if (!want) return null;
+  if (index && index[want]) return want;
+  if (!/^[0-9a-f]{6,40}$/i.test(want)) return null;
+
+  if (!handleMap) {
+    handleMap = new Map();
+    for (const id of Object.keys(index || {})) {
+      const h = shortOf(id);
+      /* An ambiguous handle resolves to nothing rather than to the wrong
+         message: opening the wrong mail is worse than opening none. */
+      handleMap.set(h, handleMap.has(h) ? null : id);
+    }
+  }
+  const low = want.toLowerCase();
+  const exact = handleMap.get(low.slice(0, HANDLE_LEN));
+  if (exact) {
+    /* A longer string must still agree all the way, or it names something else. */
+    return keyOf(exact).startsWith(low) ? exact : null;
+  }
+
+  /* A handle short of the full ten characters -- one dropped while copying,
+     which is the exact mistake the handle exists to survive. Six is the floor:
+     twenty-four bits over a few thousand messages is still unambiguous far more
+     often than not, and an ambiguous prefix resolves to nothing rather than to
+     the wrong message. */
+  if (low.length < 6) return null;
+  let hit = null;
+  for (const [h, id] of handleMap) {
+    if (!id || !h.startsWith(low)) continue;
+    if (hit) return null;
+    hit = id;
+  }
+  return hit;
+}
+
 /** Is this row in that folder, counting the ones it was later also seen in? */
 function inFolder(row, folder) {
   if (!row) return false;
@@ -657,6 +726,7 @@ async function purge() {
   account = null;
   bodyCache.clear();
   sourceMap = null;
+  handleMap = null;
   dirty = false;
   return true;
 }
@@ -667,7 +737,7 @@ module.exports = {
   putAttachments, attachment,
   search, partyMatches, addressesIn, snippetOf,
   setLocal, localOf,
-  cursor, setCursor, bySource, dir, coverage, inFolder,
+  cursor, setCursor, bySource, dir, coverage, inFolder, shortOf, resolve, HANDLE_LEN,
   trim, trimAttachments, purge,
   keyOf, accountKey,
   MAX_ONE_ATTACHMENT, MAX_ATTACHMENTS

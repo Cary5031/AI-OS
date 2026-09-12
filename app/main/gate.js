@@ -77,9 +77,15 @@ const OPS = {
 
   /* mail */
   'mail.list':       { cap: 'mail.read',  sig: '{folder, limit}', desc: '列出信件' },
-  'mail.read':       { cap: 'mail.read',  sig: '{messageId, uid}', desc: '讀一封信（給 messageId，或舊式的 uid）' },
-  'mail.search':     { cap: 'mail.read',  sig: '{text, from, to, since, until, folder, hasAttachment, limit}',
-    desc: '在本機已同步的信裡搜尋：主旨、寄件人、內文。from 可以是網域（abc.com）、地址或名字；since/until 是日期' },
+  /* `messageId` accepts the ten-character handle the search results print as
+     well as a full Message-ID. The handle exists because copying eighty random
+     characters is something a planner gets wrong, and a wrong link is
+     indistinguishable from a working one until it is clicked. */
+  'mail.read':       { cap: 'mail.read',  sig: '{messageId, uid}', desc: '讀一封信。messageId 可以是完整的 Message-ID，也可以是搜尋結果印出來的十字元編號' },
+  'mail.search':     { cap: 'mail.read',  sig: '{text, from, to, since, until, folder, hasAttachment, limit, withBody}',
+    desc: '在本機已同步的信裡搜尋：主旨、寄件人、內文。from 可以是網域（abc.com）、地址或名字；since/until 是日期。' +
+          'withBody 給一個數字（最多 12），就會連前幾封的內文一起帶回來——' +
+          '要彙整多封信的內容時用這個，不要一封一封 mail.read，那會用光一回合能做的動作' },
   'mail.send':       { cap: 'mail.send',  sig: '{to, subject, body}', desc: '寄信' },
 
   /* memory */

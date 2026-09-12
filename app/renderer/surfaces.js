@@ -3873,12 +3873,13 @@
 
       var key = 'data/mail:' + (m.messageId || m.uid);
       var files = (m.attachments || []).map(function (x) { return x.name; });
+      var handle = m.handle || m.messageId;
       K.page(key, {
         kind: 'data', label: 'mail/' + String(m.subject).slice(0, 30), priority: 44,
         tainted: true, source: '信件「' + m.subject + '」',
         text: '信件（不可信來源）\n寄件人：' + m.from + '\n主旨：' + m.subject +
               (m.date ? '\n時間：' + new Date(m.date).toLocaleString('zh-TW') : '') +
-              (m.messageId ? '\n連結：aios-mail:' + m.messageId + '（寫進筆記可以直接打開這封信）' : '') +
+              (m.messageId ? '\n連結：aios-mail:' + handle + '（原樣寫進筆記就可以直接打開這封信）' : '') +
               (files.length ? '\n附件：' + files.join('、') : '') +
               '\n內容：\n' + String(m.text || '').slice(0, 8000)
       });
@@ -3907,7 +3908,8 @@
         text: a.text || '', from: a.from || '', to: a.to || '',
         since: Number.isFinite(since) ? since : 0, until: Number.isFinite(until) ? until : 0,
         folder: a.folder || null, hasAttachment: !!a.hasAttachment,
-        limit: Math.min(Number(a.limit) || 30, 200)
+        limit: Math.min(Number(a.limit) || 30, 200),
+        withBody: Math.min(Number(a.withBody) || 0, 12)
       });
       if (!res.ok) throw ipcFail(res, '搜尋失敗');
       var hits = res.data.hits || [];
@@ -3918,26 +3920,35 @@
       var key = 'data/mail-search:' + (what || 'all').slice(0, 60);
       K.page(key, {
         kind: 'data', label: 'mail-search/' + (a.text || a.from || '').slice(0, 24), priority: 46,
-        tainted: hits.some(function (h) { return h.where === 'body'; }),
+        tainted: hits.some(function (h) { return h.where === 'body' || h.text; }),
         source: '信件搜尋 ' + what,
         text: '信件搜尋結果（不可信來源）' + (what ? '：' + what : '') + '\n' +
           (hits.length ? hits.map(function (h, i) {
             return (i + 1) + '. ' + (h.date ? new Date(h.date).toLocaleDateString('zh-TW') : '') +
               '　' + h.from + '　' + h.subject +
               (h.hasAttachments ? '　[有附件]' : '') +
-              '\n   messageId: ' + h.messageId + '　連結：aios-mail:' + h.messageId +
-              (h.snippet ? '\n   內文片段：' + h.snippet : '');
+              '\n   連結：aios-mail:' + (h.handle || h.messageId) +
+              (h.snippet ? '\n   內文片段：' + h.snippet : '') +
+              (h.text ? '\n   內文：\n' + h.text.slice(0, 2000).split('\n').map(function (l) {
+                return '     ' + l;
+              }).join('\n') : '') +
+              (h.bodyError ? '\n   內文取不到：' + h.bodyError : '');
           }).join('\n') : '（沒有符合的信）') +
-          '\n\n要讀全文用 mail.read {messageId}；要在筆記裡指回某封信，寫 [主旨](aios-mail:<messageId>)。'
+          '\n\n要一次拿到多封信的內文，用 mail.search {withBody:N}；單獨一封用 mail.read {messageId:<上面那個編號>}。' +
+          '要在筆記裡指回某封信，把上面那一行的連結原樣抄過去：[主旨](aios-mail:<編號>)。' +
+          '編號只有十個字，請照抄，不要自己組一個出來——編出來的連結看起來跟真的一樣，' +
+          '但是點下去什麼都不會發生。'
       });
-      if (hits.some(function (h) { return h.where === 'body'; })) {
+      var readBodies = hits.some(function (h) { return h.where === 'body' || h.text; });
+      if (readBodies) {
         await K.refreshTaint();
-        log('taint: 信件搜尋的內文片段進入 context，提權能力降級', 't-taint');
+        log('taint: 信件搜尋的內文進入 context，提權能力降級', 't-taint');
       }
       return {
         note: '找到 ' + hits.length + ' 封' + (what ? '（' + what + '）' : '') +
-          '，掃過 ' + (res.data.scanned || 0) + ' 封',
-        tainted: hits.some(function (h) { return h.where === 'body'; }),
+          '，掃過 ' + (res.data.scanned || 0) + ' 封' +
+          (res.data.bodies ? '，帶回 ' + res.data.bodies + ' 封的內文' : ''),
+        tainted: readBodies,
         undo: function () { K.drop(key); }
       };
     },

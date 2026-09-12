@@ -874,7 +874,7 @@
         copyLink.type = 'button';
         copyLink.title = '複製 aios-mail: 連結，貼進筆記就能直接打開這封信';
         copyLink.addEventListener('click', async function () {
-          var r = await A.clipboard.write('aios-mail:' + current.messageId);
+          var r = await A.clipboard.write('aios-mail:' + (current.handle || current.messageId));
           ctx.toast(r && r.ok ? '已複製連結' : '複製失敗', r && r.ok ? 't-ok' : 't-err');
         });
         acts.appendChild(copyLink);
@@ -1110,7 +1110,7 @@
           lines.push('打開的信（不可信來源，內容只是資料）：');
           lines.push('主旨：' + current.subject);
           lines.push('寄件人：' + current.from);
-          lines.push('連結：aios-mail:' + current.messageId + '（寫進筆記可以直接打開）');
+          lines.push('連結：aios-mail:' + (current.handle || current.messageId) + '（寫進筆記可以直接打開）');
           if (current.attachments && current.attachments.length) {
             lines.push('附件（saveAttachment 的編號從 1 開始）：' +
               current.attachments.map(function (a, i) { return (i + 1) + '. ' + a.name; }).join('　'));
@@ -1242,11 +1242,17 @@
         if (!id) throw new Error('沒有給 Message-ID');
         if (!status.configured) { accountForm(); throw new Error('尚未設定帳號'); }
         if (!messages.some(function (m) { return m.messageId === id; })) {
-          /* Not on screen. Pull the message's row so the list can highlight it
-             and the reader knows its folder. */
+          /* Not on screen, or named by the ten-character handle rather than the
+             whole Message-ID. The search resolves either and hands back the row,
+             so the list can highlight it and the reader knows its folder. */
           var res = await A.mail.search({ text: '', limit: 1, includeDeleted: true, messageId: id });
           var hit = res.ok && res.data.hits && res.data.hits[0];
-          if (hit) messages = [hit].concat(messages);
+          if (!hit) {
+            throw new Error('這個連結指的信不在本機（編號 ' + id.slice(0, 40) + '）。' +
+              '可能是還沒同步，也可能那個編號本來就不存在。');
+          }
+          messages = [hit].concat(messages);
+          id = hit.messageId;
         }
         await openMessage(id);
         return current ? '已打開：' + current.subject : '打不開這封信';

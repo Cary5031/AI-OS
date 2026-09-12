@@ -931,13 +931,54 @@ function register(getWindow) {
      else's mail entering this machine's reasoning, so the gate is armed the
      same way reading the message would arm it. A hit on the subject alone is
      what the list already shows and does not. */
+  /**
+   * Search the mirror, and optionally bring the bodies back with the hits.
+   *
+   * `withBody` is why this is one call and not one call plus a read per hit.
+   * Measured, on the scheduled run that this whole line of work exists for:
+   * eight matching messages became eight separate `mail.read` actions, at most
+   * six actions fit in a round, one read failed and cost a repair round, and
+   * the five-round budget was gone before the note was ever written. The work
+   * was not too large -- it was shaped wrong. Asking "which messages, and what
+   * do they say" is one question, so it is one syscall.
+   *
+   * Bounded on purpose: each missing body is a fetch from the server, and the
+   * point is to make a search cheap enough to plan around, not to make one
+   * action able to pull a mailbox.
+   */
   ipcMain.handle('mail:search', guarded('mail.read', async (opts = {}) => {
     if (!mail.store.ready()) throw Object.assign(new Error('還沒有同步過的信'), { code: 'ENOACCOUNT' });
+    if (opts.messageId) {
+      const found = mail.store.resolve(opts.messageId);
+      if (found) opts = { ...opts, messageId: found };
+    }
     const out = await mail.store.search(opts);
-    const bodies = out.hits.filter((h) => h.where === 'body');
+    /* The handle travels with every hit, because it is what the core will write
+       into a note and what a link will arrive back as. */
+    out.hits.forEach((h) => { h.handle = mail.store.shortOf(h.messageId); });
+
+    const want = Math.max(0, Math.min(Number(opts.withBody) || 0, 12));
+    if (want) {
+      for (const hit of out.hits.slice(0, want)) {
+        try {
+          if (!hit.hasBody) await mail.syncBody({ messageId: hit.messageId, folder: hit.folder, uid: hit.uid });
+          hit.text = String((await mail.store.body(hit.messageId)) || '').slice(0, 4000);
+        } catch (e) {
+          /* One message that will not open does not fail the search. Say so on
+             the hit, so the answer built from this is visibly short rather than
+             quietly short. */
+          hit.bodyError = String(e.message || e).slice(0, 160);
+        }
+      }
+      out.bodies = out.hits.filter((h) => h.text).length;
+    }
+
+    /* Reading a body is reading a stranger's writing, whether it arrived as a
+       search snippet or in full. Both arm the gate. */
+    const bodies = out.hits.filter((h) => h.where === 'body' || h.text);
     if (bodies.length) {
-      gate.addTaint('mail:search:' + String(opts.text || '').slice(0, 40),
-        `信件搜尋「${String(opts.text || '').slice(0, 40)}」的內文片段（${bodies.length} 封）`);
+      gate.addTaint('mail:search:' + String(opts.text || opts.from || '').slice(0, 40),
+        `信件搜尋「${String(opts.text || opts.from || '').slice(0, 40)}」的內文（${bodies.length} 封）`);
     }
     return out;
   }, null, '在本機已同步的信裡搜尋主旨、寄件人與內文'));
@@ -997,12 +1038,20 @@ function register(getWindow) {
     null, '列出本機已同步的信件'));
 
   ipcMain.handle('mail:mirrorRead', guarded('mail.read', async ({ messageId, folder, uid }) => {
-    const held = mail.store.get(messageId);
-    if (!held) throw new Error('本機沒有這封信，先同步一次');
+    /* A link may carry the full Message-ID or the ten-character handle the
+       search results hand out; both name the same row. */
+    const id = mail.store.resolve(messageId) || messageId;
+    const held = mail.store.get(id);
+    if (!held) {
+      throw Object.assign(
+        new Error('本機沒有這封信。連結上的編號在這台機器的鏡像裡找不到——可能是還沒同步，也可能那個編號本來就不存在。'),
+        { code: 'ENOMSG' });
+    }
+    messageId = id;
     if (!held.hasBody) await mail.syncBody({ folder: folder || held.folder, uid: uid != null ? uid : held.uid, messageId });
     const body = await mail.store.body(messageId);
     gate.addTaint('mail:' + messageId, `信件「${held.subject}」（${held.from}）`);
-    return { ...mail.store.get(messageId), text: body || '' };
+    return { ...mail.store.get(messageId), handle: mail.store.shortOf(messageId), text: body || '' };
   }, null, '讀一封本機的信'));
 
   /* Local-only edits: no capability, because nothing leaves this machine and

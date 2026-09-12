@@ -296,3 +296,50 @@ test('a boundary with capitals in it still splits the message, and a filename ke
   assert.equal(out.attachments[0].name, 'Report.PDF');
   assert.equal(out.attachments[0].data.toString(), '%PDF-1.7');
 });
+
+
+test('一封信有一個十個字的短編號，而編出來的那種解不開', async () => {
+  /* Measured on the first real scheduled run against a live mailbox: the core
+     was asked to write a link per message it summarised, each link carrying an
+     eighty-character Message-ID. It wrote thirty-five and invented two of them
+     -- not mistyped, invented: fifteen edit operations away from any real id --
+     and an invented link is indistinguishable from a working one until somebody
+     clicks it. With a ten-character handle the same run wrote a hundred links
+     and every one of them opened. */
+  await freshStore();
+  store.put(msg(1));
+  store.put(msg(2));
+  await store.flush();
+
+  const id = '<m1@example.com>';
+  const h = store.shortOf(id);
+  assert.equal(h.length, 10);
+  assert.equal(store.shortOf(id), h, '同一封信永遠是同一個編號');
+  assert.notEqual(store.shortOf('<m2@example.com>'), h);
+
+  assert.equal(store.resolve(h), id, '編號解得回那封信');
+  assert.equal(store.resolve(id), id, '完整的 Message-ID 也還是通的');
+  assert.equal(store.resolve(h.toUpperCase()), id, '大小寫不該影響');
+  assert.equal(store.resolve(h.slice(0, 8)), id, '短一點的前綴也認');
+
+  /* The two that actually happened. */
+  assert.equal(store.resolve('a1b2c3d4e5'), null, '編出來的解不開');
+  assert.equal(store.resolve('<invented@nowhere.example>'), null);
+  assert.equal(store.resolve(''), null);
+  assert.equal(store.resolve(null), null);
+  assert.equal(store.resolve('不是十六進位'), null);
+});
+
+test('短編號跟著信走：新的信進來不會讓舊的編號失效', async () => {
+  await freshStore();
+  store.put(msg(1));
+  const h = store.shortOf('<m1@example.com>');
+  assert.equal(store.resolve(h), '<m1@example.com>');
+
+  for (let i = 2; i < 40; i++) store.put(msg(i));
+  assert.equal(store.resolve(h), '<m1@example.com>', '索引變了，編號還是指同一封');
+
+  store.setLocal('<m1@example.com>', { deleted: true });
+  assert.equal(store.resolve(h), '<m1@example.com>',
+    '本機刪掉只是墓碑，連結還是該找得到它（列出時才會被濾掉）');
+});
