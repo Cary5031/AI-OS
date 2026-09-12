@@ -313,6 +313,14 @@
      progress ends immediately whichever budget it is on. */
   var MAX_ROUNDS = 5;
   var MAX_STEP_ROUNDS = 14;
+  /* Repairing is not the same kind of work as planning, and it used to be given
+     the smaller budget by accident: the repair branch cleared `stepping`, so a
+     turn that had earned the larger budget dropped back to five the moment
+     something failed -- which is exactly when it needs the rounds. Reported as
+     「他明明還沒修正完成，但因為回合限制而停止」, and it is the same shape as the
+     failure in the mail run: the work was not too large, the budget was
+     withdrawn at the wrong moment. */
+  var MAX_REPAIR_ROUNDS = 12;
   var MAX_STALLED = 2;
 
   /** Resident pages holding content read in from a file, a page or a mailbox. */
@@ -518,6 +526,7 @@
     /* Set for the round after a plan asked to continue. It changes two things:
        the budget above, and whether a repeated action counts as a duplicate. */
     var stepping = false;
+    var cap = MAX_ROUNDS;
     for (;;) {
       round++;
       if (round > 1) { UI.resetPhases(); UI.phase('intent', 'done'); }
@@ -541,7 +550,14 @@
          did -- meant a read round spent the budget the repair round needed,
          so "read it, do it, one step fails" had no recovery left. */
       if (outcome.ran.length || gained > 0) stalled = 0; else stalled++;
-      var cap = stepping ? MAX_STEP_ROUNDS : MAX_ROUNDS;
+      /* The budget only ever grows. Work that turns out to need repairing, or
+         to be one step of a sequence, has earned the larger allowance, and
+         taking it away again on the next round is how a turn stops halfway
+         through fixing itself. MAX_STALLED is what still ends a loop going
+         nowhere, and it does not care which budget is in force. */
+      if (outcome.failed) cap = Math.max(cap, MAX_REPAIR_ROUNDS);
+      if (res.plan.more) cap = Math.max(cap, MAX_STEP_ROUNDS);
+      if (stepping) cap = Math.max(cap, MAX_STEP_ROUNDS);
       var room = round < cap && stalled < MAX_STALLED;
       /* Three ways a round can leave the job open, and the third was silent
          until it was watched happening: a plan longer than one round's cap had

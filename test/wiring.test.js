@@ -2595,11 +2595,32 @@ test('the build loop has a budget, and every way out of it is named', () => {
     'every stage is at least one generation, so stages extend the budget');
 
   const loop = funcBody(src, 'repairLoop');
-  for (const why of ['stuck', 'toolong', 'budget']) {
+  for (const why of ['stuck', 'toolong', 'budget', 'unfixable']) {
     assert.ok(loop.includes("why: '" + why + "'"), 'the loop must be able to end with ' + why);
   }
-  assert.match(loop, /if \(key === lastKey\)/,
-    'the same failure twice running is the signal to change the question');
+
+  /* Progress is the failure set changing, not the round number going up. The
+     loop used to return on the first repeated failure, which cannot tell a
+     program two rounds from working apart from one that will never work --
+     reported as 「他明明還沒修正完成，但因為回合限制而停止」. A repeat now asks the
+     model whether this is fixable and how, and only a "no" ends the build. */
+  assert.match(loop, /noProgress = key === lastKey \? noProgress \+ 1 : 0;/,
+    '重複的失敗是「上一輪沒修對」，不是「修不好」');
+  assert.match(loop, /if \(noProgress >= BUILD\.STUCK_STREAK\)/,
+    '連續沒有進展才去問，不是第一次重複就放棄');
+  assert.match(loop, /await judgeFixable\(/, '問的是模型，不是計數器');
+  assert.match(loop, /if \(!verdict\.fixable\)/, '而且「不能修」要是一個真的答案');
+  assert.match(loop, /judgements >= BUILD\.MAX_JUDGEMENTS/,
+    '一直說「還有救」也要有個盡頭，否則就只是換一個無窮迴圈');
+
+  /* The judge has to be asked a question it can answer from evidence: what
+     failed, in order, and the code as it stands. */
+  const judge = funcBody(src, 'judgeFixable');
+  assert.match(judge, /schemaName: 'fixable'/, '結構化輸出，不是叫模型自由發揮');
+  assert.match(judge, /fixable: d\.fixable !== false/,
+    '模型沒答或答壞了，預設是「再試一次」——不要因為解析失敗就放棄一個修得好的程式');
+  assert.match(judge, /history \|\| \[\]\)\.slice\(-6\)/, '要給它前幾輪各自失敗在哪');
+  assert.match(judge, /String\(code \|\| ''\)\.slice\(0, 60000\)/, '也要給它現在的程式碼');
 
   /* Escalation order: re-plan, then stages, then simplify, then give up. */
   assert.ok(build.indexOf("mode: 'replan'") < build.indexOf("mode: 'simplify'"),
@@ -3213,10 +3234,21 @@ test('a generated program is used before it is installed', () => {
   /* A failure is repaired, like a static one, and the loop goes on rather than
      returning: what ends it is the budget or the same failure twice, not the
      first thing that went wrong. */
-  assert.match(loop, /跑不起來[\s\S]{0,600}withRemedy\(found, rounds\)/,
+  assert.match(loop, /跑不起來[\s\S]{0,1800}withRemedy\(found, rounds\)/,
     'a program that does not work is sent back with a remedy');
-  assert.match(loop, /if \(key === lastKey\) \{\s*\n\s*return \{ ok: false, problems: found, why: 'stuck' \}/,
-    'the only refusal inside the loop is the same failure twice running');
+  /* And when the judge said how, that goes back with it -- otherwise the next
+     round repeats the remedy that already did not work. */
+  assert.match(loop, /problems = problems\.concat\(\['這一輪照這個方向改：' \+ advice\]\)/,
+    '判斷出來的改法要真的送進下一輪');
+  /* The loop gives up on exactly two things, and neither of them is a round
+     number: the judge saying this cannot be fixed, and the judge having said
+     「還有救」 MAX_JUDGEMENTS times without it becoming true. Running out of
+     rounds is the backstop outside the loop, and it reports `budget` so the
+     log can tell the two apart. */
+  assert.match(loop, /if \(!verdict\.fixable\) \{[\s\S]{0,200}why: 'unfixable'/,
+    '「改不好了」是一個答案，而且要帶著理由回去');
+  assert.match(loop, /if \(judgements >= BUILD\.MAX_JUDGEMENTS\) \{\s*\n\s*return \{ ok: false, problems: found, why: 'stuck' \}/,
+    '判斷了幾次還是在原地，那才是 stuck');
 
   // The retry has to carry a remedy, not just the complaint.
   const remedy = funcBody(forge, 'withRemedy');
@@ -3613,9 +3645,24 @@ test('an intent is bounded by rounds and by getting nowhere, separately', () => 
   /* `cap` is MAX_ROUNDS, or MAX_STEP_ROUNDS when the planner is walking a
      sequence it cannot see the end of. Both are still gated by the no-progress
      counter, which is the one that catches a loop going nowhere. */
-  assert.match(body, /var cap = stepping \? MAX_STEP_ROUNDS : MAX_ROUNDS;/);
+  /* The budget only ever grows. It used to be recomputed from `stepping` every
+     round, and the repair branch clears `stepping` -- so a turn that had earned
+     the larger allowance lost it the moment something failed, which is exactly
+     when it needed the rounds. Reported from a real build that stopped halfway
+     through repairing itself. */
+  assert.match(body, /var cap = MAX_ROUNDS;/, 'the budget starts at the plain cap');
+  assert.match(body, /if \(outcome\.failed\) cap = Math\.max\(cap, MAX_REPAIR_ROUNDS\);/,
+    '出錯之後要有修得完的預算');
+  assert.match(body, /if \(res\.plan\.more\) cap = Math\.max\(cap, MAX_STEP_ROUNDS\);/,
+    '走步驟的也一樣');
+  assert.ok(!/cap\s*=\s*stepping\s*\?/.test(codeOnly(body)),
+    'the budget must not be recomputed from a flag that the repair branch clears');
   assert.match(body, /round\s*<\s*cap\s*&&\s*stalled\s*<\s*MAX_STALLED/,
     'both limits gate the next round');
+
+  const repair = Number(/var MAX_REPAIR_ROUNDS = (\d+);/.exec(boot)[1]);
+  assert.ok(repair > rounds, '修復的預算要比一般的大：' + repair + ' vs ' + rounds);
+  assert.ok(repair <= 30, repair + ' 回合的模型呼叫是一筆沒人同意過的帳');
   // codeOnly, because the comment explaining the change names the old cap.
   assert.ok(!/round\s*<\s*2/.test(codeOnly(body)),
     'the old shared cap must be gone, not merely supplemented');
@@ -6994,6 +7041,10 @@ test('a stepping round may repeat an action, and gets room to finish', () => {
     'the duplicate guard must not block a deliberate repeat');
   assert.match(body, /stepping = false;\s*\n\s*continue;/,
     'a repair round is not a stepping round; the flag has to clear');
+  /* But clearing it must not take the budget with it -- that is what made a
+     build stop halfway through fixing itself. */
+  assert.match(body, /if \(stepping\) cap = Math\.max\(cap, MAX_STEP_ROUNDS\);/,
+    '清掉旗標不能把預算一起清掉');
 
   /* A sequence whose end it cannot see needs more rounds than read -> act ->
      repair, and still a bound: every round is a model call. */
@@ -7002,7 +7053,6 @@ test('a stepping round may repeat an action, and gets room to finish', () => {
   const plain = Number(/var MAX_ROUNDS = (\d+);/.exec(boot)[1]);
   assert.ok(step > plain, '走步驟的預算要比一般的大，不然打不完一場架');
   assert.ok(step <= 30, `${step} 回合的模型呼叫是一筆沒人同意過的帳`);
-  assert.match(body, /var cap = stepping \? MAX_STEP_ROUNDS : MAX_ROUNDS;/);
   assert.match(body, /'：已達 ' \+ cap \+ ' 回合上限'/,
     '停下來的訊息要說的是真正用到的那個上限');
 

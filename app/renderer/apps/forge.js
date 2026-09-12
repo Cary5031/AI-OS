@@ -48,22 +48,33 @@
    *
    * Every number here bounds a loop that would otherwise be bounded only by the
    * model's willingness to keep failing, and each round of it costs a model
-   * call. They are generous on purpose -- the previous shape stopped after three
-   * static retries and one smoke retry, and a program that needed a fourth was
-   * simply not built -- but they are still numbers, and the log says which one
-   * ran out.
+   * call. The log always says which one ran out.
+   *
+   * They were raised after this, reported from real builds:
+   *
+   *   「他明明還沒修正完成，但因為回合限制而停止，導致後續停擺」
+   *
+   * A count is a poor judge of whether something is fixable. It cannot tell a
+   * program two rounds from working apart from one that will never work, so it
+   * has to be set low enough to be safe on the second and thereby too low for
+   * the first. The judge is now the model: when a repair stops making progress,
+   * it is asked whether this is fixable and how -- and a "no" ends the build
+   * with a reason, which is what stopping should have meant all along. The
+   * numbers are the backstop behind that, not the decision.
    */
   var BUILD = {
-    MAX_ROUNDS: 10,      // code generations per build; every repair is one
+    MAX_ROUNDS: 24,      // code generations per build; every repair is one
     MAX_REPLANS: 2,      // times the spec itself may be rewritten from failures
-    MAX_MINUTES: 25,     // wall clock for the whole build
+    MAX_MINUTES: 45,     // wall clock for the whole build
     MAX_CONTINUE: 3,     // continuations when the code outruns the output cap
     CODE_TOKENS: 8000,   // asked for; a provider's own cap wins when it sets one
     PHASE_ITEMS: 4,      // plan items per stage when building in stages
     SINGLE_SHOT_ITEMS: 5, // a plan longer than this is built in stages
     MAX_STAGES: 5,       // stages at most; a longer plan gets bigger stages
-    STEP_ROUNDS: 4,      // rounds one stage may spend before it is skipped
-    REVIEW_ROUNDS: 2     // rounds to act on what the review found
+    STEP_ROUNDS: 8,      // rounds one stage may spend before it is skipped
+    REVIEW_ROUNDS: 4,    // rounds to act on what the review found
+    STUCK_STREAK: 2,     // rounds with the identical failure before asking the judge
+    MAX_JUDGEMENTS: 3    // times the judge may say "keep going" in one loop
   };
 
   /* ------------------------------------------------------------- prompting */
@@ -939,6 +950,9 @@
     var mode = ctx.mode || 'fresh';
     var rounds = 0;
     var lastKey = null;
+    var noProgress = 0;
+    var judgements = 0;
+    var advice = null;
 
     while (rounds < maxRounds) {
       if (state.budget.spent()) return { ok: false, problems: problems || [], why: 'budget' };
@@ -989,18 +1003,108 @@
       state.history.push({ round: round, stage: stage, problems: found.slice() });
       say('　' + (stage === '靜態檢查' ? '不合規：' : '跑不起來：') + found.join('；'), 'fg-warn');
 
+      /* Progress is the failure set changing, not the round number going up.
+         An identical failure means the last remedy missed; a different one, or
+         fewer of them, means the loop is working and should keep going. */
       var key = found.join('|');
-      if (key === lastKey) {
-        return { ok: false, problems: found, why: 'stuck' };
-      }
+      noProgress = key === lastKey ? noProgress + 1 : 0;
       lastKey = key;
+
+      if (noProgress >= BUILD.STUCK_STREAK) {
+        if (judgements >= BUILD.MAX_JUDGEMENTS) {
+          return { ok: false, problems: found, why: 'stuck' };
+        }
+        judgements++;
+        say('　同樣的問題又出現了，先問模型這還修不修得好…', 'fg-warn');
+        state.tell({ step: '判斷還修不修得好', round: round, stage: ctx.label || '', streaming: true });
+        var verdict;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          verdict = await judgeFixable(spec, code, state.history, found, onToken);
+        } catch (e) {
+          verdict = { fixable: true, why: '', approach: '' };
+        }
+        state.tell({ streaming: false });
+
+        if (!verdict.fixable) {
+          say('　判定改不好了：' + (verdict.why || '沒有給理由'), 'fg-warn');
+          return { ok: false, problems: found, why: 'unfixable', verdict: verdict };
+        }
+        say('　判定還有救：' + (verdict.approach || verdict.why || '再試一次'), 'fg-ok');
+        advice = verdict.approach || null;
+        noProgress = 0;
+      }
 
       // The next round fixes this candidate rather than starting over.
       problems = withRemedy(found, rounds);
+      if (advice) { problems = problems.concat(['這一輪照這個方向改：' + advice]); advice = null; }
       previous = code;
       mode = 'repair';
     }
     return { ok: false, problems: problems || [], why: 'budget' };
+  }
+
+  /**
+   * Ask whether this is worth another round.
+   *
+   * The thing a round counter cannot do. Two rounds with the same error means
+   * the last remedy did not land; it does not mean the program cannot be made
+   * to work, and the old loop treated the two as the same and stopped. So the
+   * model is handed what it has actually been unable to fix -- the failures in
+   * order, and the code as it stands -- and asked the only question that
+   * matters: is there a change that fixes this, or is the spec asking for
+   * something this program cannot do?
+   *
+   * A "no" is a result, not a failure to try: it ends the build with a reason a
+   * person can act on, instead of 「已用完 N 輪的額度」, which tells them nothing
+   * about whether trying again would help.
+   */
+  async function judgeFixable(spec, code, history, problems, onToken) {
+    var sys = [
+      '你是資深工程師，正在判斷一個自動建置的程式還值不值得再修一輪。',
+      '你會看到規格、目前的程式碼，以及前幾輪各自失敗在哪裡。',
+      '同一個錯誤連續出現，通常代表上一輪的修法沒有對準問題，不代表這個程式做不出來。',
+      '請判斷：有沒有一個具體的改法可以修好它？',
+      'fixable=true 時，approach 要寫出**具體**要改什麼（哪個函式、改成什麼），',
+      '不要重複已經試過而無效的說法。',
+      'fixable=false 只用在真的做不到的情況：規格要求的事在這個沙箱裡沒有 API 可以做到、',
+      '或需求本身自相矛盾。這時 why 要說清楚是哪一項做不到、為什麼。',
+      '輸出 JSON：{"fixable":true|false,"why":"一句話說明","approach":"具體改法，fixable 為 false 時留空"}'
+    ].join('\n');
+
+    var tried = (history || []).slice(-6).map(function (h) {
+      return '第 ' + h.round + ' 輪（' + h.stage + '）：' + (h.problems || []).join('；');
+    }).join('\n');
+
+    var user = ['規格：', JSON.stringify({
+      name: spec.name, purpose: spec.purpose, plan: spec.plan, capabilities: spec.capabilities
+    }, null, 2), '', '這幾輪失敗在：', tried, '', '這一輪還是失敗在：', (problems || []).join('；'),
+      '', '目前的程式碼：', String(code || '').slice(0, 60000)].join('\n');
+
+    var res = await K.complete({
+      owner: 'forge',
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+      schema: {
+        type: 'object',
+        properties: {
+          fixable: { type: 'boolean' },
+          why: { type: 'string' },
+          approach: { type: 'string' }
+        },
+        required: ['fixable']
+      },
+      schemaName: 'fixable',
+      temperature: 0.2,
+      maxTokens: 900,
+      onToken: onToken
+    });
+    K.addSpend(res.spend);
+    var d = res.data || {};
+    return {
+      fixable: d.fixable !== false,
+      why: String(d.why || '').trim().slice(0, 400),
+      approach: String(d.approach || '').trim().slice(0, 800)
+    };
   }
 
   /**
@@ -1288,7 +1392,10 @@
       if (state.budget.replans < BUILD.MAX_REPLANS) {
         state.budget.replans++;
         say('3/5　重新規劃（第 ' + state.budget.replans + ' 次）：' +
-          (result.why === 'stuck' ? '同樣的問題連續出現兩次' : '這條路走不通'), 'fg-warn');
+          (result.why === 'unfixable'
+            ? '模型判定這個寫法改不好了：' + ((result.verdict && result.verdict.why) || '')
+            : result.why === 'stuck' ? '同樣的問題修了幾輪都沒有動靜'
+              : '這條路走不通'), 'fg-warn');
         tell({ phase: '3/5 重新規劃（第 ' + state.budget.replans + ' 次）', step: '模型帶著失敗紀錄改規格', stage: '', round: 0, streaming: true });
         var replanLine = say('', 'fg-stream');
         try {
