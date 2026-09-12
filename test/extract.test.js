@@ -420,8 +420,9 @@ test('a model name cannot carry a slash, so it cannot reshape the request URL', 
   assert.throws(() => M.validateModel('a b'), /模型名稱/);
 });
 
-test('a request path has to stay inside the configured service', () => {
-  assert.equal(M.joinPath('/jobs'), M.GEMINI_BASE + '/jobs');
+test('a request path has to stay inside the configured service', async () => {
+  await M.configure('service', { base: 'http://127.0.0.1:8000' });
+  assert.equal(M.joinPath('/jobs'), 'http://127.0.0.1:8000/jobs');
   assert.throws(() => M.joinPath('jobs'), /\//);
   assert.throws(() => M.joinPath('/../admin'), /不合法/);
   assert.throws(() => M.joinPath('http://elsewhere.example/x'), /\//);

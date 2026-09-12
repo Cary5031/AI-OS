@@ -390,16 +390,18 @@ function wireBoot() {
           (providers.sealed ? '' : ' — no OS keychain, credentials cannot be stored'),
           activeProvider.remote ? 'warn' : 'ok');
 
-      /* The 文件萃取 program's own model. Reported separately from the core
-         provider above because it is a separate decision with a separate key:
+      /* The 文件萃取 program's own backends. Reported separately from the core
+         provider above because they are a separate decision with separate keys:
          a machine thinking locally can still be shipping every invoice to a
          cloud reader, and the boot log should not let that go unsaid. */
       const extractor = await extract.init(userData);
-      say(extractor.configured
-        ? `document extractor: ${extractor.mode === 'gemini' ? extractor.model : extractor.base}` +
-          ' — documents leave this machine'
+      const where = [];
+      if (extractor.service.configured) where.push('studio ' + extractor.service.base);
+      if (extractor.fallback.configured) where.push('fallback ' + extractor.fallback.model);
+      say(where.length
+        ? 'document extractor: ' + where.join(', ') + ' — documents leave this machine'
         : 'document extractor: not configured',
-        extractor.configured ? 'warn' : 'info');
+        where.length ? 'warn' : 'info');
 
       const mailStatus = await mail.init(userData);
       say(mailStatus.configured

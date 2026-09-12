@@ -94,28 +94,48 @@ contextBridge.exposeInMainWorld('aios', {
   },
 
   /* ------------------------------------------------- document extraction */
-  /* The 文件萃取 program's own model, which is not this machine's model. Its
-     endpoint, key, auth kind and custom headers live in their own settings
-     file and are configured in that program's own window; nothing here touches
-     the core model above, and nothing above touches this.
+  /* The 文件萃取 program's two backends, neither of which is this machine's
+     model. The prompt studio is the default and owns the categories, the
+     vendors, the column layouts and the tuned prompts; the second is a cloud
+     model called directly, for when the studio cannot be reached. Each has its
+     own address, key, auth kind and custom headers, configured in that
+     program's own window. Nothing here touches the core model above, and
+     nothing above touches these.
 
-     `state` reports the address, the model name and whether a key exists, plus
-     what the custom headers are *called*. No value of any secret comes back
-     through this bridge -- there is no getter for one, here or in main, for the
-     same reason as the core model's: a bridge that can hand a credential out is
-     a bridge a bug in the renderer can be talked into handing one out through.
+     `state` reports each backend's address, whether a key exists, and what its
+     custom headers are *called*. No secret value comes back through this bridge
+     -- there is no getter for one, here or in main, for the same reason as the
+     core model's: a bridge that can hand a credential out is a bridge a bug in
+     the renderer can be talked into handing one out through.
 
-     `send` names a sandbox path rather than carrying bytes. The window never
-     holds the document, and the main process reads it from the place it already
-     had to check containment for. */
+     `send` and `call` name sandbox paths rather than carrying bytes. The window
+     never holds the document, and the main process reads it from the place it
+     already had to check containment for. */
   extract: {
     state: () => invoke('extract:state'),
-    configure: (patch) => invoke('extract:configure', { patch }),
-    setSecret: (key, headers) => invoke('extract:setSecret', { key, headers }),
-    forgetSecret: () => invoke('extract:forgetSecret'),
-    probe: () => invoke('extract:probe'),
+    /* `which` is 'service', 'fallback', or omitted for the settings that belong
+       to neither: which is preferred, whether to fall back automatically, where
+       documents get filed, and the name batches are submitted under. */
+    configure: (which, patch) => invoke('extract:configure', { which, patch }),
+    setSecret: (which, key, headers) => invoke('extract:setSecret', { which, key, headers }),
+    forgetSecret: (which) => invoke('extract:forgetSecret', { which }),
+    probe: (which) => invoke('extract:probe', { which }),
+    /* Which backend this batch would go through, and why. The reason is half the
+       answer: a window that quietly switched engines would produce rows under
+       the same heading from a different source. */
+    resolve: (force) => invoke('extract:resolve', { force }),
+    /* What the studio last said exists, so the window still knows the shape of
+       the work when the studio is unreachable. */
+    catalog: () => invoke('extract:catalog'),
+    saveCatalog: (patch) => invoke('extract:saveCatalog', { patch }),
     send: (spec) => invoke('extract:send', spec || {}),
-    call: (spec) => invoke('extract:call', { spec })
+    /* Asking the studio something (GET, from a fixed list of paths). Carries
+       nothing out, so it is not behind the capability -- see ipc.js. */
+    call: (spec) => invoke('extract:call', { spec }),
+    /* Handing the studio something: the documents, or the rows back for a
+       naming plan. `spec.paths` names sandbox files; the window never holds
+       their bytes. */
+    upload: (spec) => invoke('extract:upload', { spec })
   },
 
   policy: {

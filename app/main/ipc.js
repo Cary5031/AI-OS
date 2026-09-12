@@ -317,28 +317,42 @@ function register(getWindow) {
 
   /* ------------------------------------------------ document extraction ---- */
 
-  /* A second model, belonging to one program rather than to the machine.
-     Separate endpoint, separate key, separate settings file -- nothing here
-     reads or writes the core model's configuration, and nothing there reads
-     this one's. The two are configured in different windows on purpose: the
-     machine's model is the machine's, and the extraction model is that
-     program's.
+  /* Two backends belonging to one program rather than to the machine, and they
+     are not equals: the prompt studio is the default, and a cloud model called
+     directly is what happens when the studio cannot be reached. Separate
+     endpoints, separate keys, separate settings file. Nothing here reads or
+     writes the core model's configuration, and nothing there reads this one's.
 
      The settings calls are plain() for the same reason the core model's are:
      they are user gestures made in this shell's own window, they report whether
      a credential exists and never what it is, and no model can reach them
-     because they are not in the syscall table.
+     because they are not in the syscall table. `resolve` is a health check
+     against an address the user typed, carrying no document, so it belongs with
+     them rather than behind the gate.
 
-     The two that actually talk to the configured backend answer to doc.extract,
-     which is a switch of its own in the capability panel -- see gate.js. */
+     The two that actually carry a document answer to doc.extract, which is a
+     switch of its own in the capability panel -- see gate.js. */
   ipcMain.handle('extract:state', plain(async () => extract.state()));
-  ipcMain.handle('extract:configure', plain(async ({ patch } = {}) => extract.configure(patch || {})));
-  ipcMain.handle('extract:setSecret', plain(async ({ key, headers } = {}) =>
-    extract.setSecret({ key, headers })));
-  ipcMain.handle('extract:forgetSecret', plain(async () => extract.forgetSecret()));
-  ipcMain.handle('extract:probe', plain(async () => extract.probe()));
+  ipcMain.handle('extract:configure', plain(async ({ which, patch } = {}) =>
+    extract.configure(which === undefined ? null : which, patch || {})));
+  ipcMain.handle('extract:setSecret', plain(async ({ which, key, headers } = {}) =>
+    extract.setSecret(which, { key, headers })));
+  ipcMain.handle('extract:forgetSecret', plain(async ({ which } = {}) => extract.forgetSecret(which)));
+  ipcMain.handle('extract:probe', plain(async ({ which } = {}) => extract.probe(which)));
+  ipcMain.handle('extract:resolve', plain(async ({ force } = {}) => extract.resolve({ force: !!force })));
 
-  /* One document to the extraction model.
+  /* What the studio last said exists. Kept in this process beside the settings,
+     because its job is to still be there when the studio is not. */
+  ipcMain.handle('extract:catalog', plain(async () => extract.catalog()));
+  ipcMain.handle('extract:saveCatalog', plain(async ({ patch } = {}) => {
+    const wrote = await extract.saveCatalog(patch || {});
+    return Object.assign(extract.catalog(), { persisted: wrote });
+  }));
+
+  /* One document to the FALLBACK model, with a prompt the window supplies from a
+     local profile. Not the usual path: the usual path is extract:call below,
+     which hands the batch to the prompt studio.
+
      The renderer names a sandbox path, never bytes: a 10 MiB PDF would otherwise
      cross the bridge twice to get somewhere the main process could have read it
      from directly, and the window would be holding the document for no reason. */
@@ -357,12 +371,51 @@ function register(getWindow) {
       temperature: args.temperature
     });
     return Object.assign(out, { path: file.vpath, untrusted: !!file.untrusted });
-  }, (args) => { sandbox.resolve(args.path); }, '把一份沙箱文件送到你設定的萃取模型'));
+  }, (args) => { sandbox.resolve(args.path); }, '把一份沙箱文件送到備援的萃取模型'));
 
-  /* A request to the extraction service, in service mode. `spec.paths` names
-     sandbox files to upload; the bytes are read here for the same reason. */
-  ipcMain.handle('extract:call', guarded('extract.send', async ({ spec } = {}) => {
+  /* Asking the studio something. Listing the categories, the vendors, a
+     column layout, how a job is getting on, what it produced.
+
+     Ungated, and the path allowlist is why that is safe: these carry nothing
+     out of this machine, the renderer cannot name a path outside the list, and
+     a job that takes ten minutes polls several hundred times. Putting those
+     behind the capability would mean an operator who set doc.extract to ASK
+     answers a dialog every two seconds, each one claiming a document is being
+     sent -- which is both untrue and the surest way to teach somebody to press
+     allow without reading. Enforced here rather than by trusting the window's
+     own idea of what it is doing. */
+  ipcMain.handle('extract:call', plain(async ({ spec } = {}) => {
     const s = Object.assign({}, spec || {});
+    if (extract.classifyRequest(s.method || 'GET', s.path) !== 'read') {
+      throw Object.assign(new Error('這不是一個唯讀的工作室請求：' +
+        String(s.method || 'GET') + ' ' + String(s.path || '')), { code: 'EINVAL' });
+    }
+    delete s.files;
+    delete s.paths;
+    delete s.json;
+    delete s.fields;
+    s.method = 'GET';
+    return extract.call(s);
+  }));
+
+  /* Handing the studio something: a batch of PDFs to parse, the rows back for
+     a naming plan, a nudge to retry the ones that failed.
+
+     `spec.paths` names sandbox files, and the bytes are read here rather than
+     in the window for the same reason as extract:send -- a 10 MiB PDF would
+     otherwise cross the bridge twice to reach a process that could have read
+     it directly.
+
+     Reading a document arms the taint downgrade even though the extraction is
+     happening elsewhere. Sending a file to a service and getting its contents
+     back as rows does not launder it. */
+  ipcMain.handle('extract:upload', guarded('extract.send', async ({ spec } = {}) => {
+    const s = Object.assign({}, spec || {});
+    if (extract.classifyRequest(s.method || 'POST', s.path) !== 'write') {
+      throw Object.assign(new Error('這不是一個工作室接受的送出請求：' +
+        String(s.method || 'POST') + ' ' + String(s.path || '')), { code: 'EINVAL' });
+    }
+    s.method = 'POST';
     const paths = Array.isArray(s.paths) ? s.paths : [];
     delete s.paths;
     if (paths.length) {
@@ -381,7 +434,7 @@ function register(getWindow) {
     return extract.call(s);
   }, (args) => {
     ((args && args.spec && args.spec.paths) || []).forEach((p) => sandbox.resolve(p));
-  }, '呼叫你設定的文件解析服務'));
+  }, '把文件或萃取結果送到提示詞工作室'));
 
   /* ------------------------------------------------------ filesystem ---- */
 
