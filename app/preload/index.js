@@ -152,7 +152,12 @@ contextBridge.exposeInMainWorld('aios', {
      the answer and issues bounded grants the gate then spends. */
   gate: {
     askBatch: (op, items, what) => invoke('gate:askBatch', { op, items, what }),
-    clearGrants: () => invoke('gate:clearGrants')
+    clearGrants: () => invoke('gate:clearGrants'),
+    /* Wrap work that runs with nobody watching -- a scheduled firing. While it
+       is on, anything the gate would have asked about is refused with a reason
+       instead, because a modal at eight in the morning is not a question, it is
+       a hang. Balanced: every true needs its false. */
+    unattended: (on) => invoke('gate:unattended', { on })
   },
 
   taint: {

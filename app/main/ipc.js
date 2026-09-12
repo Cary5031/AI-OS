@@ -222,6 +222,12 @@ function register(getWindow) {
     gate.askBatch({ op: String(op || ''), items: Array.isArray(items) ? items : [], what })));
   ipcMain.handle('gate:clearGrants', plain(async () => gate.clearGrants()));
 
+  /* The shell saying 「接下來這段是排程在跑，沒有人在」. Ungated, and safe
+     ungated, because it only ever narrows what the gate will do: while it is
+     set, anything that would have opened a consent dialog is refused instead.
+     A renderer that set it dishonestly would be denying itself. */
+  ipcMain.handle('gate:unattended', plain(async ({ on } = {}) => gate.setUnattended(!!on)));
+
   ipcMain.handle('taint:state', plain(async () => gate.taintState()));
 
   /* What the user typed, so the gate can tell an instruction they gave from one

@@ -7496,3 +7496,66 @@ test('a job with a clock time runs at that time, every day, from the next occurr
   assert.equal(job.at, '08:00');
   assert.throws(() => schedule.normalise({ name: 'x', at: 'noon', intent: 'y' }), /at 看不懂/);
 });
+
+test('a scheduled run never waits on a dialog nobody is there to answer', async () => {
+  /* The failure this prevents, traced through the real gate: the eight o'clock
+     job reads a message (mail:mirrorRead arms the taint), then writes its
+     summary to a note. fs.write is ELEVATED, the taint is up, and the job's own
+     sentence does not name the file -- so decide() says 'ask', a modal opens on
+     a machine nobody is sitting at, and fifteen minutes later the scheduler
+     records a timeout whose text already guessed why ('可能在等授權視窗').
+     Every morning.
+
+     Unattended, the gate refuses instead, and the reason says what would let
+     the same job through tomorrow. */
+  const gate = require('../app/main/gate');
+
+  gate.setIntent('每天早上八點，找出這禮拜從 ABC 公司寄來的郵件，彙整大綱，記錄在待辦事項清單');
+  gate.addTaint('mail:<x@abc.com>', '信件「九月報價」（ming@abc.com）');
+
+  const asked = gate.decide('fs.write', { path: '/notes/待辦.md' });
+  assert.equal(asked.decision, 'ask', '前提：汙染之後、路徑沒被指名，本來就是要問的');
+  /* Not calling authorize() here on purpose: attended, it would open the real
+     consent window, which is the whole point and is not a thing a unit test
+     can answer. `decide` saying 'ask' is the premise; the rest is what the
+     unattended flag does with it. */
+
+  gate.setUnattended(true);
+  try {
+    const refused = await gate.authorize('fs.write', { path: '/notes/待辦.md' });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.verdict.decision, 'refused', '無人值守時要當場拒絕，不是開對話框');
+    assert.equal(refused.verdict.unattended, true);
+    assert.ok(refused.verdict.reason.includes('沒有人'), refused.verdict.reason);
+    assert.ok(refused.verdict.reason.includes('fs.write'), '理由要說是哪個能力');
+
+    /* And the way out, which the refusal names: a sentence that says where.
+       namedByUser accepts a directory, so 「…追加到 /notes」 is enough. */
+    gate.setIntent('每天早上八點…彙整大綱，追加到 /notes/待辦.md');
+    const named = await gate.authorize('fs.write', { path: '/notes/待辦.md' });
+    assert.equal(named.ok, true, '指名了路徑就該放行，即使沒有人在');
+
+    gate.setIntent('每天早上八點…彙整大綱，追加到 /notes 裡的待辦清單');
+    assert.equal((await gate.authorize('fs.write', { path: '/notes/待辦.md' })).ok, true,
+      '指名目錄也算，這是 namedByUser 本來就有的規則');
+
+    /* A batch is a question too. */
+    gate.setIntent('沒有提到任何路徑');
+    const batch = await gate.askBatch({
+      op: 'fs.move', items: [{ from: '/inbox/a.pdf', to: '/檔案/a.pdf' }], what: 'x'
+    });
+    assert.equal(batch.ok, false);
+    assert.equal(batch.unattended, true, '整批確認也是問題，一樣不能在沒人時開');
+  } finally {
+    gate.setUnattended(false);
+    gate.clearTaint();
+    gate.setIntent('');
+  }
+
+  /* The counter, so one job finishing does not un-mark another still running. */
+  gate.setUnattended(true);
+  gate.setUnattended(true);
+  assert.equal(gate.setUnattended(false).unattended, true, '兩個排程重疊時，先結束的不能把後面那個解除');
+  assert.equal(gate.setUnattended(false).unattended, false);
+  assert.equal(gate.setUnattended(false).depth, 0, '多解除幾次也不會變成負的');
+});

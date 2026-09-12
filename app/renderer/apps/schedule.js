@@ -70,6 +70,13 @@
     if (AIOS.ui && AIOS.ui.trace) AIOS.ui.trace('[排程] ' + job.name + tag + ' 開始', 't-info');
 
     var result;
+    /* Nobody is here. A job fired by the clock must never stop on a consent
+       dialog: it would wait until the scheduler timed it out fifteen minutes
+       later, every morning, and the person would find a card saying 「逾時」
+       rather than what was actually refused. Manual runs are a person pressing
+       a button, so those keep the dialog. */
+    var alone = job.reason !== 'manual';
+    if (alone) { try { await A.gate.unattended(true); } catch (e) { alone = false; } }
     try {
       if (job.kind === 'intent') {
         var r = await AIOS.intent.run(job.intent, { source: 'schedule' });
@@ -82,6 +89,8 @@
       }
     } catch (e) {
       result = { ok: false, note: String((e && e.message) || e) };
+    } finally {
+      if (alone) { try { await A.gate.unattended(false); } catch (e) { /* nothing to unwind */ } }
     }
     result.ms = Date.now() - t0;
     delete running[job.id];

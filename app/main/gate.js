@@ -244,6 +244,27 @@ function setModalHook(fn) {
   if (typeof fn === 'function') onModal = fn;
 }
 
+/* How many unattended runs are in flight.
+
+   A consent dialog is a question put to a person. A scheduled job fires on the
+   clock -- at eight in the morning, on a machine nobody is sitting at -- and a
+   question asked then is not answered, it is waited on: the modal opens, the
+   job never reports, and fifteen minutes later the scheduler records a timeout
+   whose own text already guessed the cause (「可能在等授權視窗」).
+
+   So while a run is unattended the gate does not ask. It refuses, immediately,
+   and says what would let the same job through next time. A refusal a person
+   can read in the job's card beats a dialog nobody was there to see.
+
+   A counter rather than a flag, because one scheduled job can run while another
+   is still finishing, and the first one to end must not un-mark the second.
+
+   Note which direction this moves authority: setting it only ever makes the
+   gate stricter, and clearing it only restores the normal ask. A renderer that
+   lied in either direction would gain nothing -- suppressing the dialog
+   suppresses the operation with it. */
+let unattended = 0;
+
 /* Sources of untrusted content read during this session. Sticky on purpose:
    once hostile text is in the conversation it can influence every later turn,
    and the renderer cannot be trusted to tell us when it is gone. Cleared only
@@ -317,6 +338,29 @@ function clearTaint() {
   const state = taintState();
   if (had) onTaintChange(state);
   return state;
+}
+
+/**
+ * Mark the work that follows as running with nobody present.
+ *
+ * Called around a scheduled firing. Balanced: every true is matched by a false,
+ * and the counter is what keeps two overlapping jobs honest.
+ */
+function setUnattended(on) {
+  if (on) unattended++;
+  else unattended = Math.max(0, unattended - 1);
+  return { unattended: unattended > 0, depth: unattended };
+}
+
+function isUnattended() { return unattended > 0; }
+
+/** What to tell someone reading a job card about a refusal nobody could answer. */
+function unattendedReason(verdict) {
+  const cap = verdict.cap || '這個能力';
+  return '排程是在沒有人看著的時候執行的，所以授權視窗不會跳出來問，這個動作直接被擋下：' +
+    verdict.reason +
+    '。要讓它下次自己跑完，把要動的目標寫進排程的那一句話裡' +
+    '（寫到目錄就夠，例如「…追加到 /notes」），或在能力閘門把 ' + cap + ' 設成 ALLOW。';
 }
 
 function taintState() {
@@ -490,6 +534,11 @@ async function askBatch({ op, items, what }) {
   if (!list.length) return { ok: false, reason: '沒有要執行的項目' };
 
   const verdict = { cap: spec.cap, reason: `一次要做 ${list.length} 次 ${op}`, taint: taint.size > 0 };
+  /* Same rule as authorize(): a batch of fifty moves is still a question, and a
+     question at eight in the morning has nobody to answer it. */
+  if (isUnattended()) {
+    return { ok: false, reason: unattendedReason(verdict), unattended: true };
+  }
   const answer = await askUser({
     op,
     what: what || spec.desc,
@@ -774,6 +823,16 @@ async function authorize(op, args, meta = {}) {
   if (verdict.decision === 'allow') return { ok: true, verdict };
   if (verdict.decision === 'deny') return { ok: false, verdict };
 
+  /* Nobody to ask. See `unattended` above: refusing now, with the reason, is
+     the honest outcome; opening a modal would hang the job until the scheduler
+     times it out a quarter of an hour later. */
+  if (isUnattended()) {
+    return {
+      ok: false,
+      verdict: { ...verdict, decision: 'refused', unattended: true, reason: unattendedReason(verdict) }
+    };
+  }
+
   const answer = await askUser({ op, args, why: meta.why, what: meta.what }, verdict);
   if (answer === 'busy') {
     return {
@@ -806,6 +865,8 @@ module.exports = {
   addTaint,
   setTaintHook,
   setIntent,
+  setUnattended,
+  isUnattended,
   namedByUser,
   TARGET_ARG,
   askBatch,
