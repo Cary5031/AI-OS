@@ -372,6 +372,14 @@
      plain text so it cannot be followed at all. */
   var SAFE_SCHEME = /^(https?|mailto):/i;
 
+  /* A link back into this machine's own mail. `aios-mail:<Message-ID>` opens
+     the message in the mail application, from the local mirror -- which is what
+     lets a note written by the kernel say 「打開那封信」 and mean it weeks later.
+     It is not a URL the browser ever sees: the click is handled here and goes
+     to the application, so a document cannot use it to reach anything but a
+     message this machine already holds. */
+  var MAIL_LINK = /^aios-mail:(.+)$/i;
+
   /**
    * A relative or absolute path inside the sandbox, as opposed to a URL. The
    * scheme test is what keeps `javascript:alert(1)` from being treated as a
@@ -532,10 +540,11 @@
 
         var href = String(s.href || '');
         var external = SAFE_SCHEME.test(href);
-        var internal = !external && isSandboxPath(href) && !/^#/.test(href);
+        var mail = MAIL_LINK.test(href);
+        var internal = !external && !mail && isSandboxPath(href) && !/^#/.test(href);
         var anchor = /^#/.test(href);
 
-        if (!external && !internal && !anchor) {
+        if (!external && !internal && !anchor && !mail) {
           // Unsupported scheme. Shown, not linked.
           var plain = el('span', 'md-link-dead');
           plain.appendChild(label);
@@ -549,8 +558,14 @@
         if (s.title) a.title = s.title;
         if (external) a.appendChild(el('span', 'md-link-ext-mark', '\u2197'));
 
+        if (mail) a.appendChild(el('span', 'md-link-ext-mark', '\u2709'));
+
         a.addEventListener('click', async function (e) {
           e.preventDefault();
+          if (mail) {
+            AIOS.apps.launch('mail', decodeURIComponent(href.replace(MAIL_LINK, '$1')));
+            return;
+          }
           if (anchor) {
             var id = href.slice(1);
             var target = page.querySelector('[data-anchor="' + cssEscape(id) + '"]');

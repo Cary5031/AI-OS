@@ -901,8 +901,47 @@ function register(getWindow) {
     // Mail is the channel a stranger can write to, so every message arms the
     // taint gate exactly as reading a hostile file does.
     gate.addTaint('mail:' + msg.uid, `信件「${msg.subject}」（${msg.from}）`);
-    return msg;
+    // Names and sizes cross the bridge; the bytes stay in the mirror.
+    return Object.assign({}, msg, {
+      attachments: (msg.attachments || []).map((a) => ({ name: a.name, type: a.type, bytes: a.bytes }))
+    });
   }));
+
+  /* Search the mirror: subject, sender, and the text of the messages.
+
+     Bodies are what make this worth having -- 「哪封信提到我」 is a question
+     about text -- and bodies are also what makes the answer untrusted content.
+     A body hit comes back with a snippet, and a snippet is a piece of somebody
+     else's mail entering this machine's reasoning, so the gate is armed the
+     same way reading the message would arm it. A hit on the subject alone is
+     what the list already shows and does not. */
+  ipcMain.handle('mail:search', guarded('mail.read', async (opts = {}) => {
+    if (!mail.store.ready()) throw Object.assign(new Error('還沒有同步過的信'), { code: 'ENOACCOUNT' });
+    const out = await mail.store.search(opts);
+    const bodies = out.hits.filter((h) => h.where === 'body');
+    if (bodies.length) {
+      gate.addTaint('mail:search:' + String(opts.text || '').slice(0, 40),
+        `信件搜尋「${String(opts.text || '').slice(0, 40)}」的內文片段（${bodies.length} 封）`);
+    }
+    return out;
+  }, null, '在本機已同步的信裡搜尋主旨、寄件人與內文'));
+
+  /* Put an attachment into the sandbox, as a file that remembers it came from
+     mail. The bytes were kept by the mirror when the message was read; this
+     copies them out to wherever the person said. Origin 'mail' is what makes
+     the gate treat the file as untrusted afterwards, wherever it lands. */
+  ipcMain.handle('mail:saveAttachment', guarded('fs.write', async ({ messageId, index, to } = {}) => {
+    const a = await mail.store.attachment(messageId, index);
+    if (!a) throw Object.assign(new Error('沒有這個附件'), { code: 'ENOENT' });
+    if (!a.data) {
+      throw Object.assign(new Error('這個附件的內容沒有存在本機' + (a.reason ? '（' + a.reason + '）' : '，重新同步一次試試')),
+        { code: 'ENODATA' });
+    }
+    const out = await sandbox.writeBytes(to, a.data.toString('base64'), {
+      origin: 'mail', source: 'mail:' + String(messageId)
+    });
+    return Object.assign({ name: a.name, type: a.type, bytes: a.bytes }, out);
+  }, (args) => { sandbox.resolve(args.to); }, '把一封信的附件另存到沙箱'));
 
   ipcMain.handle('mail:markSeen', guarded('mail.read',
     async ({ folder, uid, seen }) => mail.markSeen({ folder, uid, seen }),

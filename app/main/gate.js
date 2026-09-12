@@ -42,8 +42,8 @@ const OPS = {
     desc: '叫某個程式做一件它會做的事（動作名稱因程式而異，action 留空會列出可用的）' },
   /* The machine's own clock. sys.timer, like timer.set: what a job does when
      it fires is gated then, on its own. */
-  'schedule.set':    { cap: 'sys.timer', sig: '{name, every, intent, app, action, args:object}',
-    desc: '定時重複做一件事。every 是秒數或 "5m"/"2h"/"1d"；給 intent（一句要做的事，每次由核心規劃）' +
+  'schedule.set':    { cap: 'sys.timer', sig: '{name, every, at, intent, app, action, args:object}',
+    desc: '定時重複做一件事。every 是秒數或 "5m"/"2h"/"1d"，或用 at 給每天的時刻（"08:00"）；給 intent（一句要做的事，每次由核心規劃）' +
           '或 app+action（直接執行某個程式的動作，不花模型）。只在 AI-OS 開著時執行' },
   'schedule.list':   { cap: 'sys.timer', sig: '{}', desc: '列出所有排程與下次執行時間' },
   'schedule.cancel': { cap: 'sys.timer', sig: '{id, name}', desc: '取消一個排程（給 id 或名稱）' },
@@ -68,7 +68,9 @@ const OPS = {
 
   /* mail */
   'mail.list':       { cap: 'mail.read',  sig: '{folder, limit}', desc: '列出信件' },
-  'mail.read':       { cap: 'mail.read',  sig: '{uid}', desc: '讀一封信' },
+  'mail.read':       { cap: 'mail.read',  sig: '{messageId, uid}', desc: '讀一封信（給 messageId，或舊式的 uid）' },
+  'mail.search':     { cap: 'mail.read',  sig: '{text, from, to, since, until, folder, hasAttachment, limit}',
+    desc: '在本機已同步的信裡搜尋：主旨、寄件人、內文。from 可以是網域（abc.com）、地址或名字；since/until 是日期' },
   'mail.send':       { cap: 'mail.send',  sig: '{to, subject, body}', desc: '寄信' },
 
   /* memory */

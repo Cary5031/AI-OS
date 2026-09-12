@@ -105,6 +105,35 @@ function fail(msg, code) {
   return Object.assign(new Error(msg), { code: code || 'EINVAL' });
 }
 
+/**
+ * A clock time, 'HH:MM', for jobs that should run at a time of day rather than
+ * every so many seconds. 「每天早上八點」 is the way people say this, and an
+ * interval cannot say it: a 24-hour interval started at 15:40 runs at 15:40.
+ */
+function parseAt(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const s = String(v).trim();
+  /* 「8點」「8時30分」「08:00」 all mean a clock time: the hour marker becomes
+     the colon, a trailing 分 is noise, and a colon with nothing after it is
+     just the hour. */
+  const m = /^(\d{1,2})(?::(\d{1,2}))?$/.exec(
+    s.replace(/[點时時]/, ':').replace(/分$/, '').replace(/:$/, ''));
+  if (!m) return NaN;
+  const h = Number(m[1]);
+  const mi = Number(m[2] || 0);
+  if (h > 23 || mi > 59) return NaN;
+  return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+}
+
+/** The next moment that reads HH:MM on this machine's clock, strictly after `now`. */
+function nextAt(at, now) {
+  const [h, mi] = String(at).split(':').map(Number);
+  const d = new Date(now);
+  d.setHours(h, mi, 0, 0);
+  if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
 /** A job as the store keeps it, from whatever the caller sent. */
 function normalise(input, existing) {
   const src = input && typeof input === 'object' ? input : {};
@@ -114,14 +143,19 @@ function normalise(input, existing) {
       : (src.app !== undefined || src.action !== undefined) ? 'action'
         : (base.kind || 'intent');
 
+  const at = src.at !== undefined ? parseAt(src.at) : (base.at || null);
+  if (Number.isNaN(at)) throw fail('at 看不懂：給 "08:00" 這種時刻');
   const job = {
     name: String(src.name !== undefined ? src.name : base.name || '').trim().slice(0, 60),
-    every: src.every !== undefined ? parseEvery(src.every) : base.every,
+    /* A job with a clock time is a daily job. The interval is fixed at a day
+       so the two ways of saying when cannot disagree with each other. */
+    every: at ? 86400 : (src.every !== undefined ? parseEvery(src.every) : base.every),
+    at: at || null,
     kind,
     enabled: src.enabled !== undefined ? !!src.enabled : (base.enabled !== undefined ? base.enabled : true)
   };
   if (!job.name) throw fail('排程要有名稱');
-  if (!Number.isFinite(job.every)) throw fail('every 看不懂：給秒數，或 "5m" / "2h" / "1d"');
+  if (!Number.isFinite(job.every)) throw fail('every 看不懂：給秒數，或 "5m" / "2h" / "1d"，或用 at 給時刻');
   if (job.every < MIN_EVERY) throw fail('間隔最短 ' + MIN_EVERY + ' 秒');
   if (job.every > MAX_EVERY) throw fail('間隔最長 30 天');
 
@@ -182,7 +216,7 @@ async function add(input) {
   job.runs = 0;
   job.lastRun = null;
   job.lastResult = null;
-  job.nextRun = clock() + job.every * 1000;
+  job.nextRun = job.at ? nextAt(job.at, clock()) : clock() + job.every * 1000;
   state.jobs[job.id] = job;
   await save();
   return view(job);
@@ -191,11 +225,13 @@ async function add(input) {
 async function update(id, patch) {
   const job = get(id);
   const next = normalise(patch, job);
-  const everyChanged = next.every !== job.every;
+  const everyChanged = next.every !== job.every || next.at !== job.at;
   Object.assign(job, next);
   delete job.intent; delete job.app; delete job.action; delete job.args;
   if (next.kind === 'intent') job.intent = next.intent; else { job.app = next.app; job.action = next.action; job.args = next.args; }
-  if (everyChanged || (next.enabled && !Number.isFinite(job.nextRun))) job.nextRun = clock() + job.every * 1000;
+  if (everyChanged || (next.enabled && !Number.isFinite(job.nextRun))) {
+    job.nextRun = next.at ? nextAt(next.at, clock()) : clock() + next.every * 1000;
+  }
   await save();
   return view(job);
 }
@@ -246,8 +282,9 @@ async function report(id, result) {
   };
   /* From now, not from when it was due: a run that took a minute should not
      make the next one a minute early, and a job that fell behind should not
-     fire back-to-back to catch up. */
-  job.nextRun = t + job.every * 1000;
+     fire back-to-back to catch up. A job with a clock time goes back to that
+     time, tomorrow. */
+  job.nextRun = job.at ? nextAt(job.at, t) : t + job.every * 1000;
   await save();
   return view(job);
 }
@@ -288,6 +325,6 @@ function stop() {
 
 module.exports = {
   init, list, add, update, remove, runNow, report, find, get,
-  tick, start, stop, setSender, setReady, setClock, parseEvery, normalise,
+  tick, start, stop, setSender, setReady, setClock, parseEvery, parseAt, nextAt, normalise,
   MIN_EVERY, MAX_EVERY, RUN_TIMEOUT_MS, CATCHUP_DELAY_MS, TICK_MS, KINDS
 };

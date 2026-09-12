@@ -315,6 +315,11 @@ contextBridge.exposeInMainWorld('aios', {
     sync: (folder, limit) => invoke('mail:sync', { folder, limit }),
     mirrorList: (opts) => invoke('mail:mirrorList', opts || {}),
     mirrorRead: (messageId, folder, uid) => invoke('mail:mirrorRead', { messageId, folder, uid }),
+    /* Subject, sender and body, over the mirror. `opts` is
+       {text, from, to, since, until, folder, hasAttachment, unread, limit}. */
+    search: (opts) => invoke('mail:search', opts || {}),
+    /* Copy an attachment the mirror kept into the sandbox at `to`. */
+    saveAttachment: (messageId, index, to) => invoke('mail:saveAttachment', { messageId, index, to }),
     mirrorFlag: (messageId, patch) => invoke('mail:mirrorFlag', { messageId, patch }),
     setSeen: (messageId, seen, folder, uid) =>
       invoke('mail:setSeen', { messageId, seen, folder, uid }),

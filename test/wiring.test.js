@@ -7467,3 +7467,32 @@ test('viewport-only translation measures the page rather than waiting to be told
      next poll on a page that IS rendering, which is most of them. */
   assert.match(ag, /new IntersectionObserver\(/, 'the fast path is still there');
 });
+
+test('a job with a clock time runs at that time, every day, from the next occurrence', () => {
+  /* 「每天早上八點」 cannot be said as an interval: a 24-hour interval started
+     at 15:40 runs at 15:40. The clock time is anchored, and the interval is
+     fixed at a day so the two cannot disagree. */
+  const schedule = require('../app/main/schedule');
+  assert.equal(schedule.parseAt('08:00'), '08:00');
+  assert.equal(schedule.parseAt('8'), '08:00');
+  assert.equal(schedule.parseAt('8點'), '08:00');
+  assert.equal(schedule.parseAt('23:59'), '23:59');
+  assert.ok(Number.isNaN(schedule.parseAt('25:00')));
+  assert.ok(Number.isNaN(schedule.parseAt('soon')));
+  assert.equal(schedule.parseAt(''), null);
+
+  const at = new Date(2026, 8, 12, 15, 40).getTime();   // 15:40 local
+  const next = schedule.nextAt('08:00', at);
+  const d = new Date(next);
+  assert.equal(d.getHours(), 8);
+  assert.equal(d.getMinutes(), 0);
+  assert.equal(d.getDate(), 13, 'eight in the morning is tomorrow morning');
+
+  const early = new Date(2026, 8, 12, 7, 0).getTime();
+  assert.equal(new Date(schedule.nextAt('08:00', early)).getDate(), 12, 'still today when it has not passed');
+
+  const job = schedule.normalise({ name: 'x', at: '08:00', intent: 'y' });
+  assert.equal(job.every, 86400);
+  assert.equal(job.at, '08:00');
+  assert.throws(() => schedule.normalise({ name: 'x', at: 'noon', intent: 'y' }), /at 看不懂/);
+});

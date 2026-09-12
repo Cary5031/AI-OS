@@ -145,4 +145,60 @@ export async function spec(t, app) {
 
     assert.equal(r.backToOneField, 1, '換一個信箱應該回到只問信箱的那一步');
   });
+
+  await t.test('郵件視窗開得起來，搜尋框在，動作接得到方法', async () => {
+    /* No account, so the window shows the account form -- but the toolbar,
+       the search box and ctx.api are built before that, and a ReferenceError
+       anywhere in mount() would have left ctx.api undefined. */
+    const r = await run(cdp, `
+      var live = AIOS.apps.instances().filter(function (i) { return i.def.id === 'mail'; });
+      if (!live.length) await AIOS.apps.launch('mail');
+      var inst;
+      for (var i = 0; i < 100; i++) {
+        inst = AIOS.apps.instances().filter(function (i) { return i.def.id === 'mail'; })[0];
+        if (inst && inst.ctx && inst.ctx.api) break;
+        await new Promise(function (r) { setTimeout(r, 100); });
+      }
+      if (!inst || !inst.ctx || !inst.ctx.api) return { error: '郵件視窗沒有開起來' };
+      return { out: [
+        !!document.querySelector('.ml-search'),
+        ['search', 'openById', 'saveAttachment'].map(function (k) { return typeof inst.ctx.api[k]; }),
+        Object.keys(inst.def.actions)
+      ] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.out[0], true, '工具列要有搜尋框');
+    assert.deepEqual(r.out[1], ['function', 'function', 'function']);
+    ['search', 'openById', 'saveAttachment'].forEach((a) => {
+      assert.ok(r.out[2].includes(a), '動作 ' + a + ' 要發布出去');
+    });
+  });
+
+  await t.test('筆記裡的 aios-mail: 連結會被畫成連結，而不是「不支援」', async () => {
+    /* The kernel ends 「幫我記下來」 with one of these. If the viewer treated
+       the scheme as unknown it would render dead text with a note saying so,
+       and the whole point of the link would be lost quietly. */
+    const r = await run(cdp, `
+      await window.aios.fs.write('/notes/e2e-mail-link.md',
+        '# 待辦\\n\\n- 回覆報價 [打開那封信](aios-mail:<abc@example.com>)\\n- 外部 [網站](https://example.com)\\n');
+      await AIOS.afterFsChange();
+      await AIOS.apps.launch('markdown', '/notes/e2e-mail-link.md', { forceNew: true });
+      var page;
+      for (var i = 0; i < 60; i++) {
+        page = document.querySelector('.md-page, .md-body, .md-view');
+        if (page && page.querySelector('a')) break;
+        await new Promise(function (r) { setTimeout(r, 100); });
+      }
+      var links = [].slice.call(document.querySelectorAll('.md-link')).map(function (a) {
+        return { text: a.textContent, dead: false };
+      });
+      var dead = [].slice.call(document.querySelectorAll('.md-link-dead')).map(function (n) { return n.textContent; });
+      return { out: [links, dead] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    const texts = r.out[0].map((l) => l.text);
+    assert.ok(texts.some((t2) => t2.includes('打開那封信')), '信件連結要是連結：' + JSON.stringify(r.out));
+    assert.equal(r.out[1].some((d) => d.includes('打開那封信')), false, '不該被畫成「不支援的連結」');
+  });
+
 }

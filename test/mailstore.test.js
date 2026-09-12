@@ -159,3 +159,140 @@ test('unknown() is what keeps a sync from refetching everything', async () => {
   assert.deepEqual(store.unknown(asked), ['<m3@example.com>'],
     '已經有的信不該被當成新的再抓一次');
 });
+
+/* ------------------------------------------------- search, attachments, links */
+
+test('search finds a message by what it says, not only by what it is called', async () => {
+  /* 「哪封信提到我」 is a question about the body. Subject and sender are in
+     the index; the text is on disk, and this is what reads it. */
+  await freshStore();
+  store.put(msg(1, { subject: '九月報價', from: '王小明 <ming@abc.com>' }));
+  store.put(msg(2, { subject: '無關', from: 'x@other.com' }));
+  await store.putBody('<m1@example.com>', '各位好，這一份要請 Cary 確認。');
+  await store.putBody('<m2@example.com>', '完全沒有提到那個人。');
+
+  const r = await store.search({ text: 'Cary' });
+  assert.deepEqual(r.hits.map((h) => h.messageId), ['<m1@example.com>']);
+  assert.equal(r.hits[0].where, 'body');
+  assert.ok(r.hits[0].snippet.includes('Cary'), r.hits[0].snippet);
+
+  const bySubject = await store.search({ text: '報價' });
+  assert.equal(bySubject.hits[0].where, 'subject', 'a subject hit says so, and carries no snippet');
+  assert.equal(bySubject.hits[0].snippet, '');
+});
+
+test('a sender given as a domain matches the company, not a look-alike', async () => {
+  /* 'abc.com' as a plain substring would also match notabc.com. The domain rule
+     is the one people mean by 「ABC 公司寄來的」. */
+  await freshStore();
+  store.put(msg(1, { from: '王小明 <ming@abc.com>' }));
+  store.put(msg(2, { from: 'ops@mail.abc.com' }));
+  store.put(msg(3, { from: 'someone@notabc.com' }));
+  store.put(msg(4, { from: 'abc.com fan <fan@else.org>' }));
+
+  const r = await store.search({ from: 'abc.com' });
+  assert.deepEqual(r.hits.map((h) => h.messageId).sort(), ['<m1@example.com>', '<m2@example.com>']);
+  assert.equal((await store.search({ from: 'ming@abc.com' })).hits.length, 1, 'a full address is exact');
+  assert.equal((await store.search({ from: '王小明' })).hits.length, 1, 'a name matches the display name');
+});
+
+test('a date window is inclusive of the days it names', async () => {
+  await freshStore();
+  const day = 86400 * 1000;
+  const now = 1700000000000;
+  store.put(msg(1, { date: now - 2 * day }));
+  store.put(msg(2, { date: now - 10 * day }));
+  const r = await store.search({ since: now - 7 * day, until: now });
+  assert.deepEqual(r.hits.map((h) => h.messageId), ['<m1@example.com>']);
+});
+
+test('attachments are kept whole, capped, and come back by index', async () => {
+  await freshStore();
+  store.put(msg(1));
+  const kept = await store.putAttachments('<m1@example.com>', [
+    { name: '報價單.xlsx', type: 'application/vnd.ms-excel', data: Buffer.from('PK fake') },
+    { name: 'huge.bin', type: 'application/octet-stream', bytes: store.MAX_ONE_ATTACHMENT + 1 }
+  ]);
+  assert.equal(kept.length, 2);
+  assert.equal(kept[0].stored, true);
+  assert.equal(kept[1].stored, false, 'oversized is recorded, not stored');
+  assert.ok(kept[1].reason.includes('MiB'), kept[1].reason);
+
+  const a = await store.attachment('<m1@example.com>', 0);
+  assert.equal(a.data.toString(), 'PK fake');
+  assert.equal(a.name, '報價單.xlsx');
+  const b = await store.attachment('<m1@example.com>', 1);
+  assert.equal(b.data, null, 'the bytes were never kept');
+  assert.equal(store.get('<m1@example.com>').hasAttachments, true);
+  assert.equal((await store.search({ hasAttachment: true })).hits.length, 1);
+});
+
+test('a web link and a source id survive a re-sync that does not carry them', async () => {
+  /* IMAP knows nothing of either. A feeder that does sets them once; a later
+     put() from a feeder that does not must not wipe them. */
+  await freshStore();
+  store.put(msg(1, { webLink: 'https://outlook.office.com/mail/x', sourceId: 'AAMk...' }));
+  store.put(msg(1));
+  assert.equal(store.get('<m1@example.com>').webLink, 'https://outlook.office.com/mail/x');
+  assert.equal(store.get('<m1@example.com>').sourceId, 'AAMk...');
+});
+
+test('search can fetch one known message, deleted or not', async () => {
+  await freshStore();
+  store.put(msg(1));
+  store.setLocal('<m1@example.com>', { deleted: true });
+  const r = await store.search({ messageId: '<m1@example.com>', includeDeleted: true });
+  assert.equal(r.hits.length, 1);
+  assert.equal((await store.search({ messageId: '<m1@example.com>' })).hits.length, 0,
+    'and without includeDeleted a deleted message stays gone');
+});
+
+test('the MIME reader keeps an attachment’s bytes and decodes its encoded name', () => {
+  /* Before this the reader recorded a name and a size and threw the bytes
+     away, which left a mail client that could only say 「有一個 3 MB 的檔案」. */
+  const mail = require('../app/main/mail');
+  const payload = Buffer.from('PK not really a zip', 'binary').toString('base64');
+  const CRLF = String.fromCharCode(13) + String.fromCharCode(10);
+  const src = [
+    'From: a@b.c', 'Subject: x', 'Content-Type: multipart/mixed; boundary="B"', '', '--B',
+    'Content-Type: text/plain; charset=utf-8', '', '內文在這裡', '--B',
+    'Content-Type: application/vnd.ms-excel; name="=?utf-8?B?5aCx5YO55Zau?=.xlsx"',
+    'Content-Transfer-Encoding: base64',
+    'Content-Disposition: attachment; filename="=?utf-8?B?5aCx5YO55Zau?=.xlsx"', '',
+    payload, '--B--', ''
+  ].join(CRLF);
+  const out = mail.parseSource(src);
+  assert.equal(out.text, '內文在這裡');
+  assert.equal(out.attachments.length, 1);
+  assert.equal(out.attachments[0].name, '報價單.xlsx', 'the RFC 2047 name is decoded');
+  assert.ok(Buffer.isBuffer(out.attachments[0].data), 'the bytes are there');
+  assert.equal(out.attachments[0].data.toString('binary').startsWith('PK'), true);
+  assert.equal(out.attachments[0].bytes, out.attachments[0].data.length);
+});
+
+test('a boundary with capitals in it still splits the message, and a filename keeps its case', () => {
+  /* Found while writing the attachment test: the reader lower-cased the whole
+     Content-Type before taking the boundary out of it, so "----=_NextPart_ABC"
+     never matched "--" + "----=_nextpart_abc" in the body. Nearly every real
+     boundary has capitals, so nearly every multipart message came back as one
+     lump of base64 noise with no attachments. Filenames were lower-cased the
+     same way, and an RFC 2047 name stops decoding once its base64 is. */
+  const mail = require('../app/main/mail');
+  const CRLF = String.fromCharCode(13) + String.fromCharCode(10);
+  const src = [
+    'Content-Type: multipart/mixed; boundary="----=_NextPart_000_ABC"', '',
+    '------=_NextPart_000_ABC',
+    'Content-Type: text/plain; charset=utf-8', '', 'hello', '',
+    '------=_NextPart_000_ABC',
+    'Content-Type: application/pdf; name="Report.PDF"',
+    'Content-Transfer-Encoding: base64',
+    'Content-Disposition: attachment; filename="Report.PDF"', '',
+    Buffer.from('%PDF-1.7').toString('base64'),
+    '------=_NextPart_000_ABC--', ''
+  ].join(CRLF);
+  const out = mail.parseSource(src);
+  assert.equal(out.text, 'hello');
+  assert.equal(out.attachments.length, 1);
+  assert.equal(out.attachments[0].name, 'Report.PDF');
+  assert.equal(out.attachments[0].data.toString(), '%PDF-1.7');
+});

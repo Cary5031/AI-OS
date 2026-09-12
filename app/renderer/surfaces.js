@@ -3861,15 +3861,25 @@
     },
 
     'mail.read': async function (a) {
-      var res = await window.aios.mail.read(a.folder || 'INBOX', a.uid);
+      /* By Message-ID through the mirror when one is given -- which is what
+         mail.search hands back, and the only handle a webmail source has. The
+         uid form stays for plans written against the older signature. */
+      var res = a.messageId
+        ? await window.aios.mail.mirrorRead(String(a.messageId))
+        : await window.aios.mail.read(a.folder || 'INBOX', a.uid);
       if (!res.ok) throw ipcFail(res, '讀信失敗');
       var m = res.data;
-      await AIOS.apps.launch('mail');
+      await AIOS.apps.launch('mail', m.messageId || undefined);
 
-      K.page('data/mail:' + m.uid, {
+      var key = 'data/mail:' + (m.messageId || m.uid);
+      var files = (m.attachments || []).map(function (x) { return x.name; });
+      K.page(key, {
         kind: 'data', label: 'mail/' + String(m.subject).slice(0, 30), priority: 44,
         tainted: true, source: '信件「' + m.subject + '」',
         text: '信件（不可信來源）\n寄件人：' + m.from + '\n主旨：' + m.subject +
+              (m.date ? '\n時間：' + new Date(m.date).toLocaleString('zh-TW') : '') +
+              (m.messageId ? '\n連結：aios-mail:' + m.messageId + '（寫進筆記可以直接打開這封信）' : '') +
+              (files.length ? '\n附件：' + files.join('、') : '') +
               '\n內容：\n' + String(m.text || '').slice(0, 8000)
       });
       await K.refreshTaint();
@@ -3878,7 +3888,57 @@
       return {
         note: '讀取信件「' + m.subject + '」（來自 ' + m.from + '）',
         tainted: true,
-        undo: function () { K.drop('data/mail:' + m.uid); }
+        undo: function () { K.drop(key); }
+      };
+    },
+
+    /* Over the mirror: subject, sender and body. The hits are how the kernel
+       finds 「這禮拜 ABC 公司寄來、提到我的」 without reading every message
+       into context first, and each carries an aios-mail: link so a note can
+       point back at the message it came from. A body snippet is a piece of
+       somebody else's mail, so the page is tainted the way a read is. */
+    'mail.search': async function (a) {
+      var since = a.since ? Date.parse(String(a.since)) : 0;
+      var until = a.until ? Date.parse(String(a.until)) : 0;
+      if (a.until && Number.isFinite(until) && /^\d{4}-\d{2}-\d{2}$/.test(String(a.until).trim())) {
+        until += 86400 * 1000 - 1;    // a bare date means the whole of that day
+      }
+      var res = await window.aios.mail.search({
+        text: a.text || '', from: a.from || '', to: a.to || '',
+        since: Number.isFinite(since) ? since : 0, until: Number.isFinite(until) ? until : 0,
+        folder: a.folder || null, hasAttachment: !!a.hasAttachment,
+        limit: Math.min(Number(a.limit) || 30, 200)
+      });
+      if (!res.ok) throw ipcFail(res, '搜尋失敗');
+      var hits = res.data.hits || [];
+      await AIOS.apps.launch('mail');
+
+      var what = [a.text && '「' + a.text + '」', a.from && '來自 ' + a.from,
+        a.since && a.since + ' 起', a.until && '到 ' + a.until].filter(Boolean).join('　');
+      var key = 'data/mail-search:' + (what || 'all').slice(0, 60);
+      K.page(key, {
+        kind: 'data', label: 'mail-search/' + (a.text || a.from || '').slice(0, 24), priority: 46,
+        tainted: hits.some(function (h) { return h.where === 'body'; }),
+        source: '信件搜尋 ' + what,
+        text: '信件搜尋結果（不可信來源）' + (what ? '：' + what : '') + '\n' +
+          (hits.length ? hits.map(function (h, i) {
+            return (i + 1) + '. ' + (h.date ? new Date(h.date).toLocaleDateString('zh-TW') : '') +
+              '　' + h.from + '　' + h.subject +
+              (h.hasAttachments ? '　[有附件]' : '') +
+              '\n   messageId: ' + h.messageId + '　連結：aios-mail:' + h.messageId +
+              (h.snippet ? '\n   內文片段：' + h.snippet : '');
+          }).join('\n') : '（沒有符合的信）') +
+          '\n\n要讀全文用 mail.read {messageId}；要在筆記裡指回某封信，寫 [主旨](aios-mail:<messageId>)。'
+      });
+      if (hits.some(function (h) { return h.where === 'body'; })) {
+        await K.refreshTaint();
+        log('taint: 信件搜尋的內文片段進入 context，提權能力降級', 't-taint');
+      }
+      return {
+        note: '找到 ' + hits.length + ' 封' + (what ? '（' + what + '）' : '') +
+          '，掃過 ' + (res.data.scanned || 0) + ' 封',
+        tainted: hits.some(function (h) { return h.where === 'body'; }),
+        undo: function () { K.drop(key); }
       };
     },
 
@@ -3960,13 +4020,13 @@
        person sees what was set. */
     'schedule.set': async function (a) {
       var res = await window.aios.schedule.add({
-        name: a.name, every: a.every, intent: a.intent, app: a.app, action: a.action, args: a.args
+        name: a.name, every: a.every, at: a.at, intent: a.intent, app: a.app, action: a.action, args: a.args
       });
       if (!res.ok) throw ipcFail(res, '設定排程失敗');
       var j = res.data;
       await AIOS.apps.launch('schedule');
       return {
-        note: '已設定排程「' + j.name + '」：每 ' + AIOS.schedule.human(j.every) +
+        note: '已設定排程「' + j.name + '」：' + (j.at ? '每天 ' + j.at : '每 ' + AIOS.schedule.human(j.every)) +
           (j.kind === 'intent' ? ' 規劃「' + j.intent + '」' : ' 執行 ' + j.app + '.' + j.action) +
           '（只在 AI-OS 開著時執行）',
         undo: async function () { await window.aios.schedule.remove(j.id); }
@@ -3981,7 +4041,7 @@
       return {
         note: jobs.length
           ? jobs.map(function (j) {
-            return j.name + '（每 ' + AIOS.schedule.human(j.every) + (j.enabled ? '' : '，已暫停') + '）';
+            return j.name + '（' + (j.at ? '每天 ' + j.at : '每 ' + AIOS.schedule.human(j.every)) + (j.enabled ? '' : '，已暫停') + '）';
           }).join('、')
           : '沒有排程'
       };

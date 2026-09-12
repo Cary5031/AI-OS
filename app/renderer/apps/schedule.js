@@ -114,6 +114,11 @@
 
   /* --------------------------------------------------------------- window */
 
+  /** 「每天 08:00」 for a clock-time job, 「每 5 分鐘」 for an interval one. */
+  function cadence(j) {
+    return j.at ? '每天 ' + j.at : '每 ' + human(j.every);
+  }
+
   function describeJob(j) {
     return j.kind === 'intent'
       ? '規劃「' + j.intent + '」'
@@ -133,19 +138,19 @@
 
     actions: {
       add: {
-        args: '{name, every, intent}',
-        desc: '新增一個定時意圖：every 是秒數或 "5m"/"2h"/"1d"，intent 是每次要交給核心的一句話（每次都會花一次模型）',
+        args: '{name, every, at, intent}',
+        desc: '新增一個定時意圖：every 是秒數或 "5m"/"2h"/"1d"，或用 at 給每天的時刻（"08:00"）；intent 是每次要交給核心的一句話（每次都會花一次模型）',
         run: async function (args, ctx) {
-          var j = await ctx.api.add({ name: args.name, every: args.every, intent: args.intent });
-          return { note: '已新增排程「' + j.name + '」，每 ' + human(j.every) + ' ' + describeJob(j) };
+          var j = await ctx.api.add({ name: args.name, every: args.every, at: args.at, intent: args.intent });
+          return { note: '已新增排程「' + j.name + '」，' + cadence(j) + ' ' + describeJob(j) };
         }
       },
       addAction: {
-        args: '{name, every, app, action, args}',
-        desc: '新增一個定時程式動作（直接執行，不花模型）：app 是程式 id，action 是它發布的動作',
+        args: '{name, every, at, app, action, args}',
+        desc: '新增一個定時程式動作（直接執行，不花模型）：app 是程式 id，action 是它發布的動作；every 是間隔，或用 at 給每天的時刻',
         run: async function (args, ctx) {
-          var j = await ctx.api.add({ name: args.name, every: args.every, app: args.app, action: args.action, args: args.args });
-          return { note: '已新增排程「' + j.name + '」，每 ' + human(j.every) + ' ' + describeJob(j) };
+          var j = await ctx.api.add({ name: args.name, every: args.every, at: args.at, app: args.app, action: args.action, args: args.args });
+          return { note: '已新增排程「' + j.name + '」，' + cadence(j) + ' ' + describeJob(j) };
         }
       },
       list: {
@@ -153,7 +158,7 @@
         run: async function (_a, ctx) {
           var jobs = await ctx.api.refresh();
           return { note: jobs.length ? jobs.map(function (j) {
-            return j.name + '（每 ' + human(j.every) + (j.enabled ? '' : '，已暫停') + '，' + j.id + '）';
+            return j.name + '（' + cadence(j) + (j.enabled ? '' : '，已暫停') + '，' + j.id + '）';
           }).join('；') : '沒有排程' };
         }
       },
@@ -285,7 +290,7 @@
           var head = el('div', 'sc-head');
           head.appendChild(el('span', 'sc-name', j.name));
           head.appendChild(el('span', 'sc-badge', j.kind === 'intent' ? '意圖' : '動作'));
-          head.appendChild(el('span', 'sc-badge', '每 ' + human(j.every)));
+          head.appendChild(el('span', 'sc-badge', cadence(j)));
           if (j.running) head.appendChild(el('span', 'sc-badge', '執行中'));
           card.appendChild(head);
           card.appendChild(el('div', 'sc-what', describeJob(j)));
@@ -387,7 +392,7 @@
       ctx.describe(function () {
         return '排程（只在 AI-OS 開著時執行）：\n' +
           (jobs.length ? jobs.map(function (j) {
-            return '  ' + j.id + '　' + j.name + '　每 ' + human(j.every) + '　' + describeJob(j) +
+            return '  ' + j.id + '　' + j.name + '　' + cadence(j) + '　' + describeJob(j) +
               (j.enabled ? '' : '　（已暫停）') +
               (j.lastResult ? '　上次：' + (j.lastResult.ok ? '成功' : '失敗') + ' ' + j.lastResult.note : '');
           }).join('\n') : '  （沒有）') +

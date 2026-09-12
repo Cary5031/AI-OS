@@ -356,10 +356,11 @@ async function syncBody({ folder = 'INBOX', uid, messageId } = {}) {
   const held = store.get(messageId);
   if (held && held.hasBody) return { messageId, cached: true };
 
-  const full = await read({ folder, uid });
+  const full = await read({ folder, uid, withData: true });
   await store.putBody(messageId, full.text || '');
+  const kept = await store.putAttachments(messageId, full.attachments || []);
   await store.flush();
-  return { messageId, cached: false, bytes: (full.text || '').length };
+  return { messageId, cached: false, bytes: (full.text || '').length, attachments: kept.length };
 }
 
 /**
@@ -394,9 +395,9 @@ async function setSeen({ folder = 'INBOX', uid, messageId, seen = true } = {}) {
  * rendered: no remote images means no read receipt, and no <script> means no
  * active content in a privileged window.
  */
-async function read({ folder = 'INBOX', uid } = {}) {
+async function read({ folder = 'INBOX', uid, withData = false } = {}) {
   const key = folder + ':' + uid;
-  if (cache.has(key)) return cache.get(key);
+  if (!withData && cache.has(key)) return cache.get(key);
 
   const out = await withImap(async (c) => {
     const lock = await c.getMailboxLock(folder);
@@ -423,8 +424,12 @@ async function read({ folder = 'INBOX', uid } = {}) {
   });
 
   if (cache.size > 60) cache.clear();
-  cache.set(key, out);
-  return out;
+  /* The cache keeps names and sizes; the bytes go to the mirror through
+     syncBody and are not worth holding twice. */
+  cache.set(key, Object.assign({}, out, {
+    attachments: (out.attachments || []).map((a) => ({ name: a.name, type: a.type, bytes: a.bytes }))
+  }));
+  return withData ? out : cache.get(key);
 }
 
 /**
@@ -440,8 +445,14 @@ function parseSource(src) {
   const body = headEnd < 0 ? '' : src.slice(headEnd + split.length);
 
   const headers = unfold(head);
-  const ctype = (headers['content-type'] || 'text/plain').toLowerCase();
-  const boundary = (ctype.match(/boundary="?([^";]+)"?/i) || [])[1];
+  /* Lower-cased for comparing; the raw value for anything taken OUT of it. A
+     boundary is case-sensitive, and nearly every real one has capitals in it
+     (----=_NextPart_000_0012, Apple-Mail=_ABC). Lower-casing it first meant
+     the parts never split, the body came back as base64 noise and the
+     attachments were simply not there -- for most multipart mail. */
+  const ctypeRaw = headers['content-type'] || 'text/plain';
+  const ctype = ctypeRaw.toLowerCase();
+  const boundary = (ctypeRaw.match(/boundary="?([^";]+)"?/i) || [])[1];
 
   const attachments = [];
   let text = '';
@@ -458,13 +469,26 @@ function parseSource(src) {
       if (pEnd < 0) continue;
       const pHead = unfold(part.slice(0, pEnd));
       const pBody = part.slice(pEnd + pSplit.length);
-      const pType = (pHead['content-type'] || '').toLowerCase();
-      const disp = (pHead['content-disposition'] || '').toLowerCase();
+      const pTypeRaw = pHead['content-type'] || '';
+      const dispRaw = pHead['content-disposition'] || '';
+      const pType = pTypeRaw.toLowerCase();
+      const disp = dispRaw.toLowerCase();
       const decoded = decodeBody(pBody, pHead['content-transfer-encoding'], pType);
 
       if (disp.includes('attachment') || /name="?[^";]+/i.test(pType) && !pType.startsWith('text/')) {
-        const name = (disp.match(/filename="?([^";]+)"?/i) || pType.match(/name="?([^";]+)"?/i) || [])[1];
-        attachments.push({ name: name || '未命名附件', type: pType.split(';')[0].trim(), bytes: pBody.length });
+        // The raw headers: a filename is case-sensitive, and an RFC 2047 encoded
+        // one is base64 that stops decoding the moment it is lower-cased.
+        const name = (dispRaw.match(/filename="?([^";]+)"?/i) || pTypeRaw.match(/name="?([^";]+)"?/i) || [])[1];
+        /* The bytes, not just the size. An attachment is the thing a person most
+           often opens a mail client to get at, and a reader that can only say
+           「有一個 3 MB 的檔案」 sends them back to the other client. */
+        const data = decodeBytes(pBody, pHead['content-transfer-encoding']);
+        attachments.push({
+          name: decodeHeaderWord(name || '未命名附件'),
+          type: pType.split(';')[0].trim(),
+          bytes: data.length,
+          data
+        });
         continue;
       }
       if (pType.startsWith('text/plain') && !plain) plain = decoded;
@@ -504,13 +528,52 @@ function decodeBody(body, encoding, ctype) {
       'binary'
     );
   } else {
-    buf = Buffer.from(body, 'binary');
+    /* 7bit, 8bit, binary, or nothing said: the text is already characters.
+       The source was decoded from UTF-8 into a string before it got here, so
+       squeezing it through a 'binary' Buffer keeps only the low byte of every
+       character -- five Chinese characters came back as five bytes of noise.
+       Most mail from modern servers is exactly this shape. */
+    return String(body);
   }
   try {
     return new TextDecoder(charset.toLowerCase() === 'utf8' ? 'utf-8' : charset.toLowerCase()).decode(buf);
   } catch {
     return buf.toString('utf8');
   }
+}
+
+/**
+ * A part's raw bytes, for attachments.
+ *
+ * Nearly every attachment travels as base64, which is ASCII and survives the
+ * source having been read as UTF-8. An 8bit or binary part does not survive
+ * that read, so this is best-effort for those -- rare in practice, and the
+ * size is still right enough to show.
+ */
+function decodeBytes(body, encoding) {
+  const enc = String(encoding || '').toLowerCase().trim();
+  if (enc === 'base64') return Buffer.from(String(body).replace(/\s+/g, ''), 'base64');
+  if (enc === 'quoted-printable') {
+    return Buffer.from(
+      String(body).replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16))),
+      'binary'
+    );
+  }
+  return Buffer.from(String(body), 'binary');
+}
+
+/** =?utf-8?B?...?= and =?utf-8?Q?...?= in a filename, which is how non-ASCII names travel. */
+function decodeHeaderWord(s) {
+  return String(s || '').replace(/=\?([\w-]+)\?([bq])\?([^?]*)\?=/gi, (_, cs, kind, text) => {
+    try {
+      const buf = kind.toLowerCase() === 'b'
+        ? Buffer.from(text, 'base64')
+        : Buffer.from(text.replace(/_/g, ' ').replace(/=([0-9A-F]{2})/gi, (m, h) => String.fromCharCode(parseInt(h, 16))), 'binary');
+      return new TextDecoder(cs.toLowerCase() === 'utf8' ? 'utf-8' : cs).decode(buf);
+    } catch {
+      return text;
+    }
+  });
 }
 
 function htmlToText(html) {
