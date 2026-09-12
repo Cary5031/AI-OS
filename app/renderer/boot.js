@@ -1652,20 +1652,33 @@
     });
   }
 
+  /**
+   * A dock button brings back what you already have before it makes more.
+   *
+   * These used to pass forceNew unconditionally, so after minimising the
+   * browser the dock's browser button handed back a new empty one and the first
+   * was nowhere -- which is exactly what 「我把它縮小之後就再也找不到了」 means.
+   * Right-click still opens a new window.
+   */
+  function dockOpen(appId, canHaveMany) {
+    if (AIOS.apps.reveal(appId)) return;
+    AIOS.apps.launch(appId, undefined, { forceNew: !!canHaveMany });
+  }
+
   var DOCK_ACTS = {
     intent: function () { $('intent-input').focus(); },
     apps: function () { AIOS.launcher.open(); },
-    files: function () { AIOS.apps.launch('files'); },
-    editor: function () { AIOS.apps.launch('editor', undefined, { forceNew: true }); },
-    browser: function () { AIOS.apps.launch('browser', undefined, { forceNew: true }); },
-    mail: function () { AIOS.apps.launch('mail'); },
-    docs: function () { AIOS.apps.launch('docs', undefined, { forceNew: true }); },
-    sheets: function () { AIOS.apps.launch('sheets', undefined, { forceNew: true }); },
-    slides: function () { AIOS.apps.launch('slides', undefined, { forceNew: true }); },
+    files: function () { dockOpen('files', false); },
+    editor: function () { dockOpen('editor', true); },
+    browser: function () { dockOpen('browser', true); },
+    mail: function () { dockOpen('mail', false); },
+    docs: function () { dockOpen('docs', true); },
+    sheets: function () { dockOpen('sheets', true); },
+    slides: function () { dockOpen('slides', true); },
     // Both open empty and ask for a file, since neither can create one.
-    pdf: function () { AIOS.apps.launch('pdf', undefined, { forceNew: true }); },
-    markdown: function () { AIOS.apps.launch('markdown', undefined, { forceNew: true }); },
-    photos: function () { AIOS.apps.launch('photos', undefined, { forceNew: true }); },
+    pdf: function () { dockOpen('pdf', true); },
+    markdown: function () { dockOpen('markdown', true); },
+    photos: function () { dockOpen('photos', true); },
     memoryApp: function () { AIOS.apps.launch('memory'); },
     forge: function () { AIOS.apps.launch('forge'); },
     schedule: function () { AIOS.apps.launch('schedule'); },
@@ -1760,6 +1773,27 @@
       b.addEventListener('click', function () {
         var act = b.getAttribute('data-dock');
         if (DOCK_ACTS[act]) DOCK_ACTS[act]();
+      });
+      /* The way to a second window of the same program, kept one click away
+         rather than made the default -- and a list of the ones already open,
+         so a minimised window is reachable from here too. */
+      b.addEventListener('contextmenu', function (ev) {
+        var act = b.getAttribute('data-dock');
+        var appId = act === 'memoryApp' ? 'memory' : act;
+        if (!AIOS.apps.list().some(function (d) { return d.id === appId; })) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        var items = [{
+          label: '開新視窗',
+          run: function () { AIOS.apps.launch(appId, undefined, { forceNew: true }); }
+        }];
+        AIOS.apps.windowsFor(appId).forEach(function (inst) {
+          items.push({
+            label: (inst.win.minimized ? '▫ ' : '▪ ') + String(inst.win.title || appId).slice(0, 40),
+            run: function () { AIOS.wm.restore(inst.win); AIOS.wm.focus(inst.win); }
+          });
+        });
+        AIOS.menu.open(b, ev.clientX, ev.clientY, items);
       });
     });
 

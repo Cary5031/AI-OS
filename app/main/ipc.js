@@ -1039,13 +1039,16 @@ function register(getWindow) {
   })));
 
   ipcMain.handle('owa:probe', guarded('mail.list',
-    async () => mail.owa.probe(), null, '確認 Outlook 網頁信箱還登入著'));
+    async ({ open } = {}) => mail.owa.probe({ open: open !== false }),
+    null, '確認 Outlook 網頁信箱還登入著'));
 
   /* What is actually happening between here and the mailbox, in facts rather
      than in one sentence that may be about the wrong problem. Never carries a
      cookie value, a token or any message content -- see owa.js diagnose(). */
   ipcMain.handle('owa:diagnose', guarded('mail.list',
-    async ({ shapes } = {}) => mail.owa.diagnose({ shapes: shapes !== false }),
+    /* `shapes: 'apply'` is the only way the measurement is written back. A plain
+       diagnosis reads and reports; it does not change how the module asks. */
+    async ({ shapes } = {}) => mail.owa.diagnose({ shapes: shapes === 'apply' ? 'apply' : shapes !== false }),
     null, '檢查 Outlook 網頁信箱的連線與請求形狀'));
 
   /* ------------------------------------------------------------ office ---- */

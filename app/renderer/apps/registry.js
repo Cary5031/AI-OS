@@ -293,11 +293,15 @@
           }
           delete live[win && win.id];
           AIOS.apps.requestSave();
+          /* The dock and the launcher both count windows, so both are wrong the
+             moment one closes unless they are told. */
+          if (AIOS.ui && AIOS.ui.syncDock) AIOS.ui.syncDock();
         }
       });
 
       live[win.id] = instance;
       instance.win = win;
+      if (AIOS.ui && AIOS.ui.syncDock) AIOS.ui.syncDock();
       if (opts.chatOpen && instance.chat) {
         instance.chat.toggle(true);
         if (win.barButtons && win.barButtons.chat) win.barButtons.chat.setAttribute('aria-pressed', 'true');
@@ -321,6 +325,42 @@
 
     instances: function () {
       return Object.keys(live).map(function (k) { return live[k]; });
+    },
+
+    /**
+     * This app's live windows, the one you looked at most recently first.
+     *
+     * `win.z` is bumped on every focus, so it is already a recency order and
+     * there is no second list to fall out of step with the first.
+     */
+    windowsFor: function (appId) {
+      return Object.keys(live).map(function (k) { return live[k]; })
+        .filter(function (inst) { return inst.def && inst.def.id === appId && inst.win; })
+        .sort(function (a, b) { return (b.win.z || 0) - (a.win.z || 0); });
+    },
+
+    /**
+     * Bring back a window this app already has, if it has one.
+     *
+     * The failure this exists for, reported and then measured: minimise a few
+     * windows and the dock strip grows past the right edge of the screen with
+     * no scrolling, so the thirteenth one is simply unreachable -- and clicking
+     * the app in the launcher made a new empty window instead of bringing the
+     * old one back, because the launcher passed forceNew for anything that was
+     * not a singleton. Work was not lost, but it was invisible, which is the
+     * same thing to the person looking for it.
+     *
+     * A minimised window wins over a visible one: a visible window is already
+     * in front of you, and the one you are hunting for is the hidden one.
+     */
+    reveal: function (appId) {
+      var mine = AIOS.apps.windowsFor(appId);
+      if (!mine.length) return null;
+      var hidden = mine.filter(function (i) { return i.win.minimized; });
+      var pick = (hidden.length ? hidden[0] : mine[0]).win;
+      AIOS.wm.restore(pick);
+      AIOS.wm.focus(pick);
+      return pick;
     },
 
     instanceFor: function (win) {
@@ -655,10 +695,17 @@
       /* Publish the app's current document into the kernel's context so the
          main intent bar can reason about what is on screen, not just the model
          inside this window. */
-      publish: function (text, label) {
+      publish: function (text, label, opts) {
         if (!text) { K.drop('app/' + def.id); return; }
+        /* `tainted` is the difference between the core reading this as the
+           machine's own description of a window and reading it as somebody
+           else's writing. A mail list is subjects and sender names chosen by
+           strangers; it has to arrive fenced, the same as a message body does,
+           or the fence only exists for the messages the user happens to open. */
         K.page('app/' + def.id, {
-          kind: 'ui', label: label || ('app/' + def.id), priority: 66,
+          kind: (opts && opts.tainted) ? 'data' : 'ui',
+          label: label || ('app/' + def.id), priority: 66,
+          tainted: !!(opts && opts.tainted),
           text: text.slice(0, 6000)
         });
         if (AIOS.ui) AIOS.ui.renderContext();

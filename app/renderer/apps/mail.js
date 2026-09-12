@@ -129,6 +129,11 @@
          rather than inside accountForm because the form re-renders itself to
          move between the two stages. */
       var setup = { email: '', disco: null, manual: false };
+      /* The pending "has the sign-in finished yet" timer, held so a second
+         sign-in does not leave two of them running and so closing the window
+         stops it. */
+      var loginWatch = null;
+      var closed = false;
       var folders = [];
       var folder = (ctx.state && ctx.state.folder) || 'INBOX';
       var messages = [];
@@ -610,8 +615,46 @@
         var r = await A.mail.loginUrl();
         var url = r.ok && r.data ? r.data.url : '';
         if (!url) { ctx.toast('還沒設定網頁信箱帳號', 't-warn'); return; }
-        await AIOS.apps.launch('browser', url);
-        ctx.toast('在瀏覽器分頁裡登入（email → 密碼 → 2FA），完成後回來按「收信」', 't-ok');
+
+        var browserWin = await AIOS.apps.launch('browser', url);
+        ctx.toast('在分頁裡登入（email → 密碼 → 2FA）。登入好我就把瀏覽器收起來，換你在這裡看信。', 't-ok');
+        watchLogin(browserWin);
+      }
+
+      /**
+       * Wait for the sign-in to finish, then get out of the way.
+       *
+       * The browser is a means, not a destination: once the session works, the
+       * user wants the mail window, not the tab they signed in on. So the tab
+       * is left loaded -- it is the cheapest place to re-learn the request from
+       * -- and its window is minimised rather than closed.
+       *
+       * The poll deliberately does not let the check open a tab of its own: the
+       * login tab is on Microsoft's host, not the mailbox's, so every poll
+       * would look like "no mailbox tab" and mint another one.
+       */
+      function watchLogin(browserWin) {
+        if (loginWatch) window.clearTimeout(loginWatch);
+        var until = Date.now() + 10 * 60 * 1000;
+
+        function tick() {
+          loginWatch = window.setTimeout(async function () {
+            if (closed) return;
+            if (Date.now() > until) { loginWatch = null; return; }
+            var p = await A.mail.probe({ open: false });
+            if (!p.ok || !p.data || p.data.state !== 'ready') { tick(); return; }
+            loginWatch = null;
+            try {
+              if (browserWin) AIOS.wm.minimize(browserWin);
+              AIOS.wm.restore(ctx.win);
+              AIOS.wm.focus(ctx.win);
+            } catch (e) { /* the window went away; the sync below still matters */ }
+            ctx.toast('登入完成，瀏覽器收起來了。正在把信收進來…', 't-ok');
+            await boot();
+            await syncNow();
+          }, 2500);
+        }
+        tick();
       }
 
       /* ---------------------------------------------------------- reading */
@@ -764,9 +807,13 @@
             '。Outlook 的介面可能改版了。', 't-warn');
         }
         await loadFolder(folder);
+        /* A folder that still owes a backfill says so, because the next sync is
+           what fills it and a silent partial copy is the thing 「這禮拜從 ABC
+           寄來的」 gets wrong without anybody noticing. */
+        var owed = res.data.complete === false ? '，還有比較舊的信沒抓完，下次同步會接著抓' : '';
         ctx.toast(res.data.fetched
-          ? '同步完成，新增 ' + res.data.fetched + ' 封'
-          : '同步完成，沒有新信', 't-ok');
+          ? '同步完成，新增 ' + res.data.fetched + ' 封' + owed
+          : '同步完成，沒有新信' + owed, 't-ok');
       }
 
       /* Messages are addressed by Message-ID here, not UID: a UID is per-folder
@@ -1025,12 +1072,22 @@
       btnCompose.addEventListener('click', function () { compose(null); });
       btnAccount.addEventListener('click', accountForm);
 
+      /**
+       * What the core sees of this window, fenced as somebody else's writing.
+       *
+       * A sender and a subject are chosen by whoever sent the message, so the
+       * list is untrusted content for the same reason a message body is. It
+       * used to be published as the machine's own description of a window --
+       * the half of the context the core is entitled to believe -- so a subject
+       * that reads like an instruction arrived unfenced, and the fence only
+       * protected the messages the user had actually opened.
+       */
       function publish() {
         if (!messages.length) { ctx.publish(null); return; }
         ctx.publish('郵件（' + folder + '）最近幾封：\n' +
           messages.slice(0, 15).map(function (m, i) {
             return '  ' + (i + 1) + '　' + (m.seen ? '' : '[未讀] ') + m.from + '：' + m.subject;
-          }).join('\n'), 'app/mail');
+          }).join('\n'), '郵件清單（' + folder + '）', { tainted: true });
       }
 
       ctx.describe(function () {
@@ -1233,7 +1290,11 @@
             openById(arg).catch(function (e) { ctx.toast(e.message || String(e), 't-err'); });
           }
         },
-        onClose: function () { ctx.publish(null); }
+        onClose: function () {
+          closed = true;
+          if (loginWatch) { window.clearTimeout(loginWatch); loginWatch = null; }
+          ctx.publish(null);
+        }
       };
     }
   });

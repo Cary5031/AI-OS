@@ -540,18 +540,66 @@
 
     /* -------------------------------------------------------------- dock */
 
+    /* How many minimised windows fit on the strip before the rest go behind a
+       single button. Measured rather than chosen: at 1335px the thirteenth
+       button's right edge landed at 1366, thirty-one pixels past the screen,
+       and the dock neither wrapped nor scrolled -- so that window could not be
+       clicked at all. Anything past this count goes in a menu, which cannot run
+       off the edge because it is positioned to stay on screen. */
+    DOCK_MINS_SHOWN: 6,
+
     syncDock: function () {
       var host = $('dock-mins');
       var sep = document.querySelector('.dk-min-sep');
       host.innerHTML = '';
       var mins = AIOS.wm.list().filter(function (w) { return w.minimized; });
       sep.hidden = !mins.length;
-      mins.forEach(function (w) {
+
+      var shown = mins.slice(0, this.DOCK_MINS_SHOWN);
+      var rest = mins.slice(this.DOCK_MINS_SHOWN);
+
+      shown.forEach(function (w) {
         var b = el('button', 'dk mini', w.title.slice(0, 14));
         b.type = 'button';
         b.title = T('win.restore', '還原 ') + w.title;
         b.addEventListener('click', function () { AIOS.wm.restore(w); });
         host.appendChild(b);
+      });
+
+      if (rest.length) {
+        var more = el('button', 'dk mini more', '⋯ ' + rest.length);
+        more.type = 'button';
+        more.title = T('win.moreMin', '還有 {n} 個縮小的視窗', { n: String(rest.length) });
+        more.addEventListener('click', function (ev) {
+          AIOS.menu.open(more, ev.clientX, ev.clientY, rest.map(function (w) {
+            return { label: String(w.title || '').slice(0, 40), run: function () { AIOS.wm.restore(w); } };
+          }));
+        });
+        host.appendChild(more);
+      }
+
+      this.syncDockCounts();
+      if (AIOS.launcher && AIOS.launcher.refresh) AIOS.launcher.refresh();
+    },
+
+    /**
+     * The number on each dock button, and what clicking it means.
+     *
+     * A dock button used to open a new window every time, so the way back to a
+     * minimised one was never through the dock -- you got another empty program
+     * instead, which reads as the old one having been lost.
+     */
+    syncDockCounts: function () {
+      if (!AIOS.apps || !AIOS.apps.windowsFor) return;
+      document.querySelectorAll('.dk[data-dock]').forEach(function (b) {
+        var id = b.getAttribute('data-dock');
+        var open = AIOS.apps.windowsFor(id === 'memoryApp' ? 'memory' : id);
+        var old = b.querySelector('.dk-count');
+        if (old) old.remove();
+        if (!open.length) { b.classList.remove('has-windows'); return; }
+        b.classList.add('has-windows');
+        var hidden = open.filter(function (i) { return i.win && i.win.minimized; }).length;
+        b.appendChild(el('span', 'dk-count' + (hidden ? ' has-hidden' : ''), String(open.length)));
       });
     },
 

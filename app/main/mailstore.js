@@ -96,12 +96,28 @@ function paths() {
   };
 }
 
+/**
+ * A JSON file as a map with no prototype.
+ *
+ * The keys here are Message-IDs, and a Message-ID is written by whoever sent
+ * the message. On an ordinary object, a message whose header is `__proto__`
+ * assigns to the prototype instead of adding an entry: the message vanishes
+ * from the mirror, and every later `index[id]` lookup for an unrelated message
+ * can come back with that object. Null-prototype maps make the name ordinary.
+ */
 async function readJson(file, fallback) {
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
+    return bare(JSON.parse(await fs.readFile(file, 'utf8')));
   } catch (e) {
-    return fallback;
+    return bare(fallback);
   }
+}
+
+function bare(o) {
+  if (!o || typeof o !== 'object') return o;
+  const out = Object.create(null);
+  for (const k of Object.keys(o)) out[k] = o[k];
+  return out;
 }
 
 async function init(email) {
@@ -161,7 +177,13 @@ function put(msg) {
   index[id] = {
     messageId: id,
     uid: msg.uid != null ? msg.uid : before.uid,
-    folder: msg.folder || before.folder || 'INBOX',
+    /* The folder this row was first seen in stays the row's folder; the rest
+       are added beside it. One message really is in two places when you send
+       to a list you are on -- the Inbox copy and the Sent copy share a
+       Message-ID -- and overwriting the field made syncing Sent move the
+       message out of the inbox the user was looking at. */
+    folder: before.folder || msg.folder || 'INBOX',
+    folders: alsoIn(before.folders, before.folder, msg.folder),
     from: msg.from || before.from || '',
     fromName: msg.fromName || before.fromName || '',
     to: msg.to || before.to || '',
@@ -320,7 +342,7 @@ function list({ folder = null, includeDeleted = false, limit = 200, search = '' 
     const v = viewOf(id);
     if (!v) continue;
     if (!includeDeleted && v.deleted) continue;
-    if (folder && v.folder !== folder) continue;
+    if (folder && !inFolder(v, folder)) continue;
     if (q && !(v.subject + ' ' + v.from + ' ' + v.fromName).toLowerCase().includes(q)) continue;
     out.push(v);
   }
@@ -441,6 +463,22 @@ async function search(opts = {}) {
   return { hits, scanned };
 }
 
+/** Is this row in that folder, counting the ones it was later also seen in? */
+function inFolder(row, folder) {
+  if (!row) return false;
+  if (row.folder === folder) return true;
+  return Array.isArray(row.folders) && row.folders.indexOf(folder) >= 0;
+}
+
+/** Every folder this row has been seen in, without repeats. */
+function alsoIn(had, first, next) {
+  const out = [];
+  for (const f of [].concat(had || [], first || [], next || [])) {
+    if (f && out.indexOf(f) < 0) out.push(f);
+  }
+  return out;
+}
+
 /** Which of these the store has never seen, so a sync only fetches new bodies. */
 function unknown(ids) {
   return ids.filter((id) => !index[id]);
@@ -486,7 +524,7 @@ function dir() {
  * can say 「只到 9 月 1 日」 instead of implying the week is complete.
  */
 function coverage(folder) {
-  const ids = Object.keys(index).filter((id) => index[id].folder === folder);
+  const ids = Object.keys(index).filter((id) => inFolder(index[id], folder));
   const dates = ids.map((id) => index[id].date).filter((d) => d > 0);
   return {
     folder,
@@ -629,7 +667,7 @@ module.exports = {
   putAttachments, attachment,
   search, partyMatches, addressesIn, snippetOf,
   setLocal, localOf,
-  cursor, setCursor, bySource, dir, coverage,
+  cursor, setCursor, bySource, dir, coverage, inFolder,
   trim, trimAttachments, purge,
   keyOf, accountKey,
   MAX_ONE_ATTACHMENT, MAX_ATTACHMENTS

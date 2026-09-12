@@ -70,7 +70,7 @@ const MESSAGES = [
 /* The state the fake server is in. `signedIn` false makes it behave the way a
    tenant does when the session has expired: it answers the service endpoint
    with the sign-in page instead of JSON. */
-const state = { signedIn: true, changeKey: 0, calls: [] };
+const state = { signedIn: true, changeKey: 0, calls: [], learned: 0, seenAuth: [] };
 
 function itemFor(m, { withBody = false } = {}) {
   const out = {
@@ -115,8 +115,25 @@ function makeServer() {
     /* The mailbox page itself, which is all the sign-in flow needs here: the
        program only opens it in a tab, it never reads or fills it. */
     if (url.pathname === '/mail/' || url.pathname === '/mail') {
+      /* Not a static page: the real one signs its own requests with a bearer
+         token its script holds, and that request going out is the only way the
+         program can learn how to ask. A page that made no requests would let
+         the spec pass while the thing being tested never happened. */
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<html><body><h1>Outlook</h1></body></html>');
+      res.end('<html><body><h1>Outlook</h1><script>' +
+        'setInterval(function () {' +
+        '  fetch("/owa/service.svc?action=GetFolderChangeDigest&app=Mail&n=1", {' +
+        '    method: "POST",' +
+        '    headers: {' +
+        '      "content-type": "application/json; charset=utf-8",' +
+        '      "authorization": "Bearer e2e-fake-token-' + 'x'.repeat(64) + '",' +
+        '      "x-anchormailbox": "PUID:E2E@fake-tenant",' +
+        '      "prefer": "IdType=\\"ImmutableId\\""' +
+        '    },' +
+        '    body: "{}"' +
+        '  }).catch(function () {});' +
+        '}, 700);' +
+        '</script></body></html>');
       return;
     }
 
@@ -140,6 +157,14 @@ function makeServer() {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(obj));
       };
+
+      /* The page's own heartbeat. Answered so the tab keeps making them, and
+         counted so the spec can assert the token really was harvested. */
+      if (action === 'GetFolderChangeDigest') {
+        state.learned = String(req.headers.authorization || '').length;
+        send({ Body: { ResponseMessages: { Items: [{}] } } });
+        return;
+      }
 
       if (action === 'FindItem') {
         const paging = body.Body.Paging || {};
@@ -244,6 +269,11 @@ export async function spec(t, app) {
       assert.equal(r.state, 'ready', JSON.stringify(r));
       assert.equal(r.sawItem, true, '探測要真的看到信，不然「已登入」只是猜的');
       assert.ok(state.calls.includes('FindItem'), '探測沒有真的打到伺服器');
+      /* The credential came off a request the page made, not out of a cookie
+         jar: that is the whole mechanism, and a real tenant proved that cookies
+         alone are an anonymous request. */
+      assert.ok(state.learned > 40,
+        '應該從頁面自己的請求學到憑證，實際看到的長度：' + state.learned);
     });
 
     await t.test('同步把信寫進鏡像，資料夾名字進出一致', async () => {

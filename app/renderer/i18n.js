@@ -205,10 +205,14 @@
     'launcher.title': 'Applications',
     'launcher.intro': 'Every application runs inside the sandbox. The ✉ at the top right of each window opens that application\'s own AI chat panel, which can see what the application is showing.',
     'launcher.generated': 'made by the core',
+    'launcher.someOpen': '{n} open',
+    'launcher.someHidden': '{n} open, {h} of them minimised',
+    'launcher.newWindow': 'New window',
 
     'win.chatOpen': 'Open AI chat', 'win.chatClose': 'Close AI chat',
     'win.new': 'Open another window', 'win.min': 'Minimise', 'win.close': 'Close window',
     'win.restore': 'Restore ',
+    'win.moreMin': '{n} more minimised windows',
     'win.unsaved': '"{name}" has unsaved changes',
     'win.unsavedNote': 'Closing discards them. Save writes the file; without a file name it goes to /notes.',
 

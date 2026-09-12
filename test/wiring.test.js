@@ -2535,7 +2535,15 @@ test('pictures open in the image viewer, which is the default for every raster f
   assert.match(src, /Math\.min\(1, \(r\.width - pad\) \/ t\.w, \(r\.height - pad\) \/ t\.h\)/, 'fit never enlarges past 100%');
   assert.match(src, /A\.user\.reveal\(path\)/, 'the way out to Explorer');
   assert.match(read('renderer/index.html'), /data-dock="photos"/, 'on the dock');
-  assert.match(read('renderer/boot.js'), /photos: function \(\) \{ AIOS\.apps\.launch\('photos'/, 'the dock button launches it');
+  /* The dock button reveals before it launches. It used to pass forceNew
+     unconditionally, which meant a minimised window could not be reached from
+     the dock at all -- you got a new empty one and the old one stayed hidden
+     behind a strip that had already run off the edge of the screen. */
+  assert.match(read('renderer/boot.js'), /photos: function \(\) \{ dockOpen\('photos'/, 'the dock button opens it');
+  assert.match(read('renderer/boot.js'), /function dockOpen\(appId, canHaveMany\)/,
+    'dock 按鈕走的是同一條路');
+  assert.match(read('renderer/boot.js'), /if \(AIOS\.apps\.reveal\(appId\)\) return;/,
+    '而且先找回已經開著的那個，找不到才開新的');
   assert.match(read('renderer/os.css'), /\.ph-bg-checker/, 'a checkerboard for transparency');
 });
 

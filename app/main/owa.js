@@ -102,12 +102,54 @@ const browser = require('./browser');
 const PARTITION = 'persist:aios-web';
 const DEFAULT_BASE = 'https://outlook.office.com';
 
+/**
+ * The origins this module will take a credential from, or send one to.
+ *
+ * A list, not a pattern, and the reason is worth keeping: the first version
+ * decided "is this the mailbox?" with `url.indexOf(base) === 0`, and a prefix
+ * is not an origin -- `https://outlook.office.com.evil.example/` satisfied it,
+ * which would have handed that page's requests the debugger and then replayed
+ * its headers. Setting the base to `https://outlook.office.co`, a real
+ * registrable domain, did the mirror image: it matched the user's genuine tab
+ * by prefix, took Microsoft's bearer token off it, and posted it to a stranger.
+ *
+ * Microsoft serves the same mailbox from several of these, and is in the middle
+ * of moving the web app from outlook.office.com to outlook.cloud.microsoft --
+ * which is why the token may be learned from any of them. Where it is SENT is
+ * narrower still: only ever `base()`, which has to be on this list too.
+ */
+const OUTLOOK_ORIGINS = [
+  'https://outlook.office.com',
+  'https://outlook.office365.com',
+  'https://outlook.cloud.microsoft',
+  'https://outlook.live.com'
+];
+
+/** Loopback is for the end-to-end tests, which run a fake Outlook on 127.0.0.1. */
+function isLoopback(origin) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(String(origin || ''));
+}
+
+function knownOrigin(origin) {
+  const o = String(origin || '');
+  return OUTLOOK_ORIGINS.indexOf(o) >= 0 || isLoopback(o);
+}
+
 const PAGE = 50;                       // items per FindItem request
 const MAX_PER_SYNC = 600;              // ceiling for one sync, deep or not
 const FIRST_DAYS = 30;                 // how far back the first sync reaches
 const OVERLAP_MS = 24 * 3600 * 1000;   // decision 4
 const REQUEST_TIMEOUT_MS = 30000;
-const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
+/* Big enough for the largest attachment the mirror will keep, base64 is a third
+   larger than the bytes, plus the JSON around it. It used to be 12 MB while the
+   store accepted 25 MiB, so anything over about 8.8 MiB could be listed and
+   never fetched. */
+const MAX_RESPONSE_BYTES = Math.ceil(25 * 1024 * 1024 * 4 / 3) + 1024 * 1024;
+
+/* Codes that mean "no answer", as opposed to "the server refused this shape".
+   A probe that cannot tell them apart concludes that everything is unsupported
+   the moment the session drops, and writes that conclusion down. */
+const NO_ANSWER = /^(ENEEDLOGIN|EFORBIDDEN|ETIMEOUT|ENET|ETOOBIG|ENOTAB|ENOLEARN|EORIGIN|ENOACCOUNT)$/;
 const SAMPLE_MAX_BYTES = 256 * 1024;
 
 /* The folders this source knows, by the name the application uses. `folder` is
@@ -162,8 +204,15 @@ const LEARN_FRESH_MS = 60000;      // a tab opened from cold has to sign in firs
    admit to. */
 const FORWARD = /^(authorization|x-anchormailbox|x-tenantid|x-client-version|x-owa-sessionid|x-owa-hosted-ux|prefer|accept-language|x-req-source)$/i;
 
-let template = null;   // { origin, headers, at } -- memory only
+let template = null;   // { origin, email, headers, at } -- memory only
 let seq = 1;
+/* Tabs this module opened for itself. Never adopted as "a tab already showing
+   the mailbox": a second learner would otherwise take over the first learner's
+   throwaway tab and then have it destroyed underneath it. */
+const ownTabs = new Set();
+/* One learn at a time. Two callers needing a template at once -- the scheduled
+   sync and a person pressing 收信 -- used to open two tabs and race. */
+let learning = null;
 
 /* --------------------------------------------------------------- errors ---- */
 
@@ -274,9 +323,15 @@ function timeOf(v) {
  * kept, case kept -- because mail.js messageIdOf() does the same and a message
  * seen through both sources has to land on one row.
  */
+/* Names that are not keys, whatever the header says. A Message-ID is chosen by
+   whoever sent the message, and these three stop being an entry and start being
+   the prototype. The mirror is hardened against them as well; this is the half
+   that keeps the message instead of losing it. */
+const NOT_A_KEY = /^(__proto__|constructor|prototype)$/;
+
 function keyFor(internetMessageId, sourceId) {
   const real = String(internetMessageId || '').trim();
-  if (real) return real;
+  if (real && !NOT_A_KEY.test(real)) return real;
   if (!sourceId) return '';
   const h = crypto.createHash('sha1').update(String(sourceId)).digest('hex').slice(0, 32);
   return '<owa-' + h + '@aios.local>';
@@ -345,6 +400,22 @@ function lastPage(json) {
  * the day Microsoft renames something, that list is the only warning before the
  * list view quietly shows a column of empty senders.
  */
+/**
+ * A string a stranger wrote, made safe to put in a list, a note, a dialog.
+ *
+ * Control characters go because a subject carrying a newline can forge a second
+ * line anywhere this text is laid out one per line -- a context page the model
+ * reads, the taint reason in a consent dialog, a markdown note. The cap is
+ * because a header has no length limit and a list row does.
+ */
+function clean(v, max) {
+  return String(v == null ? '' : v)
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u202a-\u202e]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max || 200);
+}
+
 function normaliseItem(raw, opts = {}) {
   const folder = opts.folder || 'INBOX';
   const missing = [];
@@ -368,11 +439,11 @@ function normaliseItem(raw, opts = {}) {
     sourceId,
     internetMessageId,
     folder,
-    from: from.text,
-    fromName: from.name,
-    to: manyAddresses(pick(raw, ['ToRecipients', 'toRecipients'])),
-    cc: manyAddresses(pick(raw, ['CcRecipients', 'ccRecipients'])),
-    subject: subject ? String(subject) : '(無主旨)',
+    from: clean(from.text, 200),
+    fromName: clean(from.name, 120),
+    to: clean(manyAddresses(pick(raw, ['ToRecipients', 'toRecipients'])), 600),
+    cc: clean(manyAddresses(pick(raw, ['CcRecipients', 'ccRecipients'])), 600),
+    subject: clean(subject, 200) || '(無主旨)',
     date,
     seen: read === undefined ? false : !!(read === true || read === 'true'),
     hasAttachments: !!(hasAtt === true || hasAtt === 'true'),
@@ -432,7 +503,7 @@ function attachmentsOf(item) {
     out.push({
       id,
       idRaw: whole,
-      name: String(pick(a, ['Name', 'name', 'FileName']) || '未命名附件'),
+      name: clean(pick(a, ['Name', 'name', 'FileName']), 200) || '未命名附件',
       type: String(pick(a, ['ContentType', 'contentType']) || 'application/octet-stream'),
       bytes: Number(pick(a, ['Size', 'size', 'ContentSize'])) || 0,
       inline: !!(inline === true || inline === 'true')
@@ -474,7 +545,7 @@ function syncPlan({ cursor = {}, deep = false, days = 0, now = 0 } = {}) {
  * `stop` means the page reached past the floor. The caller stops paging then --
  * the sort is newest first, so everything after it is older still.
  */
-function adoptPage(items, { folder = 'INBOX', floor = 0, lookup, has } = {}) {
+function adoptPage(items, { folder = 'INBOX', floor = 0, lookup, has, sorted = true } = {}) {
   const find = typeof lookup === 'function' ? lookup : () => null;
   const known = typeof has === 'function' ? has : () => false;
   const rows = [];
@@ -486,7 +557,15 @@ function adoptPage(items, { folder = 'INBOX', floor = 0, lookup, has } = {}) {
   for (const raw of (items || [])) {
     const row = normaliseItem(raw, { folder });
     if (!row.sourceId) { missing.push('sourceId'); continue; }
-    if (row.date && row.date < floor) { stop = true; continue; }
+    if (row.date && row.date < floor) {
+      /* Older than the floor: never stored. Whether it also means "and
+         everything after it is older" depends on the page being sorted
+         newest-first -- which is measured, not guaranteed. On a server that
+         refused the sort, stopping here would end the sync at the first old
+         message in an arbitrary order and call the folder done. */
+      if (sorted) stop = true;
+      continue;
+    }
 
     const held = find(row.sourceId);
     const id = held || row.messageId;
@@ -641,6 +720,11 @@ const ATTACHMENT_SHAPES = [
 
 /* Which of the shapes above worked, and under which action name. */
 let ATTACHMENT_PLAN = { shape: 1, action: 'GetAttachment' };
+/* When the ladder was last walked and came back with nothing. Without this, a
+   message whose attachments the server will not hand back cost a full twelve
+   request ladder per attachment, every time it was opened. */
+let attachmentLadderFailedAt = 0;
+const ATTACHMENT_RETRY_MS = 5 * 60 * 1000;
 
 function getAttachmentBody(attachment, shapeIndex) {
   const a = typeof attachment === 'string' ? { id: attachment, idRaw: null } : (attachment || {});
@@ -732,7 +816,12 @@ function needsLogin({ url, status, contentType, text } = {}) {
   if (ct.includes('text/html')) {
     return /sign in|signin|登入|msalAuth|aadcdn|urlOwaFallback|login\.microsoftonline/i.test(body);
   }
-  if (/X-OWA-Error["\s:]+[^"]*(Auth|Canary|Expired)/i.test(body)) return true;
+  /* Deliberately NOT run against a JSON body. It used to be, and a JSON body is
+     where message subjects and sender names live -- so a stranger could name a
+     message `X-OWA-Error: Auth` and every sync from then on would report the
+     user's session as expired and stop. An error belongs in an envelope, and a
+     JSON envelope is read by faultOf, not by grepping the payload. */
+  if (!ct.includes('json') && /X-OWA-Error["\s:]+[^"]*(Auth|Canary|Expired)/i.test(body)) return true;
   return false;
 }
 
@@ -783,6 +872,11 @@ function base() {
 }
 
 function configure(conf) {
+  /* A learned template belongs to one mailbox. Changing the account without
+     dropping it meant the next sync ran for fifteen minutes with the previous
+     account's bearer and anchor-mailbox headers, reading mailbox A into account
+     B's mirror -- which the mirror cannot tell apart from B's own mail. */
+  forgetTemplate();
   account = conf && conf.email
     ? { email: String(conf.email), base: sanitiseBase(conf.base) }
     : null;
@@ -790,11 +884,23 @@ function configure(conf) {
   return account;
 }
 
+/** The origin of a URL, or '' when it is not one. */
+function originOf(url) {
+  try { return new URL(String(url)).origin; } catch (e) { return ''; }
+}
+
+/**
+ * Where this account's mailbox is read from.
+ *
+ * Anything not on the known list becomes the default rather than being trusted:
+ * this value decides where a bearer token is sent, so a typo in it is a typo
+ * with a credential attached.
+ */
 function sanitiseBase(v) {
   const raw = String(v || '').trim() || DEFAULT_BASE;
   let u;
-  try { u = new URL(raw); } catch { return DEFAULT_BASE; }
-  if (u.protocol !== 'https:' && !/^127\.0\.0\.1|^localhost/.test(u.hostname)) return DEFAULT_BASE;
+  try { u = new URL(raw); } catch (e) { return DEFAULT_BASE; }
+  if (!knownOrigin(u.origin)) return DEFAULT_BASE;
   return u.origin;
 }
 
@@ -848,12 +954,26 @@ function reusableHeaders(headers) {
   return out;
 }
 
-/** A tab already showing this mailbox, or null. */
+/**
+ * A tab already showing this mailbox, or null.
+ *
+ * Origins are compared, not prefixes. `indexOf(origin) === 0` let
+ * `https://outlook.office.com.evil.example/` pass for the real mailbox -- and
+ * that tab would then have been handed the debugger and asked for the headers
+ * it signs its requests with. A prefix is not an origin; only an origin is.
+ */
 function mailboxTab() {
   let list = [];
-  try { list = browser.list() || []; } catch { return null; }
+  try { list = browser.list() || []; } catch (e) { return null; }
   const origin = base();
-  const hit = list.find((t) => t && typeof t.url === 'string' && t.url.indexOf(origin) === 0);
+  /* The mailbox may be served from any of Microsoft's Outlook origins, and a
+     tenant mid-migration answers on two of them at once. What must not count is
+     a host that merely looks like one. */
+  const hit = list.find((t) => {
+    if (!t || typeof t.url !== 'string' || ownTabs.has(t.id)) return false;
+    const o = originOf(t.url);
+    return o === origin || knownOrigin(o);
+  });
   return hit || null;
 }
 
@@ -868,33 +988,69 @@ function mailboxTab() {
  * this stops working exactly when the tenant says the session is over, and then
  * it says so.
  */
-async function learnTemplate() {
+async function learnTemplate(opts) {
+  /* One at a time. Concurrent learners opened a tab each and the first one to
+     finish destroyed a tab the second was still listening to. */
+  if (learning) return learning;
+  learning = learnOnce(opts || {}).finally(() => { learning = null; });
+  return learning;
+}
+
+async function learnOnce({ allowOpen = true } = {}) {
   const origin = base();
   let tab = mailboxTab();
   let ours = null;
 
   if (!tab) {
+    /* A caller that is watching a sign-in in progress must not open a tab of
+       its own: the user's login tab is on Microsoft's host, not the mailbox's,
+       so every poll would look like "no mailbox tab" and mint another one --
+       one new tab every few seconds for as long as the user takes to find
+       their phone. */
+    if (!allowOpen) throw fail('ENOTAB', '現在沒有開著的 Outlook 信箱分頁');
     try {
       tab = browser.create({ url: loginUrl() });
       ours = tab.id;
+      ownTabs.add(ours);
     } catch (e) {
       throw fail('ENOTAB', '沒有開著的 Outlook 分頁，也開不了新的：' + String(e.message || e));
     }
   }
 
+  /* Any Outlook origin may be the one the page talks to -- the web app is
+     mid-migration between two of them -- but it has to be one of those, and the
+     path has to be the service endpoint. A request to some other host that
+     merely has /owa/service.svc in its path is not a candidate. */
+  const wanted = /^https?:\/\/[^/]+\/owa\/service\.svc/i;
+
   try {
     let seen = await browser.learnRequest(tab.id, {
-      match: /\/owa\/service\.svc/i,
+      match: wanted,
       timeout: ours ? LEARN_FRESH_MS : LEARN_EXISTING_MS
     });
-    /* An open tab that happened to be idle. One reload makes it talk. */
+    /* An open tab that happened to be idle -- which is the normal state, since
+       a background tab is throttled and may not poll at all. Rather than
+       reloading the page the user is looking at, open one of our own. */
     if (!seen && !ours) {
-      try { browser.reload(tab.id); } catch { /* the tab went away */ }
-      seen = await browser.learnRequest(tab.id, { match: /\/owa\/service\.svc/i, timeout: LEARN_FRESH_MS });
+      try {
+        const fresh = browser.create({ url: loginUrl() });
+        ours = fresh.id;
+        ownTabs.add(ours);
+        seen = await browser.learnRequest(ours, { match: wanted, timeout: LEARN_FRESH_MS });
+      } catch (e) { /* the honest failure below */ }
     }
     if (!seen) {
       throw fail('ENOLEARN',
         'Outlook 分頁沒有送出任何請求，學不到怎麼問。請在瀏覽器裡打開信箱，確認看得到信件，再試一次。');
+    }
+
+    /* Observed, not assumed. The origin the template is stamped with is the one
+       the request actually went to; anything else and the token would be
+       replayed somewhere it was never issued for. */
+    const learnedFrom = originOf(seen.url);
+    if (!knownOrigin(learnedFrom)) {
+      throw fail('EORIGIN',
+        '學到的請求是送去 ' + (learnedFrom || '不明來源') + ' 的，那不是 Outlook 的網域，不採用。');
     }
 
     const headers = reusableHeaders(seen.headers);
@@ -902,21 +1058,38 @@ async function learnTemplate() {
       throw fail('ENEEDLOGIN',
         'Outlook 分頁送出的請求沒有帶憑證，表示那個分頁還沒真的登入。請在分頁裡完成登入（含 2FA）再試一次。');
     }
-    template = { origin, headers, at: Date.now() };
+    template = {
+      /* Learned from `learnedFrom`, sent to `origin`. They are allowed to
+         differ only because both are on the known list and Microsoft serves one
+         mailbox from several of them; nothing else may be either. */
+      learnedFrom,
+      origin,
+      /* Which mailbox this belongs to, so a changed account cannot keep using
+         it -- see configure(). */
+      email: account ? account.email : '',
+      headers,
+      at: Date.now()
+    };
     return template;
   } finally {
-    if (ours) { try { browser.destroy(ours); } catch { /* already gone */ } }
+    if (ours) {
+      ownTabs.delete(ours);
+      try { browser.destroy(ours); } catch (e) { /* already gone */ }
+    }
   }
 }
 
 function templateFresh() {
-  return !!(template && template.origin === base() && (Date.now() - template.at) < TEMPLATE_MAX_AGE_MS);
+  if (!template) return false;
+  if (template.origin !== base()) return false;
+  if (template.email !== (account ? account.email : '')) return false;
+  return (Date.now() - template.at) < TEMPLATE_MAX_AGE_MS;
 }
 
-async function ensureTemplate() {
+async function ensureTemplate(opts) {
   if (templateFresh()) return template;
   template = null;
-  return learnTemplate();
+  return learnTemplate(opts);
 }
 
 /** Thrown away when the server says the credential is no longer good. */
@@ -1264,34 +1437,41 @@ function countIds(node, depth) {
  */
 async function probeShapes({ apply = true } = {}) {
   const steps = [];
-  const found = {
-    propType: 'PropertyUri:#Exchange',
-    spelling: 'concat',
-    baseShape: 'IdOnly',
-    paging: 'IndexedPageView',
-    folder: 'plain',
-    sortable: false,
-    namedProps: false,
-    extendedImid: ''
-  };
+  /* Seeded from what is already known to work, not from the most pessimistic
+     guess. A probe that starts at the bottom and fails halfway used to write
+     the bottom down as the answer -- so one throttled burst, or a session that
+     dropped mid-run, permanently downgraded a tenant that had been measured
+     correctly an hour earlier. */
+  const before = dialect();
+  const found = { ...before };
+  let proved = 0;
 
   async function attempt(label, opts) {
     let rec;
     try {
       const out = await send('FindItem', buildFindItem(opts));
       rec = { label, ok: !out.bad, status: out.facts.status, fault: faultOf(out.facts.text) };
+      if (out.bad && NO_ANSWER.test(out.bad.code)) {
+        throw Object.assign(new Error(out.bad.message), { code: out.bad.code });
+      }
       if (!out.bad) {
         const json = JSON.parse(out.facts.text);
         rec.ids = countIds(json, 0);
         const items = walkItems(json, [], 0);
         rec.usable = items.length;
         if (items.length) {
+          proved++;
           rec.sawImid = !!internetMessageIdOf(items[0]);
           rec.sawSubject = pick(items[0], ['Subject', 'subject']) !== undefined;
           rec.sawFrom = pick(items[0], ['From', 'from', 'Sender']) !== undefined;
         }
       }
     } catch (e) {
+      /* A measurement that could not be taken is not a measurement of zero. */
+      if (e && NO_ANSWER.test(e.code || '')) {
+        e.steps = steps;
+        throw e;
+      }
       rec = { label, ok: false, status: 0, fault: String(e.message || e) };
     }
     steps.push(rec);
@@ -1308,7 +1488,7 @@ async function probeShapes({ apply = true } = {}) {
     found.paging = 'IndexedPageView'; found.folder = 'target';
     r = await attempt('骨架：改用 TargetFolderId 包一層', { paging: PAGE_PLAIN, folder: FOLDER_TARGET });
   }
-  if (!r.ok) return { steps, worked: null, dialect: null };
+  if (!r.ok) return { steps, worked: null, dialect: dialect() };
   const skeleton = { paging: pageFor(found), folder: folderFor(found) };
 
   /* 2. A shape that returns readable fields without naming any of them. That
@@ -1395,8 +1575,12 @@ async function probeShapes({ apply = true } = {}) {
     steps.push({ label: '附件形狀：這個資料夾裡找不到帶附件的信，跳過', ok: false, status: 0, fault: '' });
   }
 
-  if (apply) setDialect(found);
-  return { steps, worked: found, dialect: dialect() };
+  /* Only install a measurement that actually read a message. A combination that
+     the server accepts but that returns nothing usable would make every later
+     sync store zero rows and report success. */
+  const installed = apply && proved > 0;
+  if (installed) setDialect(found);
+  return { steps, worked: found, applied: installed, proved, dialect: dialect() };
 }
 
 /** One real item id from the folder, so the open probe has something to open. */
@@ -1511,7 +1695,13 @@ async function diagnose(opts) {
   }
 
   if (out.learned && shapes) {
-    try { out.shapes = await probeShapes(); } catch (e) { out.shapes = { error: String(e.message || e) }; }
+    /* A report, not a reconfiguration. `apply` is opt-in so pressing 「診斷」
+       cannot leave the module measuring differently than it did before. */
+    try {
+      out.shapes = await probeShapes({ apply: shapes === 'apply' });
+    } catch (e) {
+      out.shapes = { error: String(e.message || e), code: e.code || '', steps: e.steps || [] };
+    }
   }
 
   out.verdict = verdictOf(out);
@@ -1547,10 +1737,11 @@ function verdictOf(d) {
  * Answered by making the cheapest real call rather than by looking at cookies:
  * a jar full of expired cookies looks exactly like a signed-in one.
  */
-async function probe() {
+async function probe({ open = true } = {}) {
   if (!configured()) return { ok: false, state: 'none', detail: '還沒設定帳號' };
   const cookies = await cookieCount();
   try {
+    if (!open) await ensureTemplate({ allowOpen: false });
     const json = await call('FindItem', findItemBody('inbox', 0, 1));
     const items = walkItems(json, [], 0);
     return {
@@ -1561,8 +1752,12 @@ async function probe() {
       sawItem: items.length > 0
     };
   } catch (e) {
-    if (isLoginError(e)) {
-      return { ok: false, state: 'login', cookies, detail: '需要在瀏覽器登入 Outlook', loginUrl: loginUrl() };
+    if (isLoginError(e) || e.code === 'ENOTAB' || e.code === 'ENOLEARN') {
+      return {
+        ok: false, state: 'login', cookies,
+        detail: e.code === 'ENEEDLOGIN' ? '需要在瀏覽器登入 Outlook' : e.message,
+        loginUrl: loginUrl()
+      };
     }
     return { ok: false, state: 'error', cookies, code: e.code || '', detail: String(e.message || e) };
   }
@@ -1597,50 +1792,94 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
   const cur = store.cursor(name);
   const plan = syncPlan({ cursor: cur, deep, days });
   const cap = Math.max(1, Math.min(MAX_PER_SYNC, (limit | 0) || MAX_PER_SYNC));
+  const sorted = !!DIALECT.sortable;
 
-  let offset = 0;
   let seen = 0;
   let stored = 0;
   let newest = 0;
   let short = [];
   const fresh = [];
-  let reachedFloor = false;
 
-  while (seen < cap && !reachedFloor) {
-    const page = await findPage(folderId, offset, Math.min(PAGE, cap - seen));
-    if (!page.items.length) break;
-    seen += page.items.length;
+  /**
+   * Walk pages from an offset until the floor, the cap, or the end.
+   *
+   * Returns where it stopped and whether it got all the way down, because that
+   * is the difference between a folder that is finished and one that has a hole
+   * in it -- and a hole nobody records is a hole nobody ever fills.
+   */
+  async function walk(from, floor) {
+    let offset = from;
+    let reached = false;
+    while (seen < cap) {
+      const page = await findPage(folderId, offset, Math.min(PAGE, cap - seen));
+      if (!page.items.length) { reached = true; break; }
+      seen += page.items.length;
 
-    const got = adoptPage(page.items, {
-      folder: name,
-      floor: plan.floor,
-      lookup: (sid) => store.bySource(sid),
-      has: (id) => !!store.get(id)
-    });
-    got.rows.forEach((r) => { store.put(r); stored++; });
-    fresh.push(...got.fresh);
-    short = short.concat(got.missing);
-    if (got.newest > newest) newest = got.newest;
-    if (got.stop) reachedFloor = true;
+      const got = adoptPage(page.items, {
+        folder: name,
+        floor,
+        sorted,
+        lookup: (sid) => store.bySource(sid),
+        has: (id) => !!store.get(id)
+      });
+      got.rows.forEach((r) => { store.put(r); stored++; });
+      fresh.push(...got.fresh);
+      short = short.concat(got.missing);
+      if (got.newest > newest) newest = got.newest;
 
-    offset += page.items.length;
-    if (page.last === true) break;
+      offset += page.items.length;
+      if (got.stop) { reached = true; break; }
+      if (page.last === true) { reached = true; break; }
+    }
+    return { offset, reached };
   }
+
+  /* The head: everything back to the overlap boundary, newest first. */
+  const head = await walk(0, plan.floor);
+
+  /* The hole, if the last run left one. A first sync of a busy folder spends
+     its whole budget near the top and stops; the cursor then only ever looks
+     forward, so those older messages were never fetched by anything -- not by
+     the next sync, and not by a full rescan, which also starts at the top. This
+     picks the walk up where it stopped. */
+  let backfill = null;
+  const owed = !deep && cur.owaDone === false && cur.owaOffset > 0;
+  if ((owed || (plan.first && !head.reached)) && seen < cap) {
+    const from = owed ? cur.owaOffset : head.offset;
+    const floor = cur.owaFloor || plan.floor;
+    backfill = await walk(from, floor);
+  }
+
+  const done = backfill ? backfill.reached : head.reached;
+  const stoppedAt = backfill ? backfill.offset : head.offset;
 
   /* The cursor only ever moves forward. A sync that saw nothing new must not
      drag it back to zero and turn the next one into a first sync. */
   const since = Math.max(newest, cur.owaSince || 0);
-  store.setCursor(name, { owaSince: since, owaFloor: Math.min(plan.floor, cur.owaFloor || plan.floor) });
+  store.setCursor(name, {
+    owaSince: since,
+    owaFloor: Math.min(plan.floor, cur.owaFloor || plan.floor),
+    owaDone: done,
+    owaOffset: done ? 0 : stoppedAt
+  });
   await store.flush();
 
   return {
     folder: name,
-    fetched: stored,
+    /* What the word means on the other feeder: messages that were not here
+       before. The overlap re-walks a day of already-mirrored mail on every
+       sync, and counting those as 「新增」 told the user they had thirty-seven
+       new messages every few minutes. */
+    fetched: fresh.length,
+    updated: stored - fresh.length,
     scanned: seen,
     fresh,
     first: plan.first,
     deep: !!deep,
-    reachedFloor,
+    /* Whether this folder is now walked all the way back, or still owes a
+       backfill that the next sync will pick up. */
+    complete: done,
+    reachedFloor: done,
     coverage: store.coverage(name),
     missing: [...new Set(short)]
   };
@@ -1663,8 +1902,9 @@ async function fetchAttachment(meta) {
     if (isLoginError(e)) throw e;
     if (!/Invalid argument|OwaMethodArgumentException/i.test(String(e.message || e))) throw e;
   }
+  if (Date.now() - attachmentLadderFailedAt < ATTACHMENT_RETRY_MS) return null;
   const found = await probeAttachment(meta, null);
-  if (!found) return null;
+  if (!found) { attachmentLadderFailedAt = Date.now(); return null; }
   const got = await call(ATTACHMENT_PLAN.action, getAttachmentBody(meta));
   return attachmentContentOf(got);
 }
@@ -1762,14 +2002,15 @@ async function syncBody({ messageId } = {}) {
 module.exports = {
   /* wiring */
   configure, configured, probe, loginUrl, folders, isLoginError,
-  reusableHeaders, forgetTemplate, templateFresh, diagnose, probeShapes, faultOf, buildFindItem,
+  reusableHeaders, forgetTemplate, templateFresh, originOf, mailboxTab, clean, NOT_A_KEY,
+  knownOrigin, OUTLOOK_ORIGINS, diagnose, probeShapes, faultOf, buildFindItem,
   dialect, setDialect, fieldPath, FIELDS, attachmentPlan, ATTACHMENT_SHAPES,
   /* the mirror feeders */
   syncFolder, syncBody, refreshAttachments,
   /* pure, and tested as such */
   distinguished, folderName, normaliseItem, keyFor, idOf, internetMessageIdOf,
   walkItems, lastPage, attachmentsOf, attachmentContentOf, bodyTextOf, htmlToText,
-  syncPlan, adoptPage,
+  syncPlan, adoptPage, NO_ANSWER,
   needsLogin, classify, atLoginHost, findItemBody, getItemBody, getAttachmentBody, deepLink, sanitiseBase,
   pick, extendedValue, oneAddress, manyAddresses,
   PARTITION, DEFAULT_BASE, FIRST_DAYS, OVERLAP_MS, PAGE, MAX_PER_SYNC, LIST_PROPERTIES

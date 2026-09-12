@@ -43,15 +43,65 @@
     var grid = el('div', 'launcher');
     AIOS.apps.list().forEach(function (def) {
       if (def.id === 'launcher') return;
+      var open = AIOS.apps.windowsFor(def.id);
+      var hidden = open.filter(function (i) { return i.win && i.win.minimized; }).length;
+
       var tile = el('button', 'launch-tile' + (def.generated ? ' generated' : ''));
       tile.type = 'button';
       tile.title = def.purpose || def.name;
       tile.appendChild(el('span', 'launch-ico', def.icon));
       tile.appendChild(el('span', 'launch-name', def.generated ? def.name : T('app.' + def.id, def.name)));
       tile.appendChild(el('span', 'launch-sub', def.generated ? T('launcher.generated', '核心自製') : def.kind));
+
+      /* How many of this program are already open, and how many of those you
+         cannot see. Without the number, a minimised window is indistinguishable
+         from no window at all, and the only move on offer is to open another
+         one -- which is how people end up with nine empty editors. */
+      if (open.length) {
+        var badge = el('span', 'launch-count' + (hidden ? ' has-hidden' : ''), String(open.length));
+        badge.title = hidden
+          ? T('launcher.someHidden', '已開 {n} 個，其中 {h} 個被縮小了',
+              { n: String(open.length), h: String(hidden) })
+          : T('launcher.someOpen', '已開 {n} 個', { n: String(open.length) });
+        tile.appendChild(badge);
+      }
+
       tile.addEventListener('click', function () {
+        /* A window you already have is the one you get. Opening another is
+           still one click away, on the right-click menu below, and is what
+           happens by itself when nothing is open. */
+        if (AIOS.apps.reveal(def.id)) { AIOS.launcher.close(); return; }
         AIOS.apps.launch(def.id, undefined, { forceNew: !def.singleton });
+        AIOS.launcher.close();
       });
+
+      tile.addEventListener('contextmenu', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var items = [];
+        if (!def.singleton) {
+          items.push({
+            label: T('launcher.newWindow', '開新視窗'),
+            run: function () {
+              AIOS.apps.launch(def.id, undefined, { forceNew: true });
+              AIOS.launcher.close();
+            }
+          });
+        }
+        open.forEach(function (inst) {
+          items.push({
+            label: (inst.win.minimized ? '\u25ab ' : '\u25aa ') + String(inst.win.title || def.name).slice(0, 40),
+            run: function () {
+              AIOS.wm.restore(inst.win);
+              AIOS.wm.focus(inst.win);
+              AIOS.launcher.close();
+            }
+          });
+        });
+        if (!items.length) return;
+        AIOS.menu.open(tile, ev.clientX, ev.clientY, items);
+      });
+
       grid.appendChild(tile);
     });
     body.appendChild(grid);
@@ -82,6 +132,13 @@
       // Same way the rest of the shell reaches into a window it did not build.
       var body = win && win.el ? win.el.querySelector('.win-body') : null;
       if (body) renderLauncher(body);
+    },
+
+    /* Picking something out of a launcher leaves the launcher in the way of
+       what you picked. */
+    close: function () {
+      var win = AIOS.wm.find('launcher');
+      if (win) AIOS.wm.close(win);
     }
   };
 

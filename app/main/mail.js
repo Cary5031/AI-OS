@@ -71,6 +71,11 @@ async function init(userDataDir) {
         source: raw.source || '',
         imap: raw.imap,
         smtp: raw.smtp,
+        /* Written on every save and never read back, so 「不要把已讀同步回伺服器」
+           turned itself on again at the next launch and the phone stopped
+           showing anything as unread. Absent means on, which is the documented
+           default; an OWA account has no server to push to at all. */
+        syncSeen: raw.kind === 'owa' ? false : raw.syncSeen !== false,
         savedAt: raw.savedAt || 0
       };
       password = raw.password || null;

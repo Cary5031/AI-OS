@@ -2692,6 +2692,25 @@ select optgroup {
    password here, the session expires, and nothing on this path can change the
    real mailbox. The door on the setup form is separated by a rule because it is
    a different route in, not a variation of the one above it. */
+/* How many windows of this program are already open, and whether any of them
+   are hidden. Without the number a minimised window looks exactly like no
+   window, and the only move on offer is to open another one. */
+.launch-tile { position: relative; }
+.launch-count, .dk-count {
+  position: absolute; right: 4px; bottom: 4px;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 8px; border: 1px solid var(--line);
+  background: var(--bg-sunken); color: var(--fg-dim);
+  font-family: var(--mono); font-size: 9px; line-height: 13px; text-align: center;
+  pointer-events: none;
+}
+.launch-count.has-hidden, .dk-count.has-hidden {
+  background: var(--accent); color: var(--on-fill); border-color: transparent;
+}
+.dk[data-dock] { position: relative; }
+.dk-count { right: 1px; bottom: 1px; min-width: 13px; height: 13px; line-height: 11px; font-size: 8px; }
+.dk.mini.more { font-family: var(--mono); }
+
 .ml-web { display: flex; flex-direction: column; gap: 8px; }
 .ml-web-door { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .ml-sep { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 6px 0 2px; }

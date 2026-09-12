@@ -333,9 +333,28 @@ function setTaintHook(fn) {
   onTaintChange = typeof fn === 'function' ? fn : () => {};
 }
 
+/**
+ * The label a taint is shown under, made safe to put in a sentence.
+ *
+ * These strings reach the consent dialog inside 「這個工作階段讀過不可信內容（…）」,
+ * and for mail they are a subject and a sender display name -- written by
+ * whoever sent the message. A newline in there forges a second line of the
+ * justification the user is about to read and act on. Cleaned here rather than
+ * at each call site, because the call sites are the part that keeps growing.
+ */
+const CONTROLS = /[\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u202a-\u202e]/g;
+
+function taintLabel(v) {
+  return String(v == null ? '' : v)
+    .replace(CONTROLS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
 function addTaint(source, vpath) {
   const before = taint.size;
-  taint.set(String(source), { at: Date.now(), vpath: vpath || source });
+  taint.set(String(source), { at: Date.now(), vpath: taintLabel(vpath || source) });
   const state = taintState();
   if (taint.size !== before) onTaintChange(state);
   return state;
@@ -858,6 +877,7 @@ async function authorize(op, args, meta = {}) {
 }
 
 module.exports = {
+  taintLabel,
   OPS,
   INTERNAL_OPS,
   ELEVATED,
