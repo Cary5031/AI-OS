@@ -494,3 +494,386 @@ test('a filename cannot break out of its own header', () => {
   assert.equal(text.includes('X-Evil: 1'), true, 'the text survives as part of the name');
   assert.equal(/filename="[^"]*"\r\nContent-Type/.test(text), true, 'but not as a header of its own');
 });
+
+/* ===================== the studio is where the work is defined ============ */
+
+/* What GET /categories/{c}/vendors/{v}/schema actually returns, shaped from
+   their own console's use of it. `爐號` is inside the repeating block, which is
+   what makes it required-per-repetition and therefore not required in the flat
+   table -- the one piece of this arithmetic that is easy to get backwards. */
+const SCHEMA = {
+  schema_label: '進貨單標準格式',
+  export_columns: ['單號', '日期', '料號', '品名', '數量', '爐號'],
+  master_required: ['單號', '日期'],
+  arrays: { 明細: { required: ['料號', '數量', '爐號'] } },
+  array_fields: ['爐號']
+};
+
+function studio(patch) {
+  return X.fromSchema(Object.assign({
+    category: '進貨單', vendor: '大同', schema: SCHEMA,
+    deliver: '/檔案/{大類}/{廠商}/{年月}'
+  }, patch || {}));
+}
+
+test('the mandatory set is the studio arithmetic, copied rather than guessed', () => {
+  /* master_required, plus every array block's required, minus the array fields
+     themselves. Getting this backwards shades the wrong cells and sends the
+     wrong documents to 待確認, and both failures read as the model being bad at
+     its job rather than as a bug here. */
+  assert.deepEqual(X.requiredFromSchema(SCHEMA), ['單號', '日期', '料號', '數量']);
+  assert.deepEqual(X.requiredFromSchema({}), []);
+  assert.deepEqual(X.requiredFromSchema({ master_required: ['a'], array_fields: ['a'] }), []);
+});
+
+test('a schema becomes the same profile shape a file does', () => {
+  const r = studio();
+  assert.equal(r.ok, true, r.errors.join('; '));
+  assert.equal(r.profile.source, 'service');
+  assert.deepEqual(r.profile.columns, SCHEMA.export_columns);
+  assert.deepEqual(r.profile.required, ['單號', '日期', '料號', '數量']);
+  assert.equal(r.profile.schemaLabel, '進貨單標準格式');
+  assert.equal(r.profile.vendor, '大同');
+});
+
+test('a profile from a schema has no prompt, and promptFor refuses to invent one', () => {
+  /* The studio keeps its prompts. If promptFor still returned its format
+     contract, an empty prompt would never reach generate()'s refusal, and the
+     fallback would ask a model for correctly-shaped rows with no instruction
+     about what to look for. Rows come back the right shape, full of guesses,
+     and pass every check this program makes. */
+  const p2 = studio().profile;
+  assert.equal(p2.prompt, '');
+  assert.equal(X.promptFor(p2), '');
+  assert.equal(X.promptFor({ columns: ['a'], prompt: '   ' }), '');
+  assert.ok(X.promptFor({ columns: ['a'], required: [], prompt: '抓 a' }).startsWith('抓 a'));
+});
+
+test('a delivery template naming a field this combination lacks is refused at build time', () => {
+  const r = studio({ deliver: '/檔案/{部門}' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.includes('{部門}')), r.errors.join('; '));
+});
+
+test('a column that would poison a row object never becomes one', () => {
+  /* Column names now arrive from a remote service. Assigning to __proto__ does
+     not store data, it reaches the prototype, and every row afterwards answers
+     questions about columns nobody asked for. */
+  const r = X.safeColumns(['單號', '__proto__', 'constructor', '單號', '_檔名', '料號']);
+  assert.deepEqual(r.columns, ['單號', '料號']);
+  assert.equal(r.dropped.length, 4);
+  const built = X.fromSchema({ category: 'c', schema: { export_columns: ['a', '__proto__'] } });
+  assert.deepEqual(built.profile.columns, ['a']);
+  assert.ok(built.warnings.some((w) => w.includes('__proto__')), built.warnings.join('; '));
+});
+
+/* ------------------------------------------------- rows the studio produced */
+
+test('rows the studio produced keep the studio provenance', () => {
+  /* One call returns the whole batch, already carrying its own per-row filename
+     and vendor. normalise() stamps one filename over everything it is given,
+     which was right when a call meant one document and is very wrong now: it
+     would attribute forty documents to one of them and break the per-file
+     blank report, the filing plan and the auto-detect vendor folders at once. */
+  const p2 = studio({ vendor: '' }).profile;
+  const out = X.adoptRows([
+    { 單號: 'A', 日期: 'd', 料號: '1', 數量: '2', _檔名: 'a.pdf', _廠商: '中鋼', _列號: '1' },
+    { 單號: 'B', 日期: 'd', 料號: '3', 數量: '4', _檔名: 'b.pdf', _廠商: '燁聯', _列號: '2' }
+  ], p2, { source: '提示詞工作室' });
+
+  assert.deepEqual(out.rows.map((r) => r['_檔名']), ['a.pdf', 'b.pdf']);
+  assert.deepEqual(out.rows.map((r) => r['_廠商']), ['中鋼', '燁聯']);
+  assert.deepEqual(out.rows.map((r) => r['_來源']), ['提示詞工作室', '提示詞工作室']);
+  assert.deepEqual(Object.keys(out.rows[0]), X.headerOf(p2));
+});
+
+test('a row with no source filename is reported rather than attributed to a neighbour', () => {
+  const p2 = studio().profile;
+  const out = X.adoptRows([{ 單號: 'A', 日期: 'd', 料號: '1', 數量: '2' }], p2, { source: 's' });
+  assert.deepEqual(out.unnamed, [1]);
+  assert.equal(out.rows[0]['_檔名'], '');
+  assert.equal(out.rows[0]['_列號'], '1', 'numbered locally when the studio did not');
+});
+
+test('the engine that produced a row travels with it into the spreadsheet', () => {
+  /* A sheet in somebody's mailbox a month later has to be able to answer which
+     engine made it: the two disagree about columns, mandatory fields and
+     naming, and none of that is visible in the values. */
+  const p2 = studio().profile;
+  const rows = X.adoptRows([{ 單號: 'A', 日期: 'd', 料號: '1', 數量: '2', _檔名: 'a.pdf' }],
+    p2, { source: 'gemini-2.5-pro' }).rows;
+  const cells = X.toCells(rows, p2);
+  const header = X.headerOf(p2);
+  assert.equal(header[header.length - 1], '_來源');
+  const last = String.fromCharCode(65 + header.length - 1);
+  assert.equal(cells[last + '1'].v, '_來源');
+  assert.equal(cells[last + '2'].v, 'gemini-2.5-pro');
+});
+
+test('the column list the result came back with wins over the one the schema promised', () => {
+  /* Their console builds the table from the result, not the schema, and the
+     comment there says why: the order is the ERP import order and must not be
+     rearranged. In a mixed auto-detect batch a vendor may override the layout,
+     and building from the promise shifts every value into the wrong field. */
+  const p2 = studio().profile;
+  const got = X.withColumns(p2, ['料號', '單號', '數量']);
+  assert.equal(got.changed, true);
+  assert.deepEqual(got.profile.columns, ['料號', '單號', '數量']);
+  assert.deepEqual(got.profile.required, ['單號', '料號', '數量'],
+    'required keeps its own order and drops what the result no longer carries');
+  assert.equal(got.profile.required.indexOf('日期'), -1, '日期 is gone, so it cannot be required');
+  // An empty answer is not a reason to throw the schema away.
+  assert.equal(X.withColumns(p2, []).changed, false);
+});
+
+/* ------------------------------------------------ the studio's filing plan */
+
+const PREVIEW = {
+  rename_field: '單號',
+  finished: [
+    { old: 'a.pdf', new: '大同-A-001.pdf', status: 'ok', reason: '' },
+    { old: 'b.pdf', new: 'b.pdf', status: 'skipped', reason: '' }
+  ],
+  undefined: [{ old: 'c.pdf', new: 'c.pdf', reason: '判不出廠商' }],
+  duplicated: 0,
+  skipped: 1
+};
+
+function batchRows(profile) {
+  return X.adoptRows([
+    { 單號: 'A-001', 日期: '2026-09-01', 料號: '0012345', 數量: '10', _檔名: 'a.pdf', _廠商: '大同' },
+    { 單號: '', 日期: '2026-09-02', 料號: '9', 數量: '1', _檔名: 'b.pdf', _廠商: '大同' }
+  ], profile, { source: '工作室' }).rows;
+}
+
+test('the studio names the file and this side decides the bin', () => {
+  /* Their 待確認 means "could not parse it". This machine's also means "a
+     mandatory cell is empty" and "the destination could not be built". Taking
+     only theirs would file a delivery note with a blank order number as done,
+     under a name that looks right -- and the operator's whole triage habit is
+     that whatever sits in 待確認 is what still needs a person. */
+  const p2 = studio().profile;
+  const rows = batchRows(p2);
+  const out = X.planFromPreview({
+    preview: PREVIEW, files: ['/inbox/a.pdf', '/inbox/b.pdf'], rows, profile: p2, at: AT
+  });
+
+  const a = out.plan.find((e) => e.name === 'a.pdf');
+  const b = out.plan.find((e) => e.name === 'b.pdf');
+  assert.equal(a.status, 'finished');
+  assert.equal(a.to, '/檔案/進貨單/大同/2026-09/Finished/大同-A-001.pdf');
+  assert.equal(b.status, 'unsure', 'a blank mandatory cell is 待確認 whatever the studio said');
+  assert.ok(b.reason.includes('單號'), b.reason);
+  assert.equal(out.renameField, '單號');
+});
+
+test('a skipped entry in the finished list is still a document needing a person', () => {
+  const p2 = studio().profile;
+  // Same file, but with the mandatory cell filled, so only 'skipped' decides.
+  const rows = X.adoptRows([
+    { 單號: 'B-2', 日期: 'd', 料號: '9', 數量: '1', _檔名: 'b.pdf', _廠商: '大同' }
+  ], p2, { source: 's' }).rows;
+  const out = X.planFromPreview({
+    preview: { finished: [{ old: 'b.pdf', new: 'b.pdf', status: 'skipped', reason: '' }], undefined: [] },
+    files: ['/inbox/b.pdf'], rows, profile: p2, at: AT
+  });
+  assert.equal(out.plan[0].status, 'unsure');
+  assert.ok(out.plan[0].reason.includes('命名'), out.plan[0].reason);
+  assert.equal(out.plan[0].mark, 'skipped');
+});
+
+test('in auto-detect each document is filed under its own vendor', () => {
+  /* The profile has no vendor -- that is what auto-detect means. Taking the
+     blank would leave {廠商} unresolvable and flip the whole batch to 待確認. */
+  const p2 = studio({ vendor: '' }).profile;
+  const rows = X.adoptRows([
+    { 單號: 'A', 日期: 'd', 料號: '1', 數量: '2', _檔名: 'a.pdf', _廠商: '中鋼' },
+    { 單號: 'B', 日期: 'd', 料號: '3', 數量: '4', _檔名: 'b.pdf', _廠商: '燁聯' }
+  ], p2, { source: 's' }).rows;
+  const out = X.planFromPreview({
+    preview: {
+      finished: [{ old: 'a.pdf', new: 'a1.pdf', status: 'ok' }, { old: 'b.pdf', new: 'b1.pdf', status: 'ok' }],
+      undefined: []
+    },
+    files: ['/inbox/a.pdf', '/inbox/b.pdf'], rows, profile: p2, at: AT
+  });
+  assert.equal(out.finished, 2, out.plan.map((e) => e.reason).join(' | '));
+  assert.ok(out.plan[0].to.includes('/中鋼/'), out.plan[0].to);
+  assert.ok(out.plan[1].to.includes('/燁聯/'), out.plan[1].to);
+});
+
+test('a filename the studio proposes cannot climb out of the destination', () => {
+  /* The plan arrives over a network. A separator must not add a directory and a
+     run of dots must not leave one. The main process checks containment too,
+     and that check is the load-bearing one; this is the cheaper layer in front. */
+  const p2 = studio().profile;
+  const rows = X.adoptRows([
+    { 單號: 'A', 日期: 'd', 料號: '1', 數量: '2', _檔名: 'a.pdf', _廠商: '大同' }
+  ], p2, { source: 's' }).rows;
+  const out = X.planFromPreview({
+    preview: { finished: [{ old: 'a.pdf', new: '../../../../etc/passwd.pdf', status: 'ok' }], undefined: [] },
+    files: ['/inbox/a.pdf'], rows, profile: p2, at: AT
+  });
+  const to = out.plan[0].to;
+  assert.ok(to.startsWith('/檔案/進貨單/大同/2026-09/Finished/'), to);
+  const segs = to.split('/');
+  assert.equal(segs.length, 7, 'no extra directory was added: ' + to);
+  /* The dots survive inside the name, which is harmless -- a file called
+     "........etcpasswd.pdf" is a file. What must not survive is a segment that
+     IS a traversal, or a separator that made one. */
+  assert.equal(segs.some((x) => x === '..' || x === '.'), false, to);
+  assert.equal(segs[segs.length - 1].indexOf('etc') > 0, true, 'the text is kept, just defused');
+});
+
+test('a plan that names a file this machine does not have is reported, not guessed at', () => {
+  const p2 = studio().profile;
+  const out = X.planFromPreview({
+    preview: { finished: [{ old: '不存在.pdf', new: 'x.pdf', status: 'ok' }], undefined: [] },
+    files: ['/inbox/a.pdf'], rows: [], profile: p2, at: AT
+  });
+  assert.deepEqual(out.missing, ['不存在.pdf']);
+  assert.deepEqual(out.unplanned, ['a.pdf'], 'and the one nobody mentioned stays where it is');
+  assert.equal(out.plan.length, 0);
+});
+
+test('two documents with one basename are a conflict rather than a coin toss', () => {
+  /* The studio only ever saw basenames, so it cannot tell them apart either.
+     Overwriting the map would file one twice and lose the other in silence. */
+  const p2 = studio().profile;
+  const out = X.planFromPreview({
+    preview: { finished: [{ old: '發票.pdf', new: 'x.pdf', status: 'ok' }], undefined: [] },
+    files: ['/inbox/發票.pdf', '/檔案/舊/發票.pdf'], rows: [], profile: p2, at: AT
+  });
+  assert.deepEqual(out.conflicts, ['發票.pdf']);
+  assert.equal(out.plan.length, 0, 'nothing moves while it is ambiguous');
+});
+
+test('the local plan reports the same conflict', () => {
+  const r = profile();
+  const out = X.planDelivery({
+    files: ['/inbox/發票.pdf', '/檔案/舊/發票.pdf'], rows: [], profile: r.profile, at: AT
+  });
+  assert.deepEqual(out.conflicts, ['發票.pdf']);
+});
+
+test('a long name keeps its extension when it is truncated', () => {
+  /* Clamping the whole string produced names ending in ".p", or with the dot
+     shaved off entirely: a file that looks filed, is filed, and no longer opens
+     when double-clicked because nothing claims it. */
+  const long = '零'.repeat(200) + '.pdf';
+  const cut = X.safeSegment(long);
+  assert.ok(cut.length <= 80);
+  assert.ok(cut.endsWith('.pdf'), cut.slice(-8));
+});
+
+/* ========================= app/main/extract.js, v2 ======================== */
+
+test('only an unreachable studio is a reason to use the other engine', () => {
+  /* A 401 is a wrong key and a 500 is a bug in the studio. Failing over on
+     either spends the operator's other quota and buries the fault -- a revoked
+     key would look like an outage for weeks. */
+  assert.equal(M.failureKind({ code: 'ECONNREFUSED' }), 'down');
+  assert.equal(M.failureKind({ code: 'ETIMEDOUT' }), 'down');
+  assert.equal(M.failureKind({ code: 'EREMOTE', status: 401 }), 'denied');
+  assert.equal(M.failureKind({ code: 'EREMOTE', status: 403 }), 'denied');
+  assert.equal(M.failureKind({ code: 'EREMOTE', status: 500 }), 'fault');
+  assert.equal(M.failureKind({ code: 'EREMOTE', status: 422 }), 'refused');
+
+  assert.equal(M.canFallBackFrom('down'), true);
+  ['denied', 'fault', 'refused', 'notready'].forEach((k) => {
+    assert.equal(M.canFallBackFrom(k), false, k + ' must not fail over');
+  });
+});
+
+test('each refusal says what it actually was, in the studio’s own words', () => {
+  assert.ok(M.reasonFor({ state: 'denied', reason: 'bad key' }).includes('金鑰'));
+  assert.ok(M.reasonFor({ state: 'fault', reason: 'boom' }).includes('回報'));
+  assert.ok(M.reasonFor({ state: 'notready', reason: 'loading' }).includes('還沒準備好'));
+});
+
+test('the studio paths this machine may reach are a fixed list', () => {
+  /* Containment: the window names a path, and without a list it could name any
+     path on that host. And the split is what keeps a ten-minute job from
+     becoming three hundred consent dialogs. */
+  assert.equal(M.classifyRequest('GET', '/categories'), 'read');
+  assert.equal(M.classifyRequest('GET', '/categories/a/vendors/b/schema'), 'read');
+  assert.equal(M.classifyRequest('GET', '/jobs/abc'), 'read');
+  assert.equal(M.classifyRequest('GET', '/jobs/abc/result?flat=true'), 'read');
+  assert.equal(M.classifyRequest('POST', '/jobs'), 'write');
+  assert.equal(M.classifyRequest('POST', '/jobs/x/package/preview'), 'write');
+  assert.equal(M.classifyRequest('POST', '/jobs/x/retry'), 'write');
+
+  assert.equal(M.classifyRequest('GET', '/admin'), null);
+  assert.equal(M.classifyRequest('POST', '/health'), null, 'a read path is not a write path');
+  assert.equal(M.classifyRequest('DELETE', '/jobs/x'), null);
+  assert.equal(M.classifyRequest('GET', '/jobs/x/../../secret'), null);
+});
+
+test('the endpoints the studio has not grown yet are already allowed', () => {
+  /* Reserved on purpose: the studio is adding a way to hand over its whole
+     catalogue including the prompts, which is what makes working offline
+     possible. Listing them now means landing that is a change to one service
+     rather than to two. */
+  assert.equal(M.classifyRequest('GET', '/catalog'), 'read');
+  assert.equal(M.classifyRequest('GET', '/categories/進貨單/vendors/大同/prompt'), 'read');
+});
+
+test('a batch bound to one engine refuses the other', async () => {
+  /* Enforced in main because the damage from mixing is silent: two column sets
+     and two naming rules in one spreadsheet, with nothing on the page saying
+     so. A window cannot talk its way past this no matter how it is edited. */
+  const bound = M.beginBatch('service');
+  assert.equal(bound.which, 'service');
+  await assert.rejects(() => M.generate({ base64: 'eA==', prompt: 'x', columns: ['a'] }),
+    (e) => e.code === 'EMIXED');
+  M.endBatch(bound.token);
+  assert.equal(M.batchState(), null);
+
+  const other = M.beginBatch('fallback');
+  await assert.rejects(() => M.call({ path: '/categories' }), (e) => e.code === 'EMIXED');
+  M.endBatch(other.token);
+});
+
+test('a settings file written by the single-mode version is carried over', async () => {
+  /* Somebody who configured the previous build should not find an empty pane
+     and no backend at all, which is what a file that no longer parses into
+     anything would give them. */
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aios-extract-v1-'));
+  await fsp.writeFile(path.join(dir, 'extract-service.json'), JSON.stringify({
+    mode: 'service', base: 'http://127.0.0.1:8123', auth: 'apikey', label: '我的工作室'
+  }), 'utf8');
+
+  const st = await M.init(dir);
+  assert.equal(st.service.base, 'http://127.0.0.1:8123');
+  assert.equal(st.service.auth, 'apikey');
+  assert.equal(st.prefer, 'service');
+  assert.equal(st.fallback.model, M.GEMINI_MODEL, 'and the other backend gets its defaults');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('a v1 file that was pointed at the model becomes the fallback', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aios-extract-v1b-'));
+  await fsp.writeFile(path.join(dir, 'extract-service.json'), JSON.stringify({
+    mode: 'gemini', base: M.GEMINI_BASE, model: 'gemini-2.5-flash', auth: 'goog'
+  }), 'utf8');
+
+  const st = await M.init(dir);
+  assert.equal(st.fallback.model, 'gemini-2.5-flash');
+  assert.equal(st.fallback.auth, 'goog');
+  assert.equal(st.prefer, 'fallback', 'it was the only engine, so it stays the one in use');
+  assert.equal(st.service.base, '', 'and nothing invented a studio that was never configured');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('a delivery template is checked when it is saved, not when a file will not file', async () => {
+  assert.equal(M.validateDeliver(''), M.DELIVER_DEFAULT);
+  assert.equal(M.validateDeliver('/檔案/{大類}/'), '/檔案/{大類}');
+  assert.throws(() => M.validateDeliver('檔案/x'), /\//);
+  assert.throws(() => M.validateDeliver('/檔案/../../x'), /不能用/);
+});

@@ -127,6 +127,11 @@ contextBridge.exposeInMainWorld('aios', {
     /* What the studio last said exists, so the window still knows the shape of
        the work when the studio is unreachable. */
     catalog: () => invoke('extract:catalog'),
+    /* A batch is one spreadsheet and one folder, and the two engines disagree
+       about columns, mandatory fields and naming. Binding it to one engine is
+       enforced in main, not here. */
+    beginBatch: (which) => invoke('extract:beginBatch', { which }),
+    endBatch: (token) => invoke('extract:endBatch', { token }),
     saveCatalog: (patch) => invoke('extract:saveCatalog', { patch }),
     send: (spec) => invoke('extract:send', spec || {}),
     /* Asking the studio something (GET, from a fixed list of paths). Carries

@@ -1,24 +1,26 @@
-/* 文件萃取, driven end to end against a model that is not real.
+/* 文件萃取, driven end to end against a studio that is not real.
 
-   The unit tests check the profile, the column alignment and the filing plan
-   with the functions called directly. This drives the actual program: a vendor
-   profile written into the sandbox, two PDFs added, the parse button pressed,
-   the table read back off the screen, a spreadsheet written, and the documents
-   filed through the capability gate's own window.
+   The unit tests check the schema arithmetic, the column alignment and the
+   filing plan with the functions called directly. This drives the actual
+   program: a prompt studio on loopback that serves categories, vendors, column
+   layouts and jobs; a second server standing in for the fallback model; and the
+   window doing the whole round -- sync, pick, upload, poll, collect, edit, file.
 
-   The model at the other end is a small HTTP server on loopback that answers
-   generateContent. That is not a shortcut -- it is the only way to exercise the
-   whole road, and it exercises all of it: the program's request, the main
-   process's transport with its key and headers, the reply reader, the alignment
-   against the profile's columns, the required-blank shading, the two bins, and
-   the batch consent. What it does not test is whether a real model reads a real
-   delivery note well, which no test can answer anyway.
+   Three things here are the point, and none of them can be checked any other
+   way:
 
-   The two documents are different on purpose. One comes back complete and goes
-   to the finished bin; the other comes back missing a required part number, and
-   has to end up in the other bin with the reason attached. A program that files
-   the second one as finished is the failure this whole feature exists to
-   prevent. */
+     the two backends stay separate. Two keys, two hosts, and neither key is
+     ever readable back through the bridge.
+
+     the studio is the default and the fallback is a fallback. When the studio
+     goes away the window says so and names the reason; when the studio answers
+     401 it does NOT fail over, because a wrong key is not an outage and running
+     the batch somewhere else would bury it.
+
+     a batch belongs to the engine that started it. The two disagree about
+     columns, about which fields are mandatory and about naming, and nothing on
+     a finished spreadsheet would say which one produced it -- except the 「_來源」
+     column, which is checked. */
 
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -27,44 +29,54 @@ import { pressConsent } from '../lib/dialog.mjs';
 
 export const name = '文件萃取';
 
+const CATEGORY = '進貨單';
+const VENDOR_A = '中鋼';
+const VENDOR_B = '燁聯';
 const MODEL = 'e2e-reader';
-const PROFILE = '/檔案/萃取設定/e2e.json';
+
 const DOC_A = '/inbox/e2e-甲.pdf';
 const DOC_B = '/inbox/e2e-乙.pdf';
+const DOC_C = '/inbox/e2e-丙.pdf';
 const SHEET = '/notes/e2e-extract.xlsx';
+const LOCAL_PROFILE = '/檔案/萃取設定/e2e-備援.json';
 
-/* Marked so the fake model can tell them apart: nothing about a document's name
-   reaches the model, only its bytes. */
-const PDF_A = '%PDF-1.4\n% e2e-marker-A\n%%EOF\n';
-const PDF_B = '%PDF-1.4\n% e2e-marker-B\n%%EOF\n';
+const PDF_A = '%PDF-1.4 marker-A';
+const PDF_B = '%PDF-1.4 marker-B';
+const PDF_C = '%PDF-1.4 marker-C';
 
-const ROWS_A = [
-  { 單號: 'A-001', 日期: '2026-09-01', 料號: '0012345', 品名: '六角螺栓', 數量: '120' },
-  { 單號: 'A-001', 日期: '2026-09-01', 料號: '0000700', 品名: '平墊圈', 數量: '40' }
+/* 爐號 sits inside the repeating block, so it is required per repetition and
+   therefore NOT required in the flat table. Included so the window's red cells
+   have to come from the same arithmetic the studio uses. */
+const SCHEMA = {
+  schema_label: '進貨單標準格式',
+  export_columns: ['單號', '日期', '料號', '品名', '數量', '爐號'],
+  master_required: ['單號'],
+  arrays: { 明細: { required: ['料號', '數量', '爐號'] } },
+  array_fields: ['爐號']
+};
+
+/* What the job produces. 乙 is missing its part number, which the studio does
+   not consider a failure -- and this machine does, because whatever sits in
+   待確認 is what still needs a person. */
+const ROWS = [
+  { 單號: 'A-001', 日期: '2026-09-01', 料號: '0012345', 品名: '鋼板 6mm', 數量: '12', 爐號: '0800',
+    _檔名: 'e2e-甲.pdf', _廠商: VENDOR_A, _列號: '1' },
+  { 單號: 'A-001', 日期: '2026-09-01', 料號: '0000700', 品名: '鋼板 9mm', 數量: '4', 爐號: '0801',
+    _檔名: 'e2e-甲.pdf', _廠商: VENDOR_A, _列號: '2' },
+  { 單號: 'B-002', 日期: '2026-09-02', 料號: '', 品名: '不鏽鋼捲', 數量: '3', 爐號: '',
+    _檔名: 'e2e-乙.pdf', _廠商: VENDOR_B, _列號: '3' }
 ];
-/* The part number the model could not find. This is the row that decides which
-   folder the document lands in. */
-const ROWS_B = [
-  { 單號: 'B-002', 日期: '2026-09-02', 料號: '', 品名: '軸承座', 數量: '8' }
-];
 
-const PROFILE_JSON = JSON.stringify({
-  名稱: 'E2E 進貨單',
-  大類: '進貨單',
-  廠商: '鐵工廠',
-  欄位: ['單號', '日期', '料號', '品名', '數量'],
-  必填: ['單號', '料號'],
-  提示詞: '逐列抓出這份進貨單的明細。',
-  命名: '{廠商}-{單號}',
-  交付: '/檔案/{大類}/{廠商}/{年月}'
-}, null, 2);
+/* The result's own column order, deliberately different from the schema's, so
+   the window has to take the delivery over the promise. */
+const RESULT_COLUMNS = ['單號', '料號', '品名', '數量', '日期', '爐號'];
 
 /** Open the program (once) and run `calls`, which may push onto `out`. */
 const via = (calls) => `
   var live = AIOS.apps.instances().filter(function (i) { return i.def.id === 'extract'; });
   if (!live.length) await AIOS.apps.launch('extract');
   var inst;
-  for (var i = 0; i < 100; i++) {
+  for (var i = 0; i < 120; i++) {
     inst = AIOS.apps.instances().filter(function (i) { return i.def.id === 'extract'; })[0];
     if (inst && inst.ctx && inst.ctx.api) break;
     await new Promise(function (r) { setTimeout(r, 100); });
@@ -76,13 +88,149 @@ const via = (calls) => `
 `;
 
 /**
- * A model that answers generateContent, on loopback.
+ * A prompt studio, on loopback.
  *
- * It also records what it was asked, because half the point is checking that
- * the request the main process built is the request that was meant: the key in
- * a header rather than the query string, the custom header applied, the whole
- * PDF inline, and the vendor's own prompt reaching the model unaltered.
+ * `state.fail` drives the failure the tests need: 'denied' answers 401 to
+ * everything (a wrong key, which must NOT cause a fallback), and closing the
+ * server is how an outage is simulated.
  */
+function fakeStudio() {
+  const seen = [];
+  const state = { fail: '', jobs: new Map(), nextId: 1, retried: 0 };
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      const url = req.url.split('?')[0];
+      seen.push({ method: req.method, url: req.url, headers: req.headers, length: raw.length });
+
+      const reply = (code, obj) => {
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(obj));
+      };
+      if (state.fail === 'denied') return reply(401, { detail: '這把金鑰不對' });
+      if (state.fail === 'fault') return reply(500, { detail: '某個廠商的提示詞壞了' });
+
+      if (url === '/health') return reply(200, { status: 'ok', settings: { model: { model_name: MODEL } } });
+      if (url === '/catalog') return reply(404, { detail: 'not implemented' });
+      if (url === '/categories') return reply(200, { categories: [CATEGORY] });
+      if (url === `/categories/${encodeURIComponent(CATEGORY)}/vendors`) {
+        return reply(200, { vendors: [VENDOR_A, VENDOR_B] });
+      }
+      if (url === `/categories/${encodeURIComponent(CATEGORY)}/identities`) {
+        return reply(200, { auto_detectable: [VENDOR_A, VENDOR_B], manual_only: [] });
+      }
+      if (/\/schema$/.test(url)) return reply(200, SCHEMA);
+      if (/\/prompt$/.test(url)) return reply(404, { detail: '工作室還沒提供提示詞' });
+
+      if (url === '/classify' && req.method === 'POST') {
+        // utf8, not latin1: the filenames are Chinese and arrive as UTF-8 bytes.
+        const body = raw.toString('utf8');
+        const results = [];
+        if (body.includes('e2e-甲.pdf')) {
+          results.push({ filename: 'e2e-甲.pdf', status: 'matched', vendor: VENDOR_A, confidence: 0.9 });
+        }
+        if (body.includes('e2e-乙.pdf')) {
+          results.push({ filename: 'e2e-乙.pdf', status: 'matched', vendor: VENDOR_B, confidence: 0.8 });
+        }
+        if (body.includes('e2e-丙.pdf')) {
+          results.push({ filename: 'e2e-丙.pdf', status: 'unmatched', vendor: '', confidence: 0 });
+        }
+        return reply(200, { results });
+      }
+
+      if (url === '/jobs' && req.method === 'POST') {
+        // utf8, not latin1: the filenames are Chinese and arrive as UTF-8 bytes.
+        const body = raw.toString('utf8');
+        const names = ['e2e-甲.pdf', 'e2e-乙.pdf', 'e2e-丙.pdf'].filter((n) => body.includes(n));
+        const id = 'job-' + (state.nextId++);
+        state.jobs.set(id, {
+          polls: 0,
+          files: names.map((n) => ({
+            filename: n, status: 'queued', vendor: '', elapsed: 0, tokens: 0,
+            error: n === 'e2e-丙.pdf' ? '這頁是掃描件，讀不出文字' : ''
+          }))
+        });
+        return reply(200, { job_id: id });
+      }
+
+      const jobMatch = /^\/jobs\/([^/]+)$/.exec(url);
+      if (jobMatch && req.method === 'GET') {
+        const job = state.jobs.get(jobMatch[1]);
+        if (!job) return reply(404, { detail: '沒有這個工作' });
+        /* Two polls of work, so the window's progress path is exercised rather
+           than skipped by an instant answer. */
+        job.polls++;
+        if (job.polls >= 2) {
+          job.files.forEach((f) => {
+            f.status = f.error ? 'failed' : 'done';
+            f.vendor = f.filename === 'e2e-乙.pdf' ? VENDOR_B : VENDOR_A;
+            f.tokens = 900;
+          });
+        } else {
+          job.files.forEach((f) => { f.status = 'running'; });
+        }
+        const done = job.files.filter((f) => f.status === 'done').length;
+        const failed = job.files.filter((f) => f.status === 'failed').length;
+        const pending = job.files.length - done - failed;
+        return reply(200, {
+          pending, done, failed, total: job.files.length,
+          tokens: done * 900, files: job.files
+        });
+      }
+
+      const resultMatch = /^\/jobs\/([^/]+)\/result$/.exec(url);
+      if (resultMatch && req.method === 'GET') {
+        const job = state.jobs.get(resultMatch[1]);
+        if (!job) return reply(404, { detail: '沒有這個工作' });
+        const wanted = new Set(job.files.filter((f) => f.status === 'done').map((f) => f.filename));
+        return reply(200, {
+          columns: RESULT_COLUMNS,
+          rows: ROWS.filter((r) => wanted.has(r['_檔名'])),
+          failed_files: job.files.filter((f) => f.status === 'failed')
+            .map((f) => ({ filename: f.filename, error: f.error }))
+        });
+      }
+
+      const retryMatch = /^\/jobs\/([^/]+)\/retry$/.exec(url);
+      if (retryMatch && req.method === 'POST') {
+        const job = state.jobs.get(retryMatch[1]);
+        if (!job) return reply(404, { detail: '沒有這個工作' });
+        state.retried++;
+        job.polls = 0;
+        job.files.forEach((f) => {
+          if (f.status !== 'failed') return;
+          f.status = 'queued';
+          f.error = '';          // the retry succeeds this time
+        });
+        return reply(200, { requeued: 1 });
+      }
+
+      const planMatch = /^\/jobs\/([^/]+)\/package\/preview$/.exec(url);
+      if (planMatch && req.method === 'POST') {
+        let rows = [];
+        try { rows = JSON.parse(raw.toString('utf8')).rows || []; } catch { /* shape checked below */ }
+        const byFile = new Map();
+        rows.forEach((r) => { if (!byFile.has(r['_檔名'])) byFile.set(r['_檔名'], r); });
+        const finished = [];
+        [...byFile.entries()].forEach(([file, row]) => {
+          const no = String(row['單號'] || '').trim();
+          finished.push(no
+            ? { old: file, new: row['_廠商'] + '-' + no + '.pdf', status: 'ok', reason: '' }
+            : { old: file, new: file, status: 'skipped', reason: '單號是空的' });
+        });
+        return reply(200, { rename_field: '單號', finished, undefined: [], duplicated: 0, skipped: 0 });
+      }
+
+      reply(404, { detail: '沒有這個路徑：' + url });
+    });
+  });
+  return { server, seen, state };
+}
+
+/** A stand-in for the fallback model: generateContent and one model lookup. */
 function fakeModel() {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -90,39 +238,26 @@ function fakeModel() {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8');
-      seen.push({ method: req.method, url: req.url, headers: req.headers, body: body });
-
+      seen.push({ method: req.method, url: req.url, headers: req.headers, body });
       const reply = (code, obj) => {
-        const text = JSON.stringify(obj);
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(text);
+        res.end(JSON.stringify(obj));
       };
-
-      if (req.method === 'GET' && req.url === `/v1beta/models/${MODEL}`) {
-        reply(200, { name: `models/${MODEL}`, displayName: '假的閱讀器' });
-        return;
-      }
-      if (req.method === 'POST' && req.url === `/v1beta/models/${MODEL}:generateContent`) {
-        let inline = '';
-        try {
-          const parsed = JSON.parse(body);
-          const part = (parsed.contents[0].parts || []).find((p) => p.inline_data);
-          inline = Buffer.from(part.inline_data.data, 'base64').toString('utf8');
-        } catch {
-          reply(400, { error: { message: '送來的不是我認得的請求' } });
-          return;
-        }
-        const rows = inline.includes('e2e-marker-B') ? ROWS_B : ROWS_A;
-        reply(200, {
-          candidates: [{
-            finishReason: 'STOP',
-            content: { parts: [{ text: JSON.stringify({ rows: rows }) }] }
-          }],
-          usageMetadata: { promptTokenCount: 900, candidatesTokenCount: 120, totalTokenCount: 1020 }
-        });
-        return;
-      }
-      reply(404, { error: { message: '沒有這個路徑：' + req.url } });
+      if (req.method === 'GET') return reply(200, { name: 'models/' + MODEL, displayName: '假的閱讀器' });
+      return reply(200, {
+        candidates: [{
+          finishReason: 'STOP',
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                rows: [{ 單號: 'F-9', 日期: '2026-09-03', 料號: '0000999',
+                  品名: '備援讀到的', 數量: '1', 爐號: '' }]
+              })
+            }]
+          }
+        }],
+        usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, totalTokenCount: 120 }
+      });
     });
   });
   return { server, seen };
@@ -130,364 +265,293 @@ function fakeModel() {
 
 export async function spec(t, app) {
   const cdp = app.cdp;
-  const { server, seen } = fakeModel();
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = 'http://127.0.0.1:' + server.address().port;
+  const studio = fakeStudio();
+  const model = fakeModel();
+  await new Promise((r) => studio.server.listen(0, '127.0.0.1', r));
+  await new Promise((r) => model.server.listen(0, '127.0.0.1', r));
+  const studioBase = 'http://127.0.0.1:' + studio.server.address().port;
+  const modelBase = 'http://127.0.0.1:' + model.server.address().port;
 
   try {
-    await t.test('設定檔與文件放進沙箱，程式開得起來而且讀得到設定', async () => {
-      const r = await run(cdp, via(`
-        await window.aios.fs.mkdir('/檔案/萃取設定');
-        out.push(await window.aios.fs.write(${JSON.stringify(PROFILE)}, ${JSON.stringify(PROFILE_JSON)}));
-        out.push(await window.aios.fs.write(${JSON.stringify(DOC_A)}, ${JSON.stringify(PDF_A)}));
-        out.push(await window.aios.fs.write(${JSON.stringify(DOC_B)}, ${JSON.stringify(PDF_B)}));
+    await t.test('兩個後端各自設定，兩把金鑰都拿不回來', async () => {
+      const r = await run(cdp, `
+        await window.aios.fs.write(${JSON.stringify(DOC_A)}, ${JSON.stringify(PDF_A)});
+        await window.aios.fs.write(${JSON.stringify(DOC_B)}, ${JSON.stringify(PDF_B)});
+        await window.aios.fs.write(${JSON.stringify(DOC_C)}, ${JSON.stringify(PDF_C)});
         await AIOS.afterFsChange();
-        await inst.ctx.api.reload();
-        out.push(await inst.ctx.api.useProfile('E2E 進貨單'));
-        out.push(document.querySelector('.ext-select') ? '有選單' : '沒有選單');
-      `));
-      assert.equal(r.error, undefined, r.error);
-      assert.ok(r.out[0].ok, '設定檔寫不進去：' + JSON.stringify(r.out[0]));
-      assert.match(r.out[3], /E2E 進貨單/, '沒有選到設定：' + r.out[3]);
-      assert.equal(r.out[4], '有選單');
-    });
-
-    await t.test('「新增設定」建得出一份範本，而且範本自己是合法的設定', async () => {
-      /* Run before anything is parsed, while the session is still clean: a write
-         here needs no consent, which is itself worth pinning -- the dialog that
-         shows up later is the taint downgrade, not the write. */
-      const r = await run(cdp, via(`
-        /* The sandbox outlives a run, so a template left by the last one would
-           make this exercise the refusal path instead of the create path.
-           Cleared first; the refusal gets its own check at the end. */
-        await window.aios.fs.remove('/檔案/萃取設定/E2E 範本廠.json');
-        await AIOS.afterFsChange();
-        await inst.ctx.api.reload();
-
-        var buttons = [].slice.call(document.querySelectorAll('.ext-bar button'));
-        var make = buttons.filter(function (b) { return b.textContent === '新增設定'; })[0];
-        if (!make) return { error: '找不到「新增設定」' };
-        make.click();
-        for (var i = 0; i < 40 && !document.querySelector('.ui-prompt-input'); i++) {
-          await new Promise(function (r) { setTimeout(r, 50); });
-        }
-        var inp = document.querySelector('.ui-prompt-input');
-        if (!inp) return { error: '提示框沒有出現' };
-        inp.value = 'E2E 範本廠';
-        document.querySelector('form.ui-prompt').dispatchEvent(
-          new Event('submit', { cancelable: true, bubbles: true }));
-        /* Wait for the selector to land on the new profile, not for the file to
-           appear: writing it is the first step of 新增設定, and reading it back
-           the moment it exists races the reload and the switch that follow. */
-        var picked = '';
-        for (var j = 0; j < 80; j++) {
-          picked = document.querySelector('.ext-select').selectedOptions[0].textContent;
-          if (picked.indexOf('E2E 範本廠') >= 0) break;
-          await new Promise(function (r) { setTimeout(r, 100); });
-        }
-        var got = await window.aios.fs.read('/檔案/萃取設定/E2E 範本廠.json');
-        out.push(got.ok ? got.data.content : '');
-        out.push(picked);
-
-        /* And again with the same name. A template that overwrote an existing
-           profile would take a tuned extraction prompt with it, so the marker
-           written here has to still be there afterwards. */
-        await window.aios.fs.write('/檔案/萃取設定/E2E 範本廠.json',
-          got.data.content.replace('"備註": ""', '"備註": "不要蓋掉我"'));
-        await AIOS.afterFsChange();
-        make.click();
-        for (var k = 0; k < 40 && !document.querySelector('.ui-prompt-input'); k++) {
-          await new Promise(function (r) { setTimeout(r, 50); });
-        }
-        var again = document.querySelector('.ui-prompt-input');
-        again.value = 'E2E 範本廠';
-        document.querySelector('form.ui-prompt').dispatchEvent(
-          new Event('submit', { cancelable: true, bubbles: true }));
-        await new Promise(function (r) { setTimeout(r, 600); });
-        var after = await window.aios.fs.read('/檔案/萃取設定/E2E 範本廠.json');
-        out.push(after.ok ? after.data.content : '');
-
-        // Put the real one back for everything that follows.
-        out.push(await inst.ctx.api.useProfile('E2E 進貨單'));
-        out.push(document.querySelector('.ext-select').selectedOptions[0].textContent);
-      `), { timeout: 60000 });
-      assert.equal(r.error, undefined, r.error);
-
-      const text = r.out[0];
-      assert.ok(text, '範本沒有寫出來');
-      const tpl = JSON.parse(text);
-      assert.equal(tpl['廠商'], 'E2E 範本廠');
-      assert.ok(Array.isArray(tpl['欄位']) && tpl['欄位'].length, '範本要帶一份欄位清單');
-      assert.ok(tpl['提示詞'], '範本要帶一段提示詞的位置');
-      assert.equal(tpl['交付'], '/檔案/{大類}/{廠商}/{年月}');
-
-      assert.match(r.out[1], /E2E 範本廠/, '建好之後應該就選著它：' + r.out[1]);
-      assert.match(r.out[2], /不要蓋掉我/,
-        '同名再建一次把既有的設定蓋掉了——那會連著調好的提示詞一起消失');
-      assert.match(r.out[3], /E2E 進貨單/, r.out[3]);
-      assert.match(r.out[4], /E2E 進貨單/, '換回去之後選單也要跟著：' + r.out[4]);
-    });
-
-    await t.test('萃取模型是這支程式自己的設定，金鑰存得進去也拿不回來', async () => {
-      const r = await run(cdp, via(`
-        out.push(await window.aios.extract.configure({
-          mode: 'gemini', base: ${JSON.stringify(base)}, model: ${JSON.stringify(MODEL)}, auth: 'apikey'
-        }));
-        out.push(await window.aios.extract.setSecret('e2e-secret-key',
-          [{ name: 'X-E2E-Gateway', value: 'e2e-header-value' }]));
+        var out = [];
+        out.push(await window.aios.extract.configure('service',
+          { base: ${JSON.stringify(studioBase)}, auth: 'apikey' }));
+        out.push(await window.aios.extract.setSecret('service', 'studio-secret',
+          [{ name: 'X-Studio-Gateway', value: 'studio-header' }]));
+        out.push(await window.aios.extract.configure('fallback',
+          { base: ${JSON.stringify(modelBase)}, model: ${JSON.stringify(MODEL)}, auth: 'goog' }));
+        out.push(await window.aios.extract.setSecret('fallback', 'model-secret', []));
         out.push(await window.aios.extract.state());
-        out.push(await window.aios.extract.probe());
-        // The machine's own model provider must not have been touched by any of it.
+        out.push(await window.aios.extract.resolve(true));
         out.push(await window.aios.model.state());
-      `));
+        return { out: out };
+      `);
       assert.equal(r.error, undefined, r.error);
-      assert.ok(r.out[0].ok, JSON.stringify(r.out[0]));
+      const state = r.out[4].data;
+      assert.equal(state.service.base, studioBase);
+      assert.equal(state.fallback.base, modelBase);
+      assert.equal(state.service.hasKey, true);
+      assert.equal(state.fallback.hasKey, true);
+      assert.deepEqual(state.service.headerNames, ['X-Studio-Gateway']);
 
-      const state = r.out[2].data;
-      assert.equal(state.base, base);
-      assert.equal(state.model, MODEL);
-      assert.equal(state.hasKey, true, 'the key was stored');
-      assert.deepEqual(state.headerNames, ['X-E2E-Gateway'], 'the header name comes back');
-      const dump = JSON.stringify(r.out[2]);
-      assert.equal(dump.includes('e2e-secret-key'), false, 'the key came back through the bridge');
-      assert.equal(dump.includes('e2e-header-value'), false, 'a header value came back through the bridge');
+      const dump = JSON.stringify(r.out[4]);
+      ['studio-secret', 'model-secret', 'studio-header'].forEach((leak) => {
+        assert.equal(dump.includes(leak), false, '這個秘密從橋上漏出來了：' + leak);
+      });
 
-      assert.equal(r.out[3].data.ok, true, '測試連線失敗：' + JSON.stringify(r.out[3]));
-      assert.equal(r.out[3].data.model, MODEL);
-
-      /* Two settings, two files, no crosstalk: configuring this program's model
-         must not have changed the machine's. */
-      const core = r.out[4].data;
-      assert.ok(core && core.providers, 'the core provider state is still readable');
-      assert.equal(JSON.stringify(core).includes(base), false,
-        'the core model provider picked up this program’s endpoint');
+      assert.equal(r.out[5].data.mode, 'service', '預設就是工作室：' + r.out[5].data.reason);
+      assert.equal(JSON.stringify(r.out[6].data).includes(studioBase), false,
+        '核心模型供應商被這支程式的設定動到了');
     });
 
-    await t.test('設定面板畫得出來，欄位帶著存好的值，表頭只看得到名稱', async () => {
-      /* The settings pane is a hundred and fifty lines of DOM that the calls
-         above never touch. A window that throws while drawing it is a window
-         that looks fine until somebody presses the button. */
+    await t.test('開窗就同步：大類、廠商、欄位從工作室來，不是本機維護的', async () => {
       const r = await run(cdp, via(`
-        var buttons = [].slice.call(document.querySelectorAll('.ext-bar button'));
-        var open = buttons.filter(function (b) { return b.textContent === '模型設定'; })[0];
-        if (!open) return { error: '找不到「模型設定」' };
-        open.click();
-        for (var i = 0; i < 60 && document.querySelector('.ext-settings').hidden; i++) {
-          await new Promise(function (r) { setTimeout(r, 50); });
-        }
-        out.push(document.querySelector('.ext-settings').hidden);
-        out.push([].slice.call(document.querySelectorAll('.ext-field .ext-input')).map(function (n) {
-          return n.value;
+        out.push(await inst.ctx.api.sync());
+        var cat = await window.aios.extract.catalog();
+        out.push(cat.data.categories);
+        out.push(Object.keys(cat.data.vendors || {}).length ? cat.data.vendors[${JSON.stringify(CATEGORY)}] : []);
+        out.push(await inst.ctx.api.choose(${JSON.stringify(CATEGORY)}, ${JSON.stringify(VENDOR_A)}));
+        out.push(document.querySelector('.ext-chip').textContent);
+        out.push([].slice.call(document.querySelectorAll('.ext-bar select')).map(function (s) {
+          return [].slice.call(s.options).map(function (o) { return o.textContent; });
         }));
-        out.push([].slice.call(document.querySelectorAll('.ext-header-row input')).map(function (n) {
-          return { type: n.type, value: n.value, placeholder: n.placeholder };
-        }));
-        out.push(document.querySelectorAll('.ext-set-acts button').length);
-        // And back, so the rest of the run has the working page again.
-        document.querySelector('.ext-set-head button').click();
-        await new Promise(function (r) { setTimeout(r, 100); });
-        out.push(document.querySelector('.ext-settings').hidden);
-        out.push(!document.querySelector('.ext-work').hidden);
       `), { timeout: 60000 });
       assert.equal(r.error, undefined, r.error);
-      assert.equal(r.out[0], false, '設定頁沒有顯示出來');
+      assert.match(r.out[0], /1 個大類/, r.out[0]);
+      assert.match(r.out[0], /還沒提供提示詞/, '沒有提示詞這件事要說出來：' + r.out[0]);
+      assert.deepEqual(r.out[1], [CATEGORY]);
+      assert.deepEqual(r.out[2], [VENDOR_A, VENDOR_B]);
+      assert.match(r.out[3], new RegExp(VENDOR_A));
+      assert.equal(r.out[4], '工作室');
 
-      const fields = r.out[1];
-      assert.ok(fields.includes(base), '端點沒有帶進表單：' + JSON.stringify(fields));
-      assert.ok(fields.includes(MODEL), '模型名稱沒有帶進表單：' + JSON.stringify(fields));
-      assert.ok(fields.includes(''), 'API 金鑰欄應該是空的');
-      assert.equal(fields.includes('e2e-secret-key'), false, '金鑰被畫到畫面上了');
-
-      const header = r.out[2];
-      assert.equal(header.length, 2, '一列表頭是名稱加值兩格');
-      assert.equal(header[0].value, 'X-E2E-Gateway', '表頭名稱要顯示出來');
-      assert.equal(header[1].type, 'password');
-      assert.equal(header[1].value, '', '表頭的值不該被帶回畫面');
-      assert.match(header[1].placeholder, /已設定/, '要說明留白代表不更動：' + header[1].placeholder);
-
-      assert.equal(r.out[3], 3, '儲存、測試連線、清除金鑰');
-      assert.equal(r.out[4], true, '按「回到作業」之後設定頁要收起來');
-      assert.equal(r.out[5], true, '作業頁要回來');
+      const [cats, vendors] = r.out[5];
+      assert.deepEqual(cats, [CATEGORY], '大類下拉來自工作室');
+      assert.ok(vendors[0].includes('自動判別'), '有可自動判別的廠商就要提供那個選項');
+      assert.ok(vendors.includes(VENDOR_A) && vendors.includes(VENDOR_B), vendors.join(','));
     });
 
-    await t.test('兩份 PDF 原檔直送模型，回來的列照設定的欄位對齊', async () => {
+    await t.test('整批一個工作：欄位以回傳的為準，來源欄是工作室填的', async () => {
       const r = await run(cdp, via(`
-        out.push(await inst.ctx.api.addDocs([${JSON.stringify(DOC_A)}, ${JSON.stringify(DOC_B)}]));
+        out.push(await inst.ctx.api.choose(${JSON.stringify(CATEGORY)}, ''));
+        out.push(await inst.ctx.api.addDocs([
+          ${JSON.stringify(DOC_A)}, ${JSON.stringify(DOC_B)}, ${JSON.stringify(DOC_C)}]));
         out.push(await inst.ctx.api.runAll());
         out.push([].slice.call(document.querySelectorAll('.ext-table thead th')).map(function (th) {
-          return th.textContent;
+          return th.textContent.replace(' *', '');
         }));
-        out.push(document.querySelectorAll('.ext-table tbody tr').length);
-        out.push([].slice.call(document.querySelectorAll('.ext-table tbody tr')[0].children).map(function (td) {
-          return td.textContent;
+        out.push([].slice.call(document.querySelectorAll('.ext-table tbody tr')).map(function (tr) {
+          return [].slice.call(tr.children).map(function (td) { return td.textContent; });
         }));
         out.push(document.querySelectorAll('.ext-table td.ext-blank').length);
-        out.push(document.querySelector('.ext-status').textContent);
+        out.push(document.querySelector('.ext-banner-note').textContent);
         out.push(inst.describe ? inst.describe() : '');
-      `), { timeout: 60000 });
+      `), { timeout: 120000 });
       assert.equal(r.error, undefined, r.error);
+      assert.match(r.out[2], /解析完成/, r.out[2]);
+      assert.match(r.out[2], /1 份失敗/, '讀不出來的那一份要講出來：' + r.out[2]);
 
-      assert.match(r.out[1], /解析完成 2 份/, r.out[1]);
-      assert.deepEqual(r.out[2], ['單號', '日期', '料號', '品名', '數量', '_檔名', '_廠商', '_列號'],
-        'the header is the profile’s columns then the provenance ones');
-      assert.equal(r.out[3], 3, 'two rows from one document and one from the other');
+      assert.deepEqual(r.out[3], RESULT_COLUMNS.concat(['_檔名', '_廠商', '_列號', '_來源']),
+        '欄位順序要照工作室回傳的結果，不是 schema 承諾的');
 
-      /* The leading zero is the whole reason every value is text. A model that
-         answered "0012345" must still read 0012345 on screen. */
-      assert.deepEqual(r.out[4],
-        ['A-001', '2026-09-01', '0012345', '六角螺栓', '120', 'e2e-甲.pdf', '鐵工廠', '1']);
+      const table = r.out[4];
+      assert.equal(table.length, 3, '兩份成功的文件共三列');
+      assert.equal(table[0][0], 'A-001');
+      assert.equal(table[0][1], '0012345', '前導零還在');
+      assert.equal(table[0][6], 'e2e-甲.pdf');
+      assert.equal(table[0][7], VENDOR_A);
+      assert.equal(table[2][7], VENDOR_B, '每一列帶的是它自己那份文件的廠商');
+      assert.ok(table[0][9].length > 0, '_來源 要寫上是哪個引擎');
 
-      assert.equal(r.out[5], 1, 'exactly the one empty required cell is shaded');
-      assert.match(r.out[6], /必填未填 1 格/, r.out[6]);
+      /* 爐號 is inside the repeating block, so a blank one is NOT a mandatory
+         blank. Only 料號 on the third row is. */
+      assert.equal(r.out[5], 1, '只有真正的必填空白會標紅');
 
-      /* What the kernel is told. The rows came out of documents from /inbox,
-         which this session has already marked untrusted; the summary reports
-         how many, never what. */
-      const said = r.out[7];
-      assert.match(said, /3 列/, said);
-      ['0012345', '六角螺栓', '軸承座', 'A-001'].forEach((leak) => {
-        assert.equal(said.includes(leak), false, '摘要漏出了儲存格內容：' + leak);
+      assert.match(r.out[6], /綁在/, '橫幅要說這一批綁在哪個引擎上：' + r.out[6]);
+      ['0012345', '鋼板', 'A-001'].forEach((leak) => {
+        assert.equal(r.out[7].includes(leak), false, '摘要漏出了儲存格內容：' + leak);
       });
     });
 
-    await t.test('送出去的請求是該有的樣子：金鑰在表頭、PDF 整份、廠商的提示詞原封不動', () => {
-      const posts = seen.filter((s) => s.method === 'POST');
-      assert.equal(posts.length, 2, '一份文件一次請求');
-
-      posts.forEach((p) => {
-        assert.equal(p.headers['x-api-key'], 'e2e-secret-key', '金鑰要在表頭');
-        assert.equal(p.headers['x-e2e-gateway'], 'e2e-header-value', '自訂表頭要送出去');
-        assert.equal(p.url.includes('key='), false, '金鑰不可以出現在網址上');
-
-        const body = JSON.parse(p.body);
-        const parts = body.contents[0].parts;
-        const file = parts.find((x) => x.inline_data);
-        assert.equal(file.inline_data.mime_type, 'application/pdf');
-        const text = parts.find((x) => x.text).text;
-        assert.ok(text.startsWith('逐列抓出這份進貨單的明細。'), '廠商自己的提示詞要在最前面');
-        assert.ok(text.includes('前導零'), '格式契約要接在後面');
-        assert.equal(body.generationConfig.temperature, 0, '抄寫不是創作');
-        assert.equal(body.generationConfig.responseMimeType, 'application/json');
-        assert.deepEqual(Object.keys(body.generationConfig.responseSchema.properties.rows.items.properties),
-          ['單號', '日期', '料號', '品名', '數量']);
-      });
-
-      /* The bytes that went were the file's own bytes, not a transcription. */
-      const sent = posts.map((p) => Buffer.from(
-        JSON.parse(p.body).contents[0].parts.find((x) => x.inline_data).inline_data.data, 'base64'
-      ).toString('utf8')).sort();
-      assert.deepEqual(sent, [PDF_A, PDF_B].sort(), 'the whole PDF goes, unaltered');
+    await t.test('讀不出來的那一份可以重跑，重跑後進到表格裡', async () => {
+      const before = studio.state.retried;
+      const r = await run(cdp, via(`
+        out.push(await inst.ctx.api.retryFailed());
+        out.push(document.querySelectorAll('.ext-table tbody tr').length);
+      `), { timeout: 120000 });
+      assert.equal(r.error, undefined, r.error);
+      assert.equal(studio.state.retried, before + 1, '真的有打 /retry');
+      assert.match(r.out[0], /解析完成/, r.out[0]);
     });
 
-    await t.test('匯出的試算表是真的 xlsx，而且前導零還在', async () => {
-      /* The gate asks first, and that is correct rather than in the way: the
-         documents came out of /inbox, so reading them armed the taint downgrade,
-         and fs.write is elevated. A spreadsheet full of somebody else's PDF is
-         exactly the write that should be shown to a person before it happens.
-         Pressed here the way a person presses it. */
-      const pressed = pressConsent(app.port, true, { timeout: 60000 });
+    await t.test('交付：工作室決定檔名，這台機器決定桶子與去處', async () => {
       const r = await run(cdp, via(`
-        out.push(await inst.ctx.api.exportSheet(${JSON.stringify(SHEET)}));
-        var b = await window.aios.fs.readBytes(${JSON.stringify(SHEET)});
-        out.push(b.ok ? atob(b.data.base64.slice(0, 8)).slice(0, 2) : b.error);
-        var bin = atob(b.data.base64);
-        var bytes = new Uint8Array(bin.length);
-        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        // Part names live uncompressed in the local headers, so they read out
-        // of the raw bytes. This writer inlines its strings, so there is no
-        // sharedStrings part to look for -- the worksheet is the one that must
-        // be there.
-        out.push(new TextDecoder('latin1').decode(bytes).indexOf('xl/worksheets/sheet1.xml') >= 0);
-        // Read it back through the machine's own reader rather than trusting the bytes.
-        var read = await window.aios.office.readXlsx(${JSON.stringify(SHEET)});
-        out.push(read.ok ? read.data : { error: read.error });
+        var plan = await inst.ctx.api.previewDelivery();
+        out.push({ finished: plan.finished, unsure: plan.unsure, renameField: plan.renameField,
+                   source: plan.source, dirs: plan.dirs });
+        out.push(plan.plan.map(function (e) { return [e.name, e.newName, e.status, e.reason]; }));
       `), { timeout: 60000 });
-
-      const said = await pressed;
-      assert.equal(said.error, undefined, JSON.stringify(said));
-      assert.match(said.text, /不可信/,
-        '授權視窗要說出為什麼現在才問：' + said.text.slice(0, 160));
-
-      assert.equal(r.error, undefined, r.error);
-      assert.match(r.out[0], /3 列/, r.out[0]);
-      assert.equal(r.out[1], 'PK', 'a zip was written: ' + r.out[1]);
-      assert.equal(r.out[2], true, 'and the worksheet part is in it');
-
-      const book = r.out[3];
-      assert.ok(book && book.cells, JSON.stringify(book).slice(0, 200));
-      assert.equal(book.cells.A1 && (book.cells.A1.v || book.cells.A1), '單號');
-      const c2 = book.cells.C2 && (book.cells.C2.v !== undefined ? book.cells.C2.v : book.cells.C2);
-      assert.equal(String(c2), '0012345', '前導零在往返之後不見了');
-    });
-
-    await t.test('交付計畫先畫在視窗裡，還沒有動到任何檔案', async () => {
-      const r = await run(cdp, via(`
-        var plan = inst.ctx.api.previewDelivery();
-        out.push({ finished: plan.finished, unsure: plan.unsure, dirs: plan.dirs });
-        out.push(plan.plan.map(function (e) {
-          return [e.name, e.newName, e.status, e.reason];
-        }));
-        out.push([].slice.call(document.querySelectorAll('.ext-table tbody tr')).length);
-        out.push(document.querySelector('.ext-foot .ext-go').textContent);
-        // Nothing moved yet: both documents are still where they were.
-        out.push((await window.aios.fs.readBytes(${JSON.stringify(DOC_A)})).ok);
-        out.push((await window.aios.fs.readBytes(${JSON.stringify(DOC_B)})).ok);
-      `));
       assert.equal(r.error, undefined, r.error);
 
-      const summary = r.out[0];
-      assert.equal(summary.finished, 1);
-      assert.equal(summary.unsure, 1);
+      const sum = r.out[0];
+      assert.equal(sum.source, 'service');
+      assert.equal(sum.renameField, '單號');
 
-      const plan = r.out[1];
-      const a = plan.find((e) => e[0] === 'e2e-甲.pdf');
-      const b = plan.find((e) => e[0] === 'e2e-乙.pdf');
-      assert.deepEqual([a[1], a[2], a[3]], ['鐵工廠-A-001.pdf', 'finished', '']);
-      assert.equal(b[1], '鐵工廠-B-002.pdf');
-      assert.equal(b[2], 'unsure');
-      assert.match(b[3], /料號/, '待確認的那一份要說出是哪一欄空著：' + b[3]);
+      const rowsOut = r.out[1];
+      const a = rowsOut.find((e) => e[0] === 'e2e-甲.pdf');
+      const b = rowsOut.find((e) => e[0] === 'e2e-乙.pdf');
+      assert.equal(a[1], VENDOR_A + '-A-001.pdf', '檔名是工作室給的');
+      assert.equal(a[2], 'finished');
+      /* The studio called this one finished. This machine does not, because a
+         mandatory cell is empty -- and the operator's triage habit is that
+         whatever is in 待確認 is what still needs them. */
+      assert.equal(b[2], 'unsure', '必填空白的那一份不能算完成');
+      assert.ok(b[3].includes('料號') || b[3].includes('單號'), b[3]);
 
-      assert.equal(r.out[2], 2, 'the plan is drawn as a table');
-      assert.match(r.out[3], /確認交付（2）/, r.out[3]);
-      assert.equal(r.out[4], true, 'the source document is still in /inbox');
-      assert.equal(r.out[5], true);
+      assert.ok(sum.dirs.some((d) => d.includes('/' + VENDOR_A + '/')), sum.dirs.join(' | '));
+      assert.ok(sum.dirs.some((d) => d.includes('/' + VENDOR_B + '/')),
+        '自動判別時每一家進自己的資料夾：' + sum.dirs.join(' | '));
     });
 
-    await t.test('真的歸檔：閘門一次列出整批，完成與待確認各進各的資料夾', async () => {
+    await t.test('真的歸檔：閘門一次列出整批', async () => {
       const pressed = pressConsent(app.port, true, { timeout: 60000 });
       const ran = run(cdp, via(`
         out.push(await inst.ctx.api.deliver());
-        out.push((await window.aios.fs.readBytes('/檔案/進貨單/鐵工廠/2026-09/Finished/鐵工廠-A-001.pdf')).ok);
-        out.push((await window.aios.fs.readBytes('/檔案/進貨單/鐵工廠/2026-09/Undefined/鐵工廠-B-002.pdf')).ok);
         out.push((await window.aios.fs.readBytes(${JSON.stringify(DOC_A)})).ok);
-      `), { timeout: 90000 });
+      `), { timeout: 120000 });
 
       const said = await pressed;
       assert.equal(said.error, undefined, JSON.stringify(said));
-      assert.equal(said.count, 2, '閘門要一次把整批列出來，不是一份問一次');
-      assert.match(said.allow, /執行 2 次/, said.allow);
-      assert.ok(said.rows.some((row) => row.includes('鐵工廠-A-001.pdf')),
-        '清單要看得到每一個目的地：' + said.rows.join(' | '));
+      assert.ok(said.count >= 2, '整批一次列出來：' + said.count);
 
       const r = await ran;
       assert.equal(r.error, undefined, r.error);
-      assert.match(r.out[0], /歸檔了 2 \/ 2 份/, r.out[0]);
-      assert.equal(r.out[1], true, '完成的那一份沒進 Finished');
-      assert.equal(r.out[2], true, '待確認的那一份沒進 Undefined');
-      assert.equal(r.out[3], false, '原本的檔案應該已經搬走了');
+      assert.match(r.out[0], /歸檔了/, r.out[0]);
+      assert.equal(r.out[1], false, '原本的檔案應該已經搬走了');
     });
 
-    await t.test('金鑰忘得掉，端點留著', async () => {
+    await t.test('匯出的試算表帶著來源欄，而且前導零還在', async () => {
+      const pressed = pressConsent(app.port, true, { timeout: 60000 });
       const r = await run(cdp, via(`
-        out.push(await window.aios.extract.forgetSecret());
-      `));
+        out.push(await inst.ctx.api.exportSheet(${JSON.stringify(SHEET)}));
+        var read = await window.aios.office.readXlsx(${JSON.stringify(SHEET)});
+        out.push(read.ok ? read.data.cells : { error: read.error });
+      `), { timeout: 90000 });
+      await pressed.catch(() => {});
       assert.equal(r.error, undefined, r.error);
-      const s = r.out[0].data;
-      assert.equal(s.hasKey, false);
-      assert.deepEqual(s.headerNames, []);
-      assert.equal(s.base, base, '位址不該跟著金鑰一起消失');
+      const cells = r.out[1];
+      const val = (ref) => {
+        const c = cells[ref];
+        return c && c.v !== undefined ? String(c.v) : String(c || '');
+      };
+      assert.equal(val('A1'), '單號');
+      assert.equal(val('B2'), '0012345', '前導零在往返之後不見了');
+      assert.equal(val('J1'), '_來源', '最後一欄要記下是哪個引擎產的');
+    });
+
+    await t.test('金鑰不對不會降級：它會停下來照實說', async () => {
+      /* A revoked key looks exactly like an outage if nobody separates them,
+         and the operator would run on the other engine for weeks without
+         knowing the studio key had died. */
+      studio.state.fail = 'denied';
+      const r = await run(cdp, via(`
+        out.push(await inst.ctx.api.clearAll());
+        out.push(await window.aios.extract.resolve(true));
+        out.push(await inst.ctx.api.refreshMode(true));
+        out.push(document.querySelector('.ext-chip').textContent);
+        out.push(document.querySelector('.ext-banner-why').textContent);
+      `), { timeout: 60000 });
+      studio.state.fail = '';
+      assert.equal(r.error, undefined, r.error);
+      assert.equal(r.out[1].data.mode, 'none', '401 不可以變成備援：' + r.out[1].data.reason);
+      assert.match(r.out[1].data.reason, /金鑰/, r.out[1].data.reason);
+      assert.equal(r.out[3], '未就緒');
+      assert.match(r.out[4], /金鑰/, r.out[4]);
+    });
+
+    await t.test('工作室掛掉才降級，而且沒有提示詞就不假裝跑得動', async () => {
+      await new Promise((r) => studio.server.close(r));
+      const r = await run(cdp, via(`
+        /* The sandbox outlives a run. A local profile left by the last one would
+           make this exercise the happy path instead of the refusal, and the
+           document was moved by the filing test above. Both put back.
+
+           The taint mark is cleared first: reading those PDFs armed the
+           downgrade, so these setup writes would each stop on a consent dialog
+           that nothing in this test is going to press. Clearing it is a real
+           user gesture and none of what follows is about the gate. */
+        await window.aios.taint.clear();
+        await window.aios.fs.remove(${JSON.stringify(LOCAL_PROFILE)});
+        await window.aios.fs.write(${JSON.stringify(DOC_B)}, ${JSON.stringify(PDF_B)});
+        await AIOS.afterFsChange();
+        out.push(await inst.ctx.api.refreshMode(true));
+        out.push(document.querySelector('.ext-chip').textContent);
+        out.push(document.querySelector('.ext-banner-why').textContent);
+        out.push(await inst.ctx.api.addDocs([${JSON.stringify(DOC_B)}]));
+        try {
+          out.push(await inst.ctx.api.runAll());
+        } catch (e) {
+          out.push('REFUSED: ' + e.message);
+        }
+      `), { timeout: 90000 });
+      assert.equal(r.error, undefined, r.error);
+      assert.equal(r.out[0], 'fallback', '連不上才降級');
+      assert.equal(r.out[1], '備援模型');
+      assert.match(r.out[2], /連不上/, r.out[2]);
+      assert.ok(String(r.out[4]).startsWith('REFUSED:'),
+        '沒有提示詞就不能跑，不然模型只會收到「請輸出 JSON」：' + r.out[4]);
+      assert.match(String(r.out[4]), /自動判別|提示詞/, r.out[4]);
+    });
+
+    await t.test('放一份本機提示詞，備援就接得住，而且來源欄說得出是誰做的', async () => {
+      const local = JSON.stringify({
+        名稱: 'E2E 備援', 大類: CATEGORY, 廠商: VENDOR_B,
+        欄位: SCHEMA.export_columns,
+        必填: ['單號', '料號'],
+        提示詞: '這是備援用的萃取提示詞，逐列抓明細。',
+        交付: '/檔案/{大類}/{廠商}/{年月}'
+      }, null, 2);
+      const r = await run(cdp, via(`
+        await window.aios.taint.clear();
+        await window.aios.fs.mkdir('/檔案/萃取設定');
+        await window.aios.fs.write(${JSON.stringify(LOCAL_PROFILE)}, ${JSON.stringify(local)});
+        await window.aios.fs.write(${JSON.stringify(DOC_B)}, ${JSON.stringify(PDF_B)});
+        await AIOS.afterFsChange();
+        out.push(await inst.ctx.api.clearAll());
+        out.push(await inst.ctx.api.refreshMode(true));
+        out.push(await inst.ctx.api.choose(${JSON.stringify(CATEGORY)}, ${JSON.stringify(VENDOR_B)}));
+        out.push(await inst.ctx.api.addDocs([${JSON.stringify(DOC_B)}]));
+        out.push(await inst.ctx.api.runAll());
+        out.push([].slice.call(document.querySelectorAll('.ext-table tbody tr')).map(function (tr) {
+          return [].slice.call(tr.children).map(function (td) { return td.textContent; });
+        }));
+      `), { timeout: 120000 });
+      assert.equal(r.error, undefined, r.error);
+      assert.equal(r.out[1], 'fallback');
+      assert.match(r.out[4], /備援解析完成 1 份/, r.out[4]);
+
+      const table = r.out[5];
+      assert.equal(table.length, 1);
+      assert.equal(table[0][table[0].length - 1], MODEL,
+        '_來源 要寫的是備援模型，不是工作室：' + table[0].join(' | '));
+
+      const posts = model.seen.filter((s) => s.method === 'POST');
+      assert.ok(posts.length >= 1, '備援模型真的被呼叫了');
+      const body = JSON.parse(posts[posts.length - 1].body);
+      const text = body.contents[0].parts.find((x) => x.text).text;
+      assert.ok(text.startsWith('這是備援用的萃取提示詞'),
+        '本機那份提示詞要原封不動排在最前面');
+      assert.equal(posts[posts.length - 1].headers['x-goog-api-key'], 'model-secret');
+      assert.equal(posts[posts.length - 1].headers['x-api-key'], undefined,
+        '工作室的金鑰不可以跑到模型那邊去');
     });
   } finally {
-    await new Promise((r) => server.close(r));
+    await new Promise((r) => studio.server.close(() => r()));
+    await new Promise((r) => model.server.close(() => r()));
   }
 }

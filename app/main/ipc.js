@@ -344,6 +344,12 @@ function register(getWindow) {
   /* What the studio last said exists. Kept in this process beside the settings,
      because its job is to still be there when the studio is not. */
   ipcMain.handle('extract:catalog', plain(async () => extract.catalog()));
+
+  /* Bind the work that follows to one engine, and let go of it. Enforced in
+     main because mixing two engines inside one result set is wrong in a way
+     nothing on the resulting page admits to -- see extract.js beginBatch. */
+  ipcMain.handle('extract:beginBatch', plain(async ({ which } = {}) => extract.beginBatch(which)));
+  ipcMain.handle('extract:endBatch', plain(async ({ token } = {}) => extract.endBatch(token)));
   ipcMain.handle('extract:saveCatalog', plain(async ({ patch } = {}) => {
     const wrote = await extract.saveCatalog(patch || {});
     return Object.assign(extract.catalog(), { persisted: wrote });
