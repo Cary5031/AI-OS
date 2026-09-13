@@ -6037,6 +6037,34 @@ test('the model transport lives in the main process, not the renderer', () => {
   assert.match(stream, /if \(j\.timings\) timings = j\.timings/);
 });
 
+test('what the model can produce is used, not only displayed', () => {
+  /* A user set the output cap to 200,000 against a model documented at 128,000,
+     and the machine could not plan a single intent: every request was answered
+     400. The number it needed was already in this process -- models.js has it,
+     the provider sometimes reports it, a refusal measures it -- and it was being
+     read only to draw a line in the settings window. So the request now carries
+     the smaller of the two. */
+  const src = read('main/llama.js');
+  const shape = funcBody(src, 'shapeBody');
+  assert.match(shape, /outCapFor\(id\)/, 'the request has to ask what the ceiling is');
+  assert.match(shape, /want > ceiling/, 'and use it when the setting is over it');
+
+  /* The half that was written and then never called. `noteLimitFrom` existed
+     for months as dead code, which meant 「從伺服器的錯誤訊息量到的」 -- a source
+     the model window names and the README documents -- could never have held a
+     value. A definition is not a wiring. */
+  const code = codeOnly(src);
+  for (const fn of ['noteLimitFrom', 'noteOutLimitFrom', 'outCapFor']) {
+    const defined = new RegExp('function ' + fn + '\\s*\\(', 'g');
+    const used = new RegExp('(?<!function )\\b' + fn + '\\s*\\(', 'g');
+    assert.ok((code.match(defined) || []).length === 1, fn + ' is defined once');
+    assert.ok((code.match(used) || []).length >= 1,
+      fn + ' is never called -- it was written to learn a limit and nothing asks it to');
+  }
+  assert.match(code, /noteOutLimitFrom\(.*\bdetail\b/,
+    'the refusal itself is what gets read for the number');
+});
+
 test('a provider is described, not branched on', () => {
   /* `if (provider === 'openai')` scattered through a transport is how a fifth
      provider becomes a rewrite. Each one carries facts instead. */

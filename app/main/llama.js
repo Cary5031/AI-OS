@@ -889,7 +889,8 @@ async function probeActive() {
   var known = models.describe(model, {
     reported: localCtx ? { n_ctx: localCtx } : record,
     override: confOf(id).limits || null,
-    measured: measuredCtx[model] || 0
+    measured: measuredCtx[model] || 0,
+    measuredOut: measuredOut[model] || 0
   });
 
   return {
@@ -919,12 +920,50 @@ async function probeActive() {
  * moment a provider that documents nothing says the number out loud.
  */
 var measuredCtx = Object.create(null);
+var measuredOut = Object.create(null);
 
 function noteLimitFrom(modelId, message) {
   var n = models.ctxFromError(message);
   if (!n || !modelId) return 0;
   measuredCtx[String(modelId)] = n;
   return n;
+}
+
+/**
+ * The same, for the output cap.
+ *
+ * Separate from the context one on purpose: they are different numbers about
+ * different things, and a context window learned from an output refusal would
+ * quietly shrink the attention budget with nothing on screen to explain it.
+ */
+function noteOutLimitFrom(modelId, message) {
+  var n = models.outFromError(message);
+  if (!n || !modelId) return 0;
+  measuredOut[String(modelId)] = n;
+  return n;
+}
+
+/**
+ * What this model will actually produce, whoever knows it best.
+ *
+ * Same order as everywhere else -- what the server told us today beats the
+ * table, and what the user typed beats both -- except that the user's number
+ * cannot raise the ceiling above one the server has already refused. A person is
+ * entitled to set a limit; they are not able to grant themselves one the
+ * provider does not offer, and pretending otherwise just returns the 400.
+ */
+function outCapFor(id) {
+  var conf = confOf(id);
+  var model = String(conf.model || '').trim();
+  if (!model) return 0;
+  var known = models.describe(model, {
+    override: conf.limits || null,
+    measuredOut: measuredOut[model] || 0
+  });
+  var cap = Number(known.out) || 0;
+  var server = Number(measuredOut[model]) || 0;
+  if (server > 0 && (cap === 0 || cap > server)) cap = server;
+  return cap > 0 ? Math.round(cap) : 0;
 }
 
 /** Real token counts, for the providers that can actually give them. */
@@ -1042,6 +1081,23 @@ function shapeBody(req) {
      room this model needs is a fact about the model, not about the question.
      Zero means "leave it to the caller", which is what the local host wants. */
   var want = Number(confOf(id).maxOut) > 0 ? Number(confOf(id).maxOut) : (req.maxTokens || 900);
+  /* And a ceiling, because asking for more than the model will give is not
+     ambitious, it is a guaranteed HTTP 400 -- every call, until somebody edits a
+     settings field. A user set this to 200,000 against a model documented at
+     128,000 and the machine could not plan a single intent; what it said was the
+     provider's raw refusal, which names max_tokens but not which of this
+     machine's settings put it there.
+     The number the model can actually produce was already known here -- the
+     table has it, the provider sometimes reports it, and a refusal measures it
+     -- and it was being used only to draw a line in the settings window. Using
+     it is the whole fix. Zero means nobody knows, and then the caller's number
+     goes out unchanged rather than being clamped to a guess. */
+  var ceiling = outCapFor(id);
+  if (ceiling > 0 && want > ceiling) {
+    emit(id + ' 的輸出上限是 ' + ceiling.toLocaleString('en-US') + '，這次要求 ' +
+      want.toLocaleString('en-US') + '，已改用上限', 'warn');
+    want = ceiling;
+  }
   body[capFieldOf(id)] = want;
 
   /* Ask for the token count. Measured: OpenAI and Gemini send no usage block in a
@@ -1194,6 +1250,28 @@ async function chatActive(requestId, req, onEvent) {
         });
         continue;
       }
+      /* Read the refusal for the numbers it is refusing over, before deciding
+         what to do about it. This is the one moment a provider that documents
+         nothing says its limits out loud, and until now nothing listened: both
+         of these were written months ago and neither was ever called, so the
+         「從伺服器的錯誤訊息量到的」 source in the model window could not have
+         had a value in it. Learning here means the next request is shaped by
+         what this deployment actually enforces, not by a table. */
+      var learnedCtx = noteLimitFrom(String(confOf(id).model || '').trim(), detail);
+      var learnedOut = noteOutLimitFrom(String(confOf(id).model || '').trim(), detail);
+      if (learnedCtx) emit(id + ' 說它的 context 上限是 ' + learnedCtx.toLocaleString('en-US'), 'warn');
+
+      /* An output cap we just learned is actionable right here: the body in hand
+         is over it, and the same request under the real ceiling is the request
+         the caller meant. Retried once, inside the loop that already exists for
+         "asked for something this provider will not take". */
+      if (learnedOut && Number(body[capFieldOf(id)]) > learnedOut) {
+        emit(id + ' 的輸出上限是 ' + learnedOut.toLocaleString('en-US') +
+          '，改用上限重試（設定裡是 ' + Number(body[capFieldOf(id)]).toLocaleString('en-US') + '）', 'warn');
+        body[capFieldOf(id)] = learnedOut;
+        continue;
+      }
+
       var field = res.status === 400 ? refusedField(detail) : null;
       if (!field || !(field in body)) {
         throw new Error('HTTP ' + res.status + ': ' + detail.slice(0, 240));

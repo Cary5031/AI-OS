@@ -79,6 +79,48 @@ test('伺服器自己拒絕時講的數字最準，因為那是今天的這個�
   assert.equal(models.ctxFromError(null), 0);
 });
 
+test('輸出上限的拒絕，讀到的要是「能給多少」而不是「你要了多少」', () => {
+  /* This is the refusal that stopped a real machine from planning a single
+     intent: max_tokens was set to 200,000 against a model documented at 128,000,
+     and every call came back 400. The message carries both numbers, and reading
+     the wrong one would mean learning 200,000 and sending it again for ever. */
+  const real = 'max_tokens is too large: 200000. This model supports at most ' +
+    '128000 completion tokens, whereas you provided 200000.';
+  assert.equal(models.outFromError(real), 128000, '要讀「能給多少」，不是「你要了多少」');
+  assert.equal(models.ctxFromError(real), 0,
+    '這是輸出上限不是 context 上限：認錯了會把注意力預算縮到只剩一小塊，而且畫面上不會有人說為什麼');
+
+  assert.equal(models.outFromError(
+    'max_tokens: 300000 > 200000, which is the maximum allowed number of output tokens'), 200000,
+  '被超過的那個才是上限，所以取右邊那個');
+  assert.equal(models.outFromError(
+    'Invalid value for max_completion_tokens: must be less than or equal to 65536 tokens'), 65536);
+  assert.equal(models.outFromError('Rate limit exceeded'), 0, '不是這種錯就不要亂認');
+  assert.equal(models.outFromError(''), 0);
+  assert.equal(models.outFromError(null), 0);
+
+  /* And the other direction: a genuine context refusal must not be read as an
+     output cap, or the reply length would be clamped to the whole window. */
+  assert.equal(models.outFromError(
+    "This model's maximum context length is 128000 tokens. However, you requested 131000."), 0);
+});
+
+test('量到的輸出上限會蓋過內建表，而且跟 context 是兩個數字', () => {
+  const table = models.describe('gpt-5.6-terra');
+  assert.equal(table.out, 128000, '表上就有這個型號的輸出上限');
+  assert.equal(table.outSource, 'openai-docs');
+
+  const measured = models.describe('gpt-5.6-terra', { measuredOut: 64000 });
+  assert.equal(measured.out, 64000, '伺服器今天說的贏過表');
+  assert.equal(measured.outSource, 'measured');
+  assert.equal(measured.ctx, 1050000, 'context 不該被輸出上限動到');
+  assert.equal(measured.ctxSource, 'openai-docs');
+
+  const both = models.describe('gpt-5.6-terra', { measured: 900000, measuredOut: 64000 });
+  assert.equal(both.ctx, 900000);
+  assert.equal(both.out, 64000, '兩個各自量各自的');
+});
+
 test('四個來源的順序：使用者 > 量到的 > 供應商 > 內建表', () => {
   const table = models.describe('gpt-5.6-terra');
   assert.equal(table.ctxSource, 'openai-docs');

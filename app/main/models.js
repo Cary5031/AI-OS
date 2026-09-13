@@ -146,12 +146,50 @@ function ctxFromError(message) {
 }
 
 /**
+ * A provider's refusal, read for the OUTPUT limit it is refusing over.
+ *
+ * Kept apart from ctxFromError because they are different numbers about
+ * different things, and mixing them would be worse than knowing neither: a
+ * context window learned from an output-cap refusal would shrink the attention
+ * budget to a fraction of the truth, and nothing on screen would say why.
+ *
+ * The hard part is that these messages carry TWO numbers -- what was asked for
+ * and what is allowed -- and the useful one is the smaller, later one:
+ *
+ *     max_tokens is too large: 200000. This model supports at most 128000
+ *     completion tokens, whereas you provided 200000.
+ *
+ * So the shapes here anchor on the phrase that introduces the limit, never on
+ * the one that quotes the request back. A pattern that matched "too large:
+ * 200000" would learn the wrong number and then keep sending it.
+ */
+function outFromError(message) {
+  const t = String(message || '');
+  const shapes = [
+    /supports? at most\s*([\d,]+)\s*(?:completion|output|sampled)\s*tokens/i,
+    /* 「max_tokens: 300000 > 200000, which is the maximum allowed」 -- the limit
+       is the number being exceeded, so it is the one on the right. */
+    /max_tokens:\s*[\d,]+\s*>\s*([\d,]+)/i,
+    /max(?:imum)?[_\s-]?(?:completion|output|sampled)[_\s-]?tokens?[^0-9]{0,40}?([\d,]+)/i,
+    /max_tokens[^0-9]{0,40}?(?:must be|should be|has to be)[^0-9]{0,20}([\d,]+)/i,
+    /(?:less than or equal to|at most|no more than|<=)\s*([\d,]+)\s*(?:completion|output)?\s*tokens/i
+  ];
+  for (const re of shapes) {
+    const m = re.exec(t);
+    if (!m) continue;
+    const n = Number(String(m[1]).replace(/,/g, ''));
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return 0;
+}
+
+/**
  * Everything known about one model, and where each part came from.
  *
  * `override` is the user's own setting and wins outright; a person who has
  * typed a number has more standing than a table compiled months ago.
  */
-function describe(modelId, { reported = null, override = null, measured = 0 } = {}) {
+function describe(modelId, { reported = null, override = null, measured = 0, measuredOut = 0 } = {}) {
   const out = { model: String(modelId || ''), ctx: 0, out: 0, ctxSource: '', outSource: '' };
 
   const table = lookup(modelId);
@@ -168,6 +206,7 @@ function describe(modelId, { reported = null, override = null, measured = 0 } = 
   if (rOut) { out.out = rOut; out.outSource = 'provider'; }
 
   if (measured > 0) { out.ctx = measured; out.ctxSource = 'measured'; }
+  if (measuredOut > 0) { out.out = measuredOut; out.outSource = 'measured'; }
 
   if (override && Number(override.ctx) > 0) { out.ctx = Math.round(Number(override.ctx)); out.ctxSource = 'user'; }
   if (override && Number(override.out) > 0) { out.out = Math.round(Number(override.out)); out.outSource = 'user'; }
@@ -178,6 +217,6 @@ function describe(modelId, { reported = null, override = null, measured = 0 } = 
 }
 
 module.exports = {
-  KNOWN, TAKEN, lookup, describe, reportedCtx, reportedOut, ctxFromError,
+  KNOWN, TAKEN, lookup, describe, reportedCtx, reportedOut, ctxFromError, outFromError,
   sourceName, SOURCE_NAMES
 };
