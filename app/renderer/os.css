@@ -1972,7 +1972,8 @@ body.maxed.peek .dock {
 .fm-sep { color: var(--fg-faint); font-family: var(--mono); font-size: 11px; }
 
 .fm-search, .mem-search, .ed-find-input, .sh-formula, .br-addr, .ml-input, .fg-req, .mem-add-input,
-.mem-add-tags, .mem-edit-input, .ml-body, .ui-prompt-input, .sl-notes-input, .mp-input {
+.mem-add-tags, .mem-edit-input, .ml-body, .ui-prompt-input, .sl-notes-input, .mp-input,
+.mt-say, .mt-input {
   padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid var(--hair-2);
@@ -1983,7 +1984,8 @@ body.maxed.peek .dock {
 }
 .fm-search:focus, .mem-search:focus, .ed-find-input:focus, .sh-formula:focus, .br-addr:focus,
 .ml-input:focus, .fg-req:focus, .mem-add-input:focus, .mem-edit-input:focus, .ml-body:focus,
-.ui-prompt-input:focus, .sl-notes-input:focus, .mp-input:focus { outline: none; border-color: var(--accent); }
+.ui-prompt-input:focus, .sl-notes-input:focus, .mp-input:focus,
+.mt-say:focus, .mt-input:focus { outline: none; border-color: var(--accent); }
 .fm-search { width: 150px; }
 
 .fm-split { display: grid; grid-template-columns: 168px minmax(0, 1fr); flex: 1; min-height: 0; }
@@ -4225,3 +4227,212 @@ select.ext-input { padding: 3px 22px 3px 7px; background-color: var(--hair); }
 .ml-attach-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
 .ml-attach-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ml-attach-meta { color: var(--fg-faint); white-space: nowrap; }
+
+/* ###########################################################################
+   郵件待辦
+   ---------------------------------------------------------------------------
+   This section did not exist until now, and the program has been shipping
+   without it: thirty .mt-* classes were being asked for and none of them
+   resolved, so the two lists stacked instead of sitting side by side, neither
+   could scroll, and a selected rule looked exactly like a paused one.
+
+   The layout is the mail reader's: a rail of rules, and the one you picked.
+   Named .mt-* rather than borrowing .ml-* because two programs sharing a class
+   means neither of them can change it.
+
+   Nothing here uses --line or --bg-sunken. Both are referenced elsewhere in this
+   file and defined nowhere, which makes the whole `border` shorthand invalid and
+   silently paints no border at all.
+
+   The two text fields are NOT styled here. There is no bare `input` or
+   `textarea` rule anywhere in this file, so a field gets its colours only by
+   being named in the hand-maintained selector list further up (search for
+   `.fm-search, .mem-search`) -- and a field left out of it renders as a raw
+   platform widget: white ground, black text, inside a dark window. `.mt-say` and
+   `.mt-input` are in that list, and in its `:focus` twin. Anything added here
+   that takes typing has to go in both.
+   ######################################################################### */
+
+.mt-bar {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  padding: 7px 10px; border-bottom: 1px solid var(--hair);
+  flex: none;
+}
+.mt-acct { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); }
+
+.mt-split { flex: 1; min-height: 0; display: grid; grid-template-columns: 236px minmax(0, 1fr); }
+.mt-rules {
+  border-right: 1px solid var(--hair); overflow-y: auto; padding: 8px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.mt-items { overflow-y: auto; padding: 12px 14px; }
+.mt-foot {
+  flex: none; padding: 5px 10px; border-top: 1px solid var(--hair);
+  font-size: 10.5px; color: var(--fg-faint);
+}
+.mt-foot:empty { display: none; }
+
+.mt-add { width: 100%; justify-content: center; margin-bottom: 3px; }
+
+/* A rule in the rail. Four pieces of text inside one button, so it is a grid
+   rather than a row of spans: the count has to stay put when the sentence wraps
+   onto a second line. */
+.mt-rule {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 6px;
+  text-align: left; padding: 7px 8px; border-radius: 7px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--fg-dim); cursor: pointer; font: inherit;
+}
+.mt-rule:hover { background: var(--hair); color: var(--fg); }
+.mt-rule.on { background: var(--glass-2); border-color: var(--hair-2); color: var(--fg); }
+.mt-rule.off { opacity: .55; }
+/* Every row is placed explicitly. Auto-placement put the count on a row of its
+   own below the full-width sentence -- the DOM order is name, sentence, count,
+   time, and a span of 1/-1 closes the row behind it -- so the number came out as
+   an empty pill the width of the whole rail. */
+.mt-rule-name {
+  grid-row: 1; grid-column: 1;
+  font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mt-rule-n {
+  grid-row: 1; grid-column: 2;
+  justify-self: end; align-self: start;
+  font-family: var(--mono); font-size: 10.5px;
+  padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--hair-2); color: var(--fg-dim);
+}
+.mt-rule-n.has-me { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
+.mt-rule-sub {
+  grid-row: 2; grid-column: 1 / -1;
+  font-size: 10.5px; color: var(--fg-faint); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mt-rule-run {
+  grid-row: 3; grid-column: 1 / -1;
+  font-family: var(--mono); font-size: 9.5px; color: var(--fg-faint);
+}
+.mt-rule-run.stale { color: var(--warn); }
+
+/* The head of one rule: its name, then its own sentence, then the reading. */
+.mt-head { margin-bottom: 12px; }
+.mt-head-top { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.mt-head-top h3 { margin: 0; }
+.mt-badge {
+  font-family: var(--mono); font-size: 9.5px; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--hair-2); color: var(--fg-faint); white-space: nowrap;
+}
+.mt-badge-warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+
+/* The sentence is the rule, so it is set as a quotation rather than as one more
+   line of metadata under the title. */
+.mt-say-shown {
+  margin: 7px 0 9px; padding: 7px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: 12.5px; line-height: 1.6; color: var(--fg);
+}
+
+.mt-read {
+  display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 2px 10px;
+  font-size: 11.5px; line-height: 1.6;
+  padding: 8px 10px; border: 1px solid var(--hair); border-radius: 7px;
+  background: var(--hair);
+}
+.mt-read-row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; }
+.mt-read-k { color: var(--fg-faint); }
+.mt-read-v { color: var(--fg-dim); }
+.mt-read-warn .mt-read-v { color: var(--warn); }
+p.mt-read-warn { font-size: 11.5px; line-height: 1.6; margin: 8px 0 0; color: var(--warn); }
+.mt-last { margin: 7px 0 0; font-family: var(--mono); }
+
+/* The list. One row is a checkbox, a stack of text, and the buttons that act on
+   it, so the text column is the one allowed to be narrow. */
+.mt-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.mt-item {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 8px 9px; border-radius: 7px; border: 1px solid transparent;
+}
+.mt-item:hover { background: var(--hair); border-color: var(--hair); }
+.mt-item.me { border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); }
+.mt-item.done { opacity: .45; }
+.mt-item.done .mt-subject { text-decoration: line-through; }
+.mt-item.thin { border-left: 2px dashed var(--hair-2); }
+.mt-check { margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+.mt-body { flex: 1; min-width: 0; }
+.mt-top { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.mt-n { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); min-width: 14px; }
+.mt-me { font-size: 10px; color: var(--accent); white-space: nowrap; }
+.mt-att { font-size: 11px; color: var(--fg-faint); }
+.mt-subject {
+  flex: 1; min-width: 0; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+  font-size: 12.5px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mt-subject:hover { color: var(--accent); text-decoration: underline; }
+.mt-sum { margin: 3px 0 0; font-size: 11.5px; line-height: 1.55; color: var(--fg-dim); }
+/* Why this row is where it is. Quieter than the summary and marked off as the
+   machine's own voice, because it is an opinion about somebody else's message. */
+.mt-why {
+  margin: 3px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--fg-faint);
+  padding-left: 7px; border-left: 1px solid var(--hair-2);
+}
+.mt-meta { margin: 3px 0 0; font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+.mt-x {
+  flex: none; background: none; border: 0; cursor: pointer; font: inherit;
+  color: var(--fg-faint); padding: 0 3px; opacity: 0;
+}
+.mt-item:hover .mt-x { opacity: 1; }
+.mt-x:focus-visible { opacity: 1; }
+.mt-x:hover { color: var(--danger); }
+.mt-back { flex: none; }
+
+/* Set aside. Always on the screen when it holds anything, closed to begin with:
+   these are the rows a criterion rejected, and a criterion that is quietly wrong
+   is the main way this feature can waste somebody's week. */
+.mt-aside {
+  margin-top: 16px; border: 1px solid var(--hair); border-radius: 7px;
+  padding: 7px 10px; background: var(--glass);
+}
+.mt-aside > summary { cursor: pointer; font-size: 11.5px; color: var(--warn); }
+.mt-aside .mt-list { margin-top: 7px; }
+.mt-aside .mt-item { opacity: .82; }
+
+/* The first screen, and the form: one box, some examples, one button. */
+.mt-welcome { max-width: 560px; margin: 6px auto 0; text-align: center; }
+.mt-welcome h3 { margin: 0 0 6px; }
+.mt-welcome-go { margin-top: 12px; }
+.mt-form { max-width: 620px; }
+.mt-form h3 { margin: 0 0 6px; }
+.mt-say { width: 100%; margin-top: 9px; resize: vertical; font-size: 13px; line-height: 1.65; }
+.mt-egs { justify-content: flex-start; }
+.mt-welcome .mt-egs { justify-content: center; }
+.mt-egs-more { color: var(--fg-faint); }
+.mt-fold { margin-top: 12px; border-top: 1px solid var(--hair); padding-top: 9px; }
+.mt-fold > summary { cursor: pointer; font-size: 11.5px; color: var(--fg-faint); }
+.mt-fold > summary:hover { color: var(--fg-dim); }
+.mt-field { margin-top: 9px; }
+.mt-field .micro { margin-top: 2px; }
+.mt-label { display: block; font-size: 11px; color: var(--fg-dim); margin-bottom: 3px; }
+.mt-input { width: 100%; }
+.mt-check-row {
+  display: flex; align-items: center; gap: 6px; margin-top: 11px;
+  font-size: 11.5px; color: var(--fg-dim); cursor: pointer;
+}
+.mt-check-row input { accent-color: var(--accent); }
+.mt-hand { color: var(--warn); margin-top: 7px; }
+.mt-form-go { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; }
+.mt-form-note { margin-top: 7px; }
+
+/* The relaxation report: numbers meant to be compared down a column, so a fixed
+   pitch and the text laid out exactly as it was written. */
+.mt-report { max-width: 620px; }
+.mt-report h3 { margin: 0 0 8px; }
+.mt-report-body {
+  font-family: var(--mono); font-size: 11px; line-height: 1.75;
+  white-space: pre-wrap; margin: 0 0 12px;
+  padding: 10px 12px; border: 1px solid var(--hair); border-radius: 7px;
+  background: var(--hair); color: var(--fg-dim);
+}
