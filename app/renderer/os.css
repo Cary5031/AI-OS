@@ -4312,6 +4312,17 @@ select.ext-input { padding: 3px 22px 3px 7px; background-color: var(--hair); }
   grid-row: 3; grid-column: 1 / -1;
   font-family: var(--mono); font-size: 9.5px; color: var(--fg-faint);
 }
+/* Sits on top of the count rather than taking a column of its own: the rail is
+   236px and a fourth placed thing would squeeze the name. The count is what you
+   read; the ✕ is what you reach for, and only one of those is wanted at a time. */
+.mt-rule-x {
+  grid-row: 1; grid-column: 2;
+  justify-self: end; align-self: start;
+  padding: 1px 4px; line-height: 1.35;
+}
+.mt-rule:hover .mt-rule-n { opacity: 0; }
+.mt-rule:hover .mt-rule-x, .mt-rule-x:focus-visible { opacity: 1; }
+.mt-form-drop { margin-left: auto; }
 .mt-rule-run.stale { color: var(--warn); }
 
 /* The head of one rule: its name, then its own sentence, then the reading. */

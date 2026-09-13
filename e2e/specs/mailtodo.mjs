@@ -294,6 +294,80 @@ export async function spec(t, app) {
     assert.equal(wide, true, '但它要被標成「看最新的幾封」，不能假裝掃過整個信箱');
   });
 
+  await t.test('刪除規則是看得到的，不是只有右鍵才有', async () => {
+    /* The first person to try could not find it: deleting a rule lived only in
+       the rule row's context menu, so for anybody who does not think to
+       right-click a list item it did not exist. What this asserts is the part
+       that was actually missing -- that there is something to SEE and press --
+       not merely that removeRule works. */
+    const r = await run(cdp, via(`
+      var made = await window.aios.mailtodo.addRule({
+        name: 'e2e 要被刪掉的', from: 'delete-me.example', days: 7,
+        say: 'delete-me.example 的信', sayFor: AIOS.mailask.fingerprint('delete-me.example 的信')
+      });
+      out.push(made.ok);
+      await inst.ctx.api.reload();
+      await tick();
+
+      var row = qa('.mt-rule').filter(function (n) {
+        return n.textContent.indexOf('e2e 要被刪掉的') >= 0;
+      })[0];
+      out.push(!!row);
+      var x = row ? row.querySelector('.mt-rule-x') : null;
+      out.push(!!x);
+      /* Present in the markup is not the same as reachable: it has to be a real
+         target with a size, and it has to say what it does. */
+      var box = x ? x.getBoundingClientRect() : null;
+      out.push(box ? Math.round(box.width) > 0 && Math.round(box.height) > 0 : false);
+      out.push(x ? (x.getAttribute('aria-label') || '') : '');
+      out.push(x ? x.tabIndex : -1);
+
+      /* And it asks before it takes the ticked-off history with it. */
+      if (x) x.click();
+      for (var i = 0; i < 40 && !document.querySelector('.ui-prompt'); i++) await tick();
+      var ask = document.querySelector('.ui-prompt');
+      out.push(!!ask);
+      out.push(ask ? ask.textContent.slice(0, 120) : '');
+
+      var before = (await window.aios.mailtodo.state()).data.rules.length;
+      var cancel = ask ? [].slice.call(ask.querySelectorAll('.fbtn'))
+        .filter(function (b) { return b.textContent.indexOf('取消') >= 0; })[0] : null;
+      if (cancel) cancel.click();
+      await tick();
+      out.push((await window.aios.mailtodo.state()).data.rules.length === before);
+
+      /* Now actually delete it, so this spec leaves nothing behind. */
+      var row2 = qa('.mt-rule').filter(function (n) {
+        return n.textContent.indexOf('e2e 要被刪掉的') >= 0;
+      })[0];
+      if (row2) row2.querySelector('.mt-rule-x').click();
+      for (var j = 0; j < 40 && !document.querySelector('.ui-prompt'); j++) await tick();
+      var ask2 = document.querySelector('.ui-prompt');
+      var go = ask2 ? [].slice.call(ask2.querySelectorAll('.fbtn'))
+        .filter(function (b) { return b.textContent.indexOf('刪除') >= 0; })[0] : null;
+      if (go) go.click();
+      for (var k = 0; k < 60; k++) {
+        var st = await window.aios.mailtodo.state();
+        if (!st.data.rules.some(function (x2) { return x2.name === 'e2e 要被刪掉的'; })) break;
+        await tick();
+      }
+      var end = await window.aios.mailtodo.state();
+      out.push(end.data.rules.some(function (x2) { return x2.name === 'e2e 要被刪掉的'; }));
+    `));
+    assert.equal(r.error, undefined, r.error);
+    const [added, hasRow, hasX, sized, label, tab, asked, askText, keptOnCancel, stillThere] = r.out;
+    assert.equal(added, true, '測試用的規則沒有建起來');
+    assert.equal(hasRow, true, '左邊清單上找不到那條規則');
+    assert.equal(hasX, true, '規則列上要有一個看得到的刪除鈕，不能只有右鍵選單');
+    assert.equal(sized, true, '那個刪除鈕要真的佔得到位置，按得下去');
+    assert.match(label, /刪除/, '而且要說得出自己是做什麼的：' + label);
+    assert.equal(tab, 0, '鍵盤也要到得了');
+    assert.equal(asked, true, '刪規則會連它的待辦一起帶走，所以要先問');
+    assert.match(askText, /刪除規則/, '問句要指名是哪一條：' + askText);
+    assert.equal(keptOnCancel, true, '按取消就不該刪掉任何東西');
+    assert.equal(stillThere, false, '按確定之後那條規則要真的不見');
+  });
+
   await t.test('勾掉的不會因為再跑一次就回來', async () => {
     /* The tombstone lesson, at the level the store owns. Re-running is the
        repair loop for a sentence that came out wrong, so it has to update what

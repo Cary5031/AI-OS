@@ -381,6 +381,36 @@
         main.appendChild(box);
       }
 
+      /**
+       * Delete a rule, having asked first.
+       *
+       * It asks because a rule does not go alone: its items go with it, and what
+       * goes with those is the record of what had already been dealt with. Run
+       * the rule again afterwards and every message it still matches comes back
+       * as new work -- so this is not "remove a row", it is "forget that these
+       * were done", and the count in the question is what makes that visible.
+       */
+      async function removeRuleAsked(r) {
+        var c = state.counts[r.id] || { open: 0, done: 0, aside: 0 };
+        var mine = state.items.filter(function (i) { return i.ruleId === r.id; }).length;
+        var ok = await AIOS.confirm({
+          host: ctx.win && ctx.win.el,
+          label: '刪除規則「' + r.name + '」？',
+          note: (mine
+            ? '它的 ' + mine + ' 項待辦會一起消失' +
+              (c.done ? '（其中 ' + c.done + ' 項已經勾掉了——再跑一次，那幾封信會被當成新的工作重新出現）' : '') + '。'
+            : '這條規則還沒有待辦。') + ' 信件本身不會被動到。',
+          okLabel: '刪除',
+          danger: true
+        });
+        if (!ok) return;
+        var res = await A.mailtodo.removeRule(r.id);
+        if (!res.ok) { ctx.toast('刪不掉：' + res.error, 't-err'); return; }
+        if (pickedId === r.id) pickedId = null;
+        await load();
+        ctx.toast('已刪除「' + r.name + '」', 't-warn');
+      }
+
       function drawRules() {
         side.innerHTML = '';
         var add = el('button', 'fbtn mt-add', '＋ 追蹤新的東西');
@@ -406,6 +436,34 @@
           if (ASK.isStale(r)) foot2.push('句子改過了');
           row.appendChild(el('span', 'mt-rule-run' + (ASK.isStale(r) ? ' stale' : ''), foot2.join('　·　')));
           row.addEventListener('click', function () { pickedId = r.id; draw(); });
+          /* A visible way out. Deleting a rule used to live only in this row's
+             context menu, which means it did not exist for anybody who does not
+             think to right-click a list item -- and the first person to try
+             could not find it. The items in the main list have carried a hover
+             ✕ all along; a rule now carries the same one, in the same place, so
+             the gesture is learned once. */
+          /* A span and not a button, because the row it sits in is already a
+             button and a button inside a button is not something the browser
+             will lay out sensibly. The role and the key handler put back the two
+             things being a button would have given it. */
+          var kill = el('span', 'mt-x mt-rule-x', '✕');
+          kill.title = '刪除這條規則';
+          kill.setAttribute('role', 'button');
+          kill.setAttribute('aria-label', '刪除規則「' + r.name + '」');
+          kill.tabIndex = 0;
+          kill.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();   // the row itself selects; the ✕ must not
+            removeRuleAsked(r);
+          });
+          kill.addEventListener('keydown', function (ev) {
+            if (ev.key !== 'Enter' && ev.key !== ' ') return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            removeRuleAsked(r);
+          });
+          row.appendChild(kill);
+
           row.addEventListener('contextmenu', function (ev) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -413,12 +471,7 @@
               { label: '改這條規則', run: function () { pickedId = r.id; ruleForm(r); } },
               { label: r.enabled ? '暫停這條' : '恢復這條',
                 run: async function () { await A.mailtodo.updateRule(r.id, { enabled: !r.enabled }); await load(); } },
-              { label: '刪除規則（連同它的待辦）', danger: true, run: async function () {
-                await A.mailtodo.removeRule(r.id);
-                if (pickedId === r.id) pickedId = null;
-                await load();
-                ctx.toast('已刪除「' + r.name + '」', 't-warn');
-              } }
+              { label: '刪除這條規則…', danger: true, run: function () { removeRuleAsked(r); } }
             ]);
           });
           side.appendChild(row);
@@ -775,6 +828,15 @@
         cancel.type = 'button';
         cancel.addEventListener('click', function () { draw(); });
         row.appendChild(cancel);
+        /* The other place people look for it: they opened the rule to change it
+           and decided they want it gone instead. Pushed to the right and marked
+           danger, so it is findable without sitting next to 儲存. */
+        if (existing) {
+          var drop = el('button', 'fbtn fbtn-danger mt-form-drop', '刪除這條規則…');
+          drop.type = 'button';
+          drop.addEventListener('click', function () { removeRuleAsked(existing); });
+          row.appendChild(drop);
+        }
         form.appendChild(row);
 
         var status = el('p', 'micro mt-form-note');
@@ -1600,6 +1662,8 @@
           items.push({ label: '執行「' + r.name + '」', run: function () { btnRun.click(); } });
           items.push({ label: '改這條規則', run: function () { ruleForm(r); } });
           items.push({ label: '為什麼只找到這些？', run: function () { btnWhy.click(); } });
+          items.push({ label: '刪除「' + r.name + '」…', danger: true,
+            run: function () { removeRuleAsked(r); } });
         }
         items.push({ label: '追蹤新的東西', run: function () { ruleForm(null); } });
         if (state.items.some(function (x) { return x.done; })) {
