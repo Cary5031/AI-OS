@@ -375,6 +375,9 @@ contextBridge.exposeInMainWorld('aios', {
     writeXlsx: (path, sheetName, cells, meta) => invoke('office:writeXlsx', { path, sheetName, cells, meta }),
     /* Pictures must already be data: URIs; the caller resolves them. */
     writePptx: (path, deck) => invoke('office:writePptx', { path, deck }),
+    /* One way. What comes back is a deck with no file behind it, because the
+       .pptx is never written over -- see office.js's reading header. */
+    readPptx: (path) => invoke('office:readPptx', { path }),
     /* Render assembled HTML to PDF. The HTML is served to an offscreen window with
        scripting disabled, so it gets measured and paged, never executed. */
     writePdf: (path, html, opts) => invoke('office:writePdf', { path, html, opts }),

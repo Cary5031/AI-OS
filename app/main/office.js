@@ -1837,9 +1837,16 @@ function tableXml(id, o, font) {
   const spanAt = new Map();
   const coveredBy = new Map();
   (o.merges || []).forEach((m) => {
-    const c0 = m.c, r0 = m.r, c1 = m.c + m.w - 1, r1 = m.r + m.h - 1;
+    /* `{c0, r0, c1, r1}`, inclusive -- the shape AIOS.grid normalises every
+       merge list to, and the one the deck is saved in. This read `{c, r, w, h}`
+       for as long as it took to write a reader that had to agree with it: every
+       field came back undefined, `span.w > 1` was false, and a merged heading
+       exported to PowerPoint as three separate cells. The table still opened,
+       which is why nobody saw it. */
+    const c0 = m.c0, r0 = m.r0, c1 = m.c1, r1 = m.r1;
+    if (![c0, r0, c1, r1].every(Number.isFinite)) return;
     if (r1 >= rows.length || c1 >= cols) return;
-    spanAt.set(r0 + ',' + c0, { w: m.w, h: m.h });
+    spanAt.set(r0 + ',' + c0, { w: c1 - c0 + 1, h: r1 - r0 + 1 });
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
         if (r === r0 && c === c0) continue;
@@ -2347,6 +2354,885 @@ function writePptx(deck = {}) {
 }
 
 /* ###########################################################################
+   pptx -- reading
+   ---------------------------------------------------------------------------
+   One way. A deck read here becomes a new .aiosdeck and the .pptx is never
+   written back to, which is the only reason this can exist at all: the parts of
+   the format this does not model -- masters, layouts, themes, animations,
+   transitions -- are exactly the parts a corporate template consists of, and a
+   round trip would destroy them while still producing a file that opens. That
+   is the rule the PDF rewriter already works under: another file, original
+   untouched.
+
+   Two things make a slide look the way it looks, and only one of them is in the
+   slide:
+
+       slide  ->  slideLayout  ->  slideMaster  ->  theme
+
+   A placeholder shape can carry no geometry and no run properties at all; both
+   are inherited. The matching rules are not symmetric, and that asymmetry is
+   the part implementations get wrong: a slide placeholder inherits from the
+   layout placeholder with the same `idx` (an absent idx is 0, which is the
+   title), while a layout placeholder inherits from the master placeholder with
+   the same `type`.
+
+   Text properties come down a longer chain, and the level is matched exactly --
+   a style that defines only lvl1pPr contributes nothing to a level-3 paragraph,
+   and falling back to level one would give every deep bullet the size of the
+   first:
+
+       run rPr -> paragraph defRPr -> shape lstStyle -> layout ph lstStyle
+               -> master ph lstStyle -> master txStyles -> defaultTextStyle
+
+   Skipping the lstStyle layers is the cheap mistake, and it does not fail: the
+   file opens and the title renders at the master's generic default instead of
+   the layout's declared one -- a different size in a different colour, with no
+   error anywhere.
+
+   What this deliberately does not do is reconstruct structure. Every shape
+   lands on the `blank` layout as a positioned object, because the seven named
+   layouts here are this editor's and not theirs: mapping a template's twenty
+   layouts onto them would move text the file placed on purpose. What could not
+   be carried is reported per slide, never dropped quietly.
+   ######################################################################### */
+
+/**
+ * Top-level elements with one of these names, in document order.
+ *
+ * Depth is counted over every element, not only the wanted ones: a `p:sp`
+ * inside a `p:grpSp` belongs to that group and must not also be collected here,
+ * or every grouped shape would be emitted twice.
+ */
+function elements(xml, names) {
+  const want = new Set(names);
+  const out = [];
+  const re = /<(\/?)([A-Za-z0-9]+:[A-Za-z0-9]+)\b([^>]*)>/g;
+  let m, depth = 0, start = -1, tag = '';
+  while ((m = re.exec(xml))) {
+    const closing = m[1] === '/';
+    const selfClose = /\/\s*$/.test(m[3]);
+    const name = m[2];
+    if (closing) {
+      depth--;
+      if (start >= 0 && depth === 0 && name === tag) {
+        out.push({ name: tag, xml: xml.slice(start, m.index + m[0].length) });
+        start = -1;
+      }
+      continue;
+    }
+    if (selfClose) {
+      if (start < 0 && depth === 0 && want.has(name)) out.push({ name, xml: m[0] });
+      continue;
+    }
+    if (start < 0 && depth === 0 && want.has(name)) { start = m.index; tag = name; }
+    depth++;
+  }
+  return out;
+}
+
+function openTagOf(el) {
+  const m = /^<[^>]*>/.exec(String(el || ''));
+  return m ? m[0] : '';
+}
+
+function attrOf(tag, name) {
+  const m = new RegExp('[\\s<]' + name + '="([^"]*)"').exec(String(tag || ''));
+  return m ? m[1] : null;
+}
+
+function innerOf(el) {
+  const open = openTagOf(el);
+  if (!open || /\/>$/.test(open)) return '';
+  const close = String(el).lastIndexOf('</');
+  return close > open.length ? String(el).slice(open.length, close) : '';
+}
+
+/** The first element with this name at any depth, whole. */
+function findEl(xml, name) {
+  const safe = name.replace(':', '\\:');
+  const open = new RegExp('<' + safe + '\\b[^>]*>').exec(String(xml || ''));
+  if (!open) return null;
+  if (/\/>$/.test(open[0])) return open[0];
+  const scan = new RegExp('<(\\/?)' + safe + '\\b[^>]*>', 'g');
+  scan.lastIndex = open.index + open[0].length;
+  let depth = 1, m;
+  while ((m = scan.exec(xml))) {
+    if (/\/>$/.test(m[0])) continue;
+    if (m[1] === '/') { if (--depth === 0) return xml.slice(open.index, m.index + m[0].length); }
+    else depth++;
+  }
+  return null;
+}
+
+function childrenOf(el, names) { return elements(innerOf(el), names); }
+
+function withoutEl(xml, name) {
+  const el = findEl(xml, name);
+  return el ? String(xml).replace(el, '') : String(xml || '');
+}
+
+/* ------------------------------------------------------------------ colour */
+
+const SCHEME_SLOTS = ['dk1', 'lt1', 'dk2', 'lt2', 'accent1', 'accent2',
+  'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+
+function themeColours(themeXml) {
+  const out = {};
+  const scheme = findEl(themeXml || '', 'a:clrScheme');
+  if (!scheme) return out;
+  SCHEME_SLOTS.forEach((slot) => {
+    const el = findEl(scheme, 'a:' + slot);
+    if (!el) return;
+    const srgb = /<a:srgbClr\b[^>]*val="([0-9A-Fa-f]{6})"/.exec(el);
+    const sys = /<a:sysClr\b[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(el);
+    const hex = (srgb && srgb[1]) || (sys && sys[1]);
+    if (hex) out[slot] = hex.toUpperCase();
+  });
+  return out;
+}
+
+/** A master's `<p:clrMap>`: slide-level names (bg1, tx1 …) to theme slots. */
+function colourMap(masterXml) {
+  const out = {};
+  const m = /<p:clrMap\b[^>]*>/.exec(String(masterXml || ''));
+  if (!m) return out;
+  ['bg1', 'tx1', 'bg2', 'tx2', 'accent1', 'accent2', 'accent3', 'accent4',
+    'accent5', 'accent6', 'hlink', 'folHlink'].forEach((k) => {
+    const v = attrOf(m[0], k);
+    if (v) out[k] = v;
+  });
+  return out;
+}
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return [h, s, l];
+}
+
+function hslToRgb(h, s, l) {
+  if (!s) { const v = l * 255; return [v, v, v]; }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const at = (t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [at(h + 1 / 3) * 255, at(h) * 255, at(h - 1 / 3) * 255];
+}
+
+/**
+ * The transforms a theme colour almost always arrives with.
+ *
+ * A corporate theme rarely references `accent1` bare: the colour picker writes
+ * `accent1` plus `lumMod` / `lumOff`, which is how one accent becomes the five
+ * lighter and darker swatches in the row beneath it. Ignoring them is not a
+ * rounding error -- it collapses all six back onto the same saturated base.
+ */
+function applyColourMods(hex, xml) {
+  let r = parseInt(hex.slice(0, 2), 16);
+  let g = parseInt(hex.slice(2, 4), 16);
+  let b = parseInt(hex.slice(4, 6), 16);
+  const pct = (tag) => {
+    const m = new RegExp('<a:' + tag + '\\b[^>]*val="(-?\\d+)"').exec(String(xml || ''));
+    return m ? Number(m[1]) / 100000 : null;
+  };
+  const tint = pct('tint'), shade = pct('shade');
+  const lumMod = pct('lumMod'), lumOff = pct('lumOff');
+  if (tint !== null) {
+    r = r * tint + 255 * (1 - tint);
+    g = g * tint + 255 * (1 - tint);
+    b = b * tint + 255 * (1 - tint);
+  }
+  if (shade !== null) { r *= shade; g *= shade; b *= shade; }
+  if (lumMod !== null || lumOff !== null) {
+    const hsl = rgbToHsl(r, g, b);
+    let l = hsl[2];
+    if (lumMod !== null) l *= lumMod;
+    if (lumOff !== null) l += lumOff;
+    const back = hslToRgb(hsl[0], hsl[1], Math.max(0, Math.min(1, l)));
+    r = back[0]; g = back[1]; b = back[2];
+  }
+  const h2 = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16)
+    .padStart(2, '0').toUpperCase();
+  return h2(r) + h2(g) + h2(b);
+}
+
+/** The colour inside a fill-ish fragment, through the colour map and theme. */
+function colourIn(fragment, ctx) {
+  const srgb = findEl(fragment, 'a:srgbClr');
+  if (srgb) {
+    const v = attrOf(openTagOf(srgb), 'val');
+    return v && /^[0-9A-Fa-f]{6}$/.test(v) ? applyColourMods(v.toUpperCase(), srgb) : null;
+  }
+  const sch = findEl(fragment, 'a:schemeClr');
+  if (sch) {
+    const v = attrOf(openTagOf(sch), 'val');
+    /* `phClr` means "whatever colour the style was asked for" and only has a
+       value inside a theme's style matrix. Nothing here can resolve it. */
+    if (!v || v === 'phClr') return null;
+    const base = ctx.theme[ctx.clrMap[v] || v];
+    return base ? applyColourMods(base, sch) : null;
+  }
+  return null;
+}
+
+function solidColourOf(xml, ctx) {
+  const fill = findEl(xml || '', 'a:solidFill');
+  return fill ? colourIn(fill, ctx) : null;
+}
+
+/* ------------------------------------------------------------------- parts */
+
+/** A part's relationships: rId -> {path, type}, targets already resolved. */
+function relsFor(files, partPath) {
+  const out = new Map();
+  const cut = partPath.lastIndexOf('/');
+  const dir = partPath.slice(0, cut + 1);
+  const name = partPath.slice(cut + 1);
+  const buf = files.get(dir + '_rels/' + name + '.rels');
+  if (!buf) return out;
+  const xml = buf.toString('utf8');
+  const re = /<Relationship\b[^>]*\/?>/g;
+  let m;
+  while ((m = re.exec(xml))) {
+    const id = attrOf(m[0], 'Id');
+    const target = attrOf(m[0], 'Target');
+    const type = attrOf(m[0], 'Type') || '';
+    // An external target is a URL, not a part; there are no bytes to read.
+    if (!id || !target || attrOf(m[0], 'TargetMode') === 'External') continue;
+    out.set(id, { path: resolvePart(dir, target), type: type.split('/').pop() });
+  }
+  return out;
+}
+
+function firstRelOfType(rels, type) {
+  for (const v of rels.values()) if (v.type === type) return v.path;
+  return null;
+}
+
+/** A part's placeholders, indexed both ways: slides match on idx, layouts on type. */
+function placeholderIndex(partXml) {
+  const byIdx = new Map(), byType = new Map();
+  const tree = findEl(partXml || '', 'p:spTree');
+  if (!tree) return { byIdx, byType };
+  childrenOf(tree, ['p:sp']).forEach((e) => {
+    const ph = phOf(e.xml);
+    if (!ph) return;
+    if (!byIdx.has(ph.idx)) byIdx.set(ph.idx, e.xml);
+    if (!byType.has(ph.type)) byType.set(ph.type, e.xml);
+  });
+  return { byIdx, byType };
+}
+
+/** `{type, idx}` of a shape's placeholder, or null. Absent idx is 0: the title. */
+function phOf(shapeXml) {
+  const nv = findEl(shapeXml, 'p:nvSpPr') || findEl(shapeXml, 'p:nvPicPr')
+    || findEl(shapeXml, 'p:nvGraphicFramePr');
+  const tag = nv && /<p:ph\b[^>]*\/?>/.exec(nv);
+  if (!tag) return null;
+  return { type: attrOf(tag[0], 'type') || 'body', idx: attrOf(tag[0], 'idx') || '0' };
+}
+
+/** A shape's own box in EMU, plus the child space if it is a group. */
+function xfrmIn(xml) {
+  const x = findEl(xml || '', 'a:xfrm') || findEl(xml || '', 'p:xfrm');
+  if (!x) return null;
+  const off = /<a:off\b[^>]*>/.exec(x);
+  const ext = /<a:ext\b[^>]*>/.exec(x);
+  if (!off || !ext) return null;
+  const n = (tag, a) => Number(attrOf(tag, a));
+  const box = { x: n(off[0], 'x'), y: n(off[0], 'y'), cx: n(ext[0], 'cx'), cy: n(ext[0], 'cy') };
+  if (![box.x, box.y, box.cx, box.cy].every(Number.isFinite)) return null;
+  box.rot = Number(attrOf(openTagOf(x), 'rot') || 0);
+  const cOff = /<a:chOff\b[^>]*>/.exec(x);
+  const cExt = /<a:chExt\b[^>]*>/.exec(x);
+  if (cOff && cExt) {
+    box.child = {
+      x: n(cOff[0], 'x'), y: n(cOff[0], 'y'), cx: n(cExt[0], 'cx'), cy: n(cExt[0], 'cy')
+    };
+  }
+  return box;
+}
+
+/**
+ * A child box out of a group's own coordinate space and into its parent's.
+ *
+ * A group states its place in the parent (`off`/`ext`) and, separately, the
+ * coordinate system its children were authored in (`chOff`/`chExt`). Those two
+ * are frequently not the same size -- resizing a group changes the first and
+ * leaves the second -- so ignoring the pair puts every grouped shape at its
+ * pre-resize position, which for a scaled-down group means somewhere off the
+ * slide entirely.
+ */
+function mapThrough(group, box) {
+  if (!group || !group.child || !group.child.cx || !group.child.cy) return box;
+  const sx = group.cx / group.child.cx;
+  const sy = group.cy / group.child.cy;
+  return {
+    x: group.x + (box.x - group.child.x) * sx,
+    y: group.y + (box.y - group.child.y) * sy,
+    cx: box.cx * sx, cy: box.cy * sy, rot: box.rot
+  };
+}
+
+/* -------------------------------------------------------------------- text */
+
+const ALIGN_BACK = { l: 'left', ctr: 'center', r: 'right', just: 'left', dist: 'left' };
+const VALIGN_BACK = { t: 'top', ctr: 'middle', b: 'bottom' };
+
+/** What an `<a:rPr>` / `<a:defRPr>` says, with absent meaning "inherit". */
+function runProps(rPrXml, ctx) {
+  const out = {};
+  if (!rPrXml) return out;
+  const tag = openTagOf(rPrXml);
+  const size = attrOf(tag, 'sz');
+  if (size) out.size = Number(size) / 100;
+  const bold = attrOf(tag, 'b');
+  if (bold !== null) out.bold = bold === '1' || bold === 'true';
+  const italic = attrOf(tag, 'i');
+  if (italic !== null) out.italic = italic === '1' || italic === 'true';
+
+  /* `tx1` means "the body text colour of this theme", not "black".
+     Resolving it to a literal is right for a fill and wrong for text: the
+     background it was chosen against is the slide's, and slide backgrounds do
+     not come across. Pinning 000000 onto every imported run puts black text on
+     this editor's dark canvas -- readable in the file, invisible here. So a
+     bare reference to a text slot is left unset and picks up the host's ink; a
+     shaded one (lumMod and friends) was somebody's choice and is kept. */
+  const fill = findEl(rPrXml, 'a:solidFill');
+  if (fill) {
+    const scheme = findEl(fill, 'a:schemeClr');
+    const slot = scheme && attrOf(openTagOf(scheme), 'val');
+    const shaded = scheme && /<a:(lumMod|lumOff|tint|shade|satMod|alpha)\b/.test(scheme);
+    if (!(slot && !shaded && (slot === 'tx1' || slot === 'tx2'))) {
+      const colour = colourIn(fill, ctx);
+      if (colour) out.colour = colour;
+    }
+  }
+  const face = /<a:latin\b[^>]*typeface="([^"]*)"/.exec(rPrXml);
+  // `+mn-lt` and `+mj-lt` name the theme's fonts rather than a family.
+  if (face && face[1] && face[1][0] !== '+') out.font = face[1];
+  return out;
+}
+
+/**
+ * One level out of a `lstStyle`-shaped fragment.
+ *
+ * Indexed by level with no fallback to level one. That is what PowerPoint does,
+ * and a fallback is worse than nothing here: a master whose bodyStyle defines
+ * only `lvl1pPr` would hand its 32pt to every third-level bullet in the deck.
+ */
+function levelProps(lstStyleXml, level, ctx) {
+  if (!lstStyleXml) return {};
+  const el = findEl(lstStyleXml, 'a:lvl' + (level + 1) + 'pPr');
+  if (!el) return {};
+  const out = runProps(findEl(el, 'a:defRPr'), ctx);
+  const algn = attrOf(openTagOf(el), 'algn');
+  if (algn && ALIGN_BACK[algn]) out.align = ALIGN_BACK[algn];
+  return out;
+}
+
+/** The chain, nearest first. The first layer to state a property wins it. */
+function inheritedProps(chain, level, ctx) {
+  const out = {};
+  [chain.shape, chain.layout, chain.master, chain.txStyle, chain.fallback].forEach((layer) => {
+    const props = levelProps(layer, level, ctx);
+    Object.keys(props).forEach((k) => {
+      if (out[k] === undefined && props[k] !== undefined) out[k] = props[k];
+    });
+  });
+  return out;
+}
+
+/**
+ * Which of the master's three text styles applies to a placeholder type.
+ *
+ * These three are in the presentationml namespace while everything inside them
+ * is drawingml -- `<p:bodyStyle><a:lvl1pPr>`. Asking for `a:bodyStyle` finds
+ * nothing, silently, and every placeholder that relies on the master rather
+ * than on its layout comes back with no size at all.
+ */
+function txStyleFor(masterXml, phType) {
+  const styles = findEl(masterXml || '', 'p:txStyles');
+  if (!styles) return null;
+  if (phType === 'title' || phType === 'ctrTitle') return findEl(styles, 'p:titleStyle');
+  if (phType === 'body' || phType === 'subTitle' || phType === 'obj') return findEl(styles, 'p:bodyStyle');
+  return findEl(styles, 'p:otherStyle');
+}
+
+function paraText(pXml) {
+  let s = '';
+  elements(innerOf(pXml), ['a:r', 'a:br', 'a:fld']).forEach((n) => {
+    if (n.name === 'a:br') { s += '\n'; return; }
+    const t = findEl(n.xml, 'a:t');
+    if (t) s += unesc(innerOf(t));
+  });
+  return s;
+}
+
+/**
+ * A `<p:txBody>` as this editor's model sees it: one string, and one set of
+ * character properties for the whole box.
+ *
+ * That is a real narrowing and it is reported rather than hidden. The object
+ * model has no runs -- `bold` belongs to the object, not to a span of
+ * characters -- so a box whose runs disagree keeps the first run's answer and
+ * says which box it was.
+ */
+const CHAR_KEYS = ['bold', 'italic', 'size', 'colour'];
+
+function disagree(a, b) {
+  return CHAR_KEYS.some((k) => a[k] !== undefined && b[k] !== undefined && a[k] !== b[k]);
+}
+
+function readTextBody(txXml, ctx, chain) {
+  const lines = [];
+  let props = null;
+  /* Two different losses, reported as two different sentences. Runs inside one
+     paragraph disagreeing is somebody having bolded three words -- something
+     this model has no place for. Paragraphs at different outline levels
+     disagreeing is just an outline, which every bulleted slide has; saying
+     "mixed formatting" about that would put a warning on almost every slide
+     and teach the reader to skip all of them. */
+  let mixedRuns = false;
+  let mixedLevels = false;
+
+  childrenOf(txXml, ['a:p']).forEach((p) => {
+    const pPr = findEl(p.xml, 'a:pPr');
+    const level = Number(attrOf(openTagOf(pPr || ''), 'lvl') || 0);
+    const inherited = inheritedProps(chain, level, ctx);
+    const fromPara = runProps(findEl(pPr || '', 'a:defRPr'), ctx);
+    const algn = attrOf(openTagOf(pPr || ''), 'algn');
+
+    const runs = elements(innerOf(p.xml), ['a:r']);
+    const resolved = runs.map((r) => Object.assign({}, inherited, fromPara,
+      runProps(findEl(r.xml, 'a:rPr'), ctx)));
+    resolved.slice(1).forEach((r) => { if (disagree(resolved[0], r)) mixedRuns = true; });
+
+    const here = Object.assign({}, inherited, fromPara, resolved[0] || {});
+    if (algn && ALIGN_BACK[algn]) here.align = ALIGN_BACK[algn];
+
+    lines.push(paraText(p.xml));
+    if (runs.length) {
+      if (!props) props = here;
+      else if (disagree(props, here)) mixedLevels = true;
+    }
+  });
+
+  // Trailing empty paragraphs are the box being taller than its text, not blank
+  // lines someone typed; leading ones usually are, so only the tail is trimmed.
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return { text: lines.join('\n'), props: Object.assign({}, props || {}), mixedRuns, mixedLevels };
+}
+
+/**
+ * Where the text sits in its box, down the same chain as everything else.
+ *
+ * `bodyPr` inherits too, and forgetting that is visible rather than subtle: a
+ * title anchored to the bottom of a tall box -- which is how most templates set
+ * one -- comes back sitting at the top, so every title in the deck moves.
+ */
+function anchorAlong(shapes) {
+  for (const x of shapes) {
+    if (!x) continue;
+    const body = findEl(x, 'p:txBody');
+    const a = attrOf(openTagOf(findEl(body || '', 'a:bodyPr') || ''), 'anchor');
+    if (a && VALIGN_BACK[a]) return VALIGN_BACK[a];
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------- the objects */
+
+/** PowerPoint's preset geometries back to the editor's gallery ids. */
+const SHAPE_BACK = {
+  rect: 'rect', roundRect: 'round', ellipse: 'ellipse', triangle: 'triangle',
+  rtTriangle: 'rtri', diamond: 'diamond', pentagon: 'pentagon', hexagon: 'hexagon',
+  star5: 'star', mathPlus: 'plus', parallelogram: 'para', trapezoid: 'trapezoid',
+  rightArrow: 'arrowR', leftArrow: 'arrowL', upArrow: 'arrowU', downArrow: 'arrowD',
+  chevron: 'chevron', wedgeRectCallout: 'callout'
+};
+
+const PIC_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp'
+};
+
+const MAX_PICTURE_BYTES = 4 * 1024 * 1024;
+const MAX_PICTURE_TOTAL = 20 * 1024 * 1024;
+const MAX_SLIDES = 300;
+const MAX_OBJECTS = 60;
+
+/** An `<a:tbl>` as the editor's table object. */
+function readTableFrame(frameXml, ctx) {
+  const tbl = findEl(frameXml, 'a:tbl');
+  if (!tbl) return null;
+  const rows = [];
+  const merges = [];
+  childrenOf(tbl, ['a:tr']).forEach((tr, r) => {
+    const cells = [];
+    childrenOf(tr.xml, ['a:tc']).forEach((tc, c) => {
+      const tag = openTagOf(tc.xml);
+      const span = Number(attrOf(tag, 'gridSpan') || 1);
+      const down = Number(attrOf(tag, 'rowSpan') || 1);
+      /* Unlike a Word table, every covered cell is present here and flagged,
+         so the column index is simply the position -- no bookkeeping needed to
+         work out which column a cell landed in. */
+      const covered = attrOf(tag, 'hMerge') === '1' || attrOf(tag, 'vMerge') === '1';
+      if (!covered && (span > 1 || down > 1)) {
+        merges.push({ c0: c, r0: r, c1: c + span - 1, r1: r + down - 1 });
+      }
+      const body = findEl(tc.xml, 'a:txBody');
+      const text = covered ? '' : childrenOf(body || '', ['a:p']).map((p) => paraText(p.xml)).join('\n');
+      cells.push(text);
+    });
+    rows.push(cells);
+  });
+  if (!rows.length) return null;
+  const wide = rows.reduce((n, row) => Math.max(n, row.length), 0);
+  rows.forEach((row) => { while (row.length < wide) row.push(''); });
+
+  const pr = openTagOf(findEl(tbl, 'a:tblPr') || '');
+  const first = childrenOf(tbl, ['a:tr'])[0];
+  const headerFill = first
+    ? solidColourOf(findEl(first.xml, 'a:tcPr') || '', ctx) : null;
+  const out = {
+    kind: 'table', rows,
+    header: attrOf(pr, 'firstRow') === '1',
+    banded: attrOf(pr, 'bandRow') === '1'
+  };
+  if (headerFill) out.fill = headerFill;
+  if (merges.length) out.merges = merges;
+  /* One size for the table, taken from a body cell rather than the first one:
+     the heading row is usually a size of its own, and using it would blow up
+     every other row to match. */
+  const body = childrenOf(tbl, ['a:tr'])[out.header ? 1 : 0];
+  const cell = body && childrenOf(body.xml, ['a:tc'])[0];
+  const size = cell && runProps(findEl(findEl(cell.xml, 'a:txBody') || '', 'a:rPr'), ctx).size;
+  if (size) out.size = size;
+  return out;
+}
+
+/**
+ * A deck out of a .pptx.
+ *
+ * Returns `{title, font, slides, warnings, size}` in the editor's own save
+ * shape, so the window opens it the way it opens an .aiosdeck. The caller is
+ * expected to treat it as a new, untitled document: see the header above for
+ * why writing back is not offered.
+ */
+function readPptx(buffer, opts = {}) {
+  const files = zip.read(buffer);
+  const presPart = files.get('ppt/presentation.xml');
+  if (!presPart) throw new Error('這不是 .pptx（找不到 ppt/presentation.xml）');
+  const presXml = presPart.toString('utf8');
+
+  const bag = new Map();
+  const warn = (slide, msg) => {
+    if (!bag.has(msg)) bag.set(msg, new Set());
+    bag.get(msg).add(slide);
+  };
+
+  const szTag = /<p:sldSz\b[^>]*>/.exec(presXml);
+  const W = Number(szTag && attrOf(szTag[0], 'cx')) || EMU_W;
+  const H = Number(szTag && attrOf(szTag[0], 'cy')) || EMU_H;
+  /* Percentages of this file's own slide, not of a 16:9 one. A 4:3 deck keeps
+     its relative layout that way; what it cannot keep is its shape, because the
+     canvas here is always 16:9 -- so that is said out loud rather than left for
+     someone to notice as "everything looks stretched". */
+  if (Math.abs(W / H - 16 / 9) > 0.02) {
+    warn(0, '這份簡報不是 16:9（原本是 ' + (W / H).toFixed(2) +
+      ':1），版面已依比例換算到 16:9 的投影片上');
+  }
+
+  const presRels = relsFor(files, 'ppt/presentation.xml');
+  const defaultStyle = findEl(presXml, 'p:defaultTextStyle');
+
+  const order = [];
+  const idRe = /<p:sldId\b[^>]*>/g;
+  let im;
+  while ((im = idRe.exec(presXml))) {
+    const rid = attrOf(im[0], 'r:id');
+    const rel = rid && presRels.get(rid);
+    if (rel) order.push(rel.path);
+  }
+  if (!order.length) throw new Error('這份 .pptx 裡沒有投影片');
+  if (order.length > MAX_SLIDES) {
+    warn(0, '只讀了前 ' + MAX_SLIDES + ' 頁（這份有 ' + order.length + ' 頁）');
+    order.length = MAX_SLIDES;
+  }
+
+  const partCache = new Map();
+  const text = (p) => {
+    if (!p) return '';
+    if (!partCache.has(p)) {
+      const b = files.get(p);
+      partCache.set(p, b ? b.toString('utf8') : '');
+    }
+    return partCache.get(p);
+  };
+
+  let deckFont = '';
+  let pictureBytes = 0;
+  const slides = [];
+
+  order.forEach((slidePath, si) => {
+    const n = si + 1;
+    const slideXml = text(slidePath);
+    if (!slideXml) { warn(n, '這一頁的內容讀不到，已跳過'); return; }
+    const rels = relsFor(files, slidePath);
+
+    const layoutPath = firstRelOfType(rels, 'slideLayout');
+    const layoutXml = text(layoutPath);
+    const layoutRels = layoutPath ? relsFor(files, layoutPath) : new Map();
+    const masterPath = firstRelOfType(layoutRels, 'slideMaster');
+    const masterXml = text(masterPath);
+    const masterRels = masterPath ? relsFor(files, masterPath) : new Map();
+    const themeXml = text(firstRelOfType(masterRels, 'theme'));
+
+    const ctx = { theme: themeColours(themeXml), clrMap: colourMap(masterXml) };
+    if (!deckFont) {
+      const minor = /<a:minorFont>[\s\S]*?<a:latin\b[^>]*typeface="([^"]*)"/.exec(themeXml || '');
+      if (minor && minor[1] && minor[1][0] !== '+') deckFont = minor[1];
+    }
+
+    const layoutPh = placeholderIndex(layoutXml);
+    const masterPh = placeholderIndex(masterXml);
+
+    /* The master too, and that is where it almost always is: an Office deck
+       puts its white background on the master and never mentions it again.
+       Checking only the slide and the layout misses every real file, and what
+       it misses is the one visual surprise an import actually produces --
+       text picked to read on white, arriving on this editor's dark canvas. So
+       the message says what to do about it rather than just naming the loss. */
+    if (findEl(slideXml, 'p:bg') || findEl(layoutXml, 'p:bg') || findEl(masterXml, 'p:bg')) {
+      warn(n, '背景底色與底圖沒有帶過來。原本配著白底挑的深色文字，' +
+        '在深色主題下會不好讀——換一個淺色主題（主題 → 紙張）就看得跟原本一樣');
+    }
+    if (findEl(slideXml, 'p:transition')) warn(n, '換頁特效沒有帶過來');
+    if (/<p:childTnLst>/.test(slideXml)) warn(n, '動畫沒有帶過來');
+
+    const objects = [];
+    let slideTitle = '';
+
+    const emit = (obj, box) => {
+      if (objects.length >= MAX_OBJECTS) { warn(n, '物件太多，只留了前 ' + MAX_OBJECTS + ' 個'); return; }
+      const round = (v) => Math.round(v * 100) / 100;
+      objects.push(Object.assign(obj, {
+        x: round(box.x / W * 100), y: round(box.y / H * 100),
+        w: round(box.cx / W * 100), h: round(box.cy / H * 100)
+      }));
+    };
+
+    const walk = (containerXml, toSlide) => {
+      elements(containerXml, ['p:sp', 'p:pic', 'p:graphicFrame', 'p:grpSp', 'mc:AlternateContent'])
+        .forEach((e) => {
+          if (e.name === 'mc:AlternateContent') {
+            /* SmartArt and anything else a newer PowerPoint wrapped: the
+               Fallback is a plain drawing of the same thing, put there for
+               readers that do not know the extension. Taking it is how this
+               gets the shapes instead of a blank space. */
+            const fb = findEl(e.xml, 'mc:Fallback');
+            if (fb) { warn(n, '有一個特殊物件（多半是 SmartArt），改用檔案自帶的圖形版本'); walk(innerOf(fb), toSlide); }
+            else warn(n, '有一個這個版本的 PowerPoint 才認得的物件，沒有帶過來');
+            return;
+          }
+
+          if (e.name === 'p:grpSp') {
+            const g = xfrmIn(e.xml);
+            if (!g) { warn(n, '有一個群組沒有座標，已跳過'); return; }
+            warn(n, '群組已攤平成個別物件');
+            walk(innerOf(e.xml), (b) => toSlide(mapThrough(g, b)));
+            return;
+          }
+
+          const ph = phOf(e.xml);
+          const layoutSp = ph ? (layoutPh.byIdx.get(ph.idx) || layoutPh.byType.get(ph.type)) : null;
+          const masterSp = ph ? masterPh.byType.get(ph.type) : null;
+          const own = xfrmIn(e.xml);
+          const box = own || (layoutSp && xfrmIn(layoutSp)) || (masterSp && xfrmIn(masterSp));
+          if (!box || !box.cx || !box.cy) {
+            warn(n, '有一個物件在檔案裡沒有位置也繼承不到，已跳過');
+            return;
+          }
+          if (box.rot) warn(n, '有物件是轉過角度的，這裡放正了');
+          const at = toSlide(box);
+
+          if (e.name === 'p:pic') {
+            const rid = (/<a:blip\b[^>]*r:embed="(rId\d+)"/.exec(e.xml) || [])[1];
+            const rel = rid && rels.get(rid);
+            const bytes = rel && files.get(rel.path);
+            const ext = rel ? (rel.path.split('.').pop() || '').toLowerCase() : '';
+            if (!bytes) { warn(n, '有一張圖片在檔案裡找不到'); return; }
+            if (!PIC_MIME[ext]) { warn(n, '有一張 ' + (ext || '未知') + ' 圖片這裡放不了（向量圖與舊的 Windows 中繼檔不收）'); return; }
+            if (bytes.length > MAX_PICTURE_BYTES || pictureBytes + bytes.length > MAX_PICTURE_TOTAL) {
+              warn(n, '有圖片太大，沒有帶過來');
+              return;
+            }
+            pictureBytes += bytes.length;
+            if (findEl(e.xml, 'a:srcRect')) warn(n, '有圖片原本是裁切過的，這裡顯示完整的圖');
+            const descr = attrOf(openTagOf(findEl(e.xml, 'p:cNvPr') || ''), 'descr');
+            emit({
+              kind: 'image',
+              src: 'data:' + PIC_MIME[ext] + ';base64,' + bytes.toString('base64'),
+              alt: descr ? unesc(descr) : '',
+              fit: 'contain',
+              round: /<a:prstGeom\b[^>]*prst="roundRect"/.test(e.xml)
+            }, at);
+            return;
+          }
+
+          if (e.name === 'p:graphicFrame') {
+            const uri = attrOf(openTagOf(findEl(e.xml, 'a:graphicData') || ''), 'uri') || '';
+            if (/\/table$/.test(uri)) {
+              const t = readTableFrame(e.xml, ctx);
+              if (t) emit(t, at); else warn(n, '有一個表格讀不出來');
+              return;
+            }
+            if (uri === chartxml.CHART_GRAPHIC_URI) {
+              const cid = (/<c:chart\b[^>]*r:id="(rId\d+)"/.exec(e.xml) || [])[1];
+              const rel = cid && rels.get(cid);
+              const part = rel && files.get(rel.path);
+              const read = part ? chartxml.readChartSpace(part.toString('utf8')) : null;
+              if (read && read.spec) emit({ kind: 'chart', chart: read.spec }, at);
+              else warn(n, '有一張圖表讀不出來');
+              return;
+            }
+            warn(n, /diagram$/.test(uri) ? '有一個 SmartArt 沒有帶過來'
+              : '有一個嵌入物件（' + (uri.split('/').pop() || '不明') + '）沒有帶過來');
+            return;
+          }
+
+          /* p:sp -- a text box or a shape. */
+          const spPr = withoutEl(findEl(e.xml, 'p:spPr') || '', 'a:ln');
+          const prst = (/<a:prstGeom\b[^>]*prst="([A-Za-z0-9]+)"/.exec(spPr) || [])[1] || '';
+          /* A shape dropped in from the gallery usually has no fill in its
+             spPr at all: PowerPoint puts the colour in `<p:style><a:fillRef>`,
+             a reference into the theme's format scheme. Reading only spPr
+             leaves every one of those as an outline with nothing inside, which
+             is the single most visible thing an importer can get wrong.
+             `a:fontRef` beside it is the same story for the text on top. */
+          const style = findEl(e.xml, 'p:style');
+          const fillRef = style && findEl(style, 'a:fillRef');
+          const fontRef = style && findEl(style, 'a:fontRef');
+          const fill = solidColourOf(spPr, ctx)
+            || (!findEl(spPr, 'a:noFill') && fillRef ? colourIn(fillRef, ctx) : null);
+          const gradient = !!findEl(spPr, 'a:gradFill') || !!findEl(spPr, 'a:blipFill');
+          if (gradient) warn(n, '有物件是漸層或圖片填色，這裡改用單色');
+          const txBody = findEl(e.xml, 'p:txBody');
+          const chain = {
+            shape: findEl(e.xml, 'a:lstStyle'),
+            layout: layoutSp && findEl(layoutSp, 'a:lstStyle'),
+            master: masterSp && findEl(masterSp, 'a:lstStyle'),
+            txStyle: txStyleFor(masterXml, ph ? ph.type : ''),
+            fallback: defaultStyle
+          };
+          const read = txBody ? readTextBody(txBody, ctx, chain)
+            : { text: '', props: {}, mixedRuns: false, mixedLevels: false };
+          if (read.mixedRuns) warn(n, '有文字方塊裡個別幾個字的格式不一樣，這裡整塊用同一種');
+          if (read.mixedLevels) warn(n, '有多層次的項目，這裡每一層都是同一個字級');
+          const valign = anchorAlong([e.xml, layoutSp, masterSp]);
+          if (valign) read.props.valign = valign;
+          /* Last, and only if nothing else said: the shape's style says what
+             colour its text is meant to be against its own fill -- white on a
+             solid accent, which is exactly the case the runs stay silent in. */
+          if (read.props.colour === undefined && fontRef) {
+            const ink = colourIn(fontRef, ctx);
+            if (ink) read.props.colour = ink;
+          }
+
+          const isTitle = ph && (ph.type === 'title' || ph.type === 'ctrTitle' || ph.idx === '0');
+          if (isTitle && read.text.trim() && !slideTitle) slideTitle = read.text.trim();
+
+          /* Geometry decides first, and it has to: this writer marks every box
+             it makes with `txBox="1"`, shapes included, so a hexagon of its own
+             making would come back as a text box if the flag were asked first.
+             A rectangle is the ambiguous one -- a filled one is a shape, a bare
+             one is where text lives. */
+          const boxy = /<p:cNvSpPr\b[^>]*txBox="1"/.test(e.xml);
+          const kind = (prst && prst !== 'rect') ? 'shape'
+            : boxy ? 'text'
+              : fill ? 'shape' : 'text';
+          if (kind === 'text' && !read.text.trim()) return;   // an empty placeholder
+
+          const obj = Object.assign({ kind, text: read.text }, read.props);
+          if (kind === 'shape') {
+            obj.shape = SHAPE_BACK[prst] || 'rect';
+            if (!SHAPE_BACK[prst]) warn(n, '有一個圖案這裡沒有（' + prst + '），畫成了矩形');
+            obj.fill = fill || '';
+          } else if (fill) {
+            obj.fill = fill;
+          }
+          emit(obj, at);
+        });
+    };
+
+    const tree = findEl(slideXml, 'p:spTree');
+    if (tree) walk(innerOf(tree), (b) => b);
+
+    const notesPath = firstRelOfType(rels, 'notesSlide');
+    let notes = '';
+    if (notesPath) {
+      const notesXml = text(notesPath);
+      const body = childrenOf(findEl(notesXml, 'p:spTree') || '', ['p:sp'])
+        .find((s) => { const p = phOf(s.xml); return p && p.type === 'body'; });
+      if (body) {
+        const tx = findEl(body.xml, 'p:txBody');
+        notes = childrenOf(tx || '', ['a:p']).map((p) => paraText(p.xml)).join('\n').trim();
+      }
+    }
+
+    /* A slide still needs a name in the thumbnail strip and in what the model
+       is told about the deck. A file with no title placeholder -- including
+       every deck this application exported, which positions text boxes rather
+       than filling placeholders -- falls back to the first line of the topmost
+       text, which is what a reader would call the slide anyway. */
+    if (!slideTitle) {
+      const top = objects.filter((o) => o.kind === 'text' && o.text && o.text.trim())
+        .sort((a, b) => a.y - b.y)[0];
+      if (top) slideTitle = top.text.trim().split('\n')[0].slice(0, 80);
+    }
+    slides.push({ layout: 'blank', title: slideTitle, body: [''], notes, objects });
+  });
+
+  if (!slides.length) throw new Error('這份 .pptx 沒有讀得出來的投影片');
+
+  const core = files.get('docProps/core.xml');
+  const titled = core && /<dc:title>([\s\S]*?)<\/dc:title>/.exec(core.toString('utf8'));
+  const title = (titled && unesc(titled[1]).trim())
+    || (slides[0] && slides[0].title) || '匯入的簡報';
+
+  const warnings = [];
+  bag.forEach((where, msg) => {
+    const ns = [...where].filter((v) => v > 0).sort((a, b) => a - b);
+    if (!ns.length) { warnings.push(msg); return; }
+    const head = ns.slice(0, 8).join('、');
+    warnings.push('第 ' + head + (ns.length > 8 ? ' 等 ' + ns.length + ' 頁' : ' 頁') + '：' + msg);
+  });
+
+  return {
+    title: String(title).slice(0, 120),
+    font: deckFont || '',
+    slides,
+    warnings,
+    size: { cx: W, cy: H }
+  };
+}
+
+/* ###########################################################################
    markdown bridge
    ######################################################################### */
 
@@ -2602,7 +3488,7 @@ function toCsv(rows) {
 module.exports = {
   readDocx, writeDocx,
   readXlsx, writeXlsx,
-  writePptx,
+  writePptx, readPptx,
   blocksToMarkdown, markdownToBlocks,
   parseCsv, toCsv,
   colToIndex, indexToCol,

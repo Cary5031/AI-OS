@@ -368,6 +368,14 @@
 
       async function refreshMode(force) {
         var was = mode + '|' + modeReason;
+        /* Rescan the local profiles first. They were read once at boot and once
+           after a successful sync, which meant a profile written while this
+           window was open stayed invisible: the banner went on naming a vendor
+           as uncovered after somebody had just covered it, and pressing
+           「重新連線」 -- the one button whose whole job is "look again" --
+           changed nothing. The directory holds a handful of small files and
+           this runs on an explicit refresh, not on a timer. */
+        if (force) await refreshLocalProfiles();
         var s = await A.extract.state();
         svc = s && s.ok ? s.data : null;
         var r = await A.extract.resolve(!!force);

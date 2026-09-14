@@ -1217,6 +1217,23 @@ function register(getWindow) {
     return { ...w, bytes: out.buffer.length, warnings: out.warnings };
   }, okPath('path'), '把簡報匯出成 .pptx 寫進沙箱'));
 
+  /* Reading somebody else's deck brings their words into this machine's
+     reasoning -- the window publishes what is on the slides to the model
+     through `describe()` -- so an untrusted source arms the gate here, on the
+     path that does it, exactly as reading the file any other way would.
+
+     No `mtime` comes back, and that is the point: there is nothing to claim to
+     be replacing, because this is an import and not an open. See readPptx's
+     header for why writing a .pptx back is not offered at all. */
+  ipcMain.handle('office:readPptx', guarded('fs.read', async ({ path: p }) => {
+    const f = await sandbox.readBytes(p);
+    if (f.untrusted) gate.addTaint(f.vpath, f.vpath);
+    return {
+      ...office.readPptx(Buffer.from(f.base64, 'base64')),
+      vpath: f.vpath, untrusted: f.untrusted
+    };
+  }, okPath('path'), '讀取一個 .pptx 的內容'));
+
   /* ---------------------------------------------------------------- pdf --- */
 
   /* Reading a PDF is reading a file, so it needs fs.read and nothing more. The

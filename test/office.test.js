@@ -1006,11 +1006,15 @@ test('a table keeps its grid, its header and its shading', () => {
 });
 
 test('a merged region is written once, and its covered cells are flagged', () => {
+  /* `{c0, r0, c1, r1}`, inclusive: what AIOS.grid normalises every merge list
+     to and what a saved deck holds. This test used to pass `{c, r, w, h}` --
+     the shape the writer read -- so the two agreed with each other and not with
+     the application. Nothing merged for real, and the table still opened. */
   const xml = zip.read(office.writePptx({
     title: 't',
     slides: [{ layout: 'blank', title: '', body: [''], notes: '', objects: [{
       kind: 'table', x: 5, y: 5, w: 60, h: 30, size: 14, rows: [['甲', '乙', '丙'], ['a', 'b', 'c']],
-      merges: [{ c: 0, r: 0, w: 2, h: 2 }]
+      merges: [{ c0: 0, r0: 0, c1: 1, r1: 1 }]
     }] }]
   }).buffer).get('ppt/slides/slide1.xml').toString('utf8');
   assert.match(xml, /gridSpan="2" rowSpan="2"/, 'the origin carries the span');
@@ -1026,7 +1030,7 @@ test('a merge wider than the table it arrived with is ignored, not clamped', () 
   const xml = zip.read(office.writePptx({
     title: 't',
     slides: [{ layout: 'blank', title: '', body: [''], notes: '', objects: [{
-      kind: 'table', x: 5, y: 5, w: 60, h: 30, rows: [['甲', '乙']], merges: [{ c: 0, r: 0, w: 5, h: 3 }]
+      kind: 'table', x: 5, y: 5, w: 60, h: 30, rows: [['甲', '乙']], merges: [{ c0: 0, r0: 0, c1: 4, r1: 2 }]
     }] }]
   }).buffer).get('ppt/slides/slide1.xml').toString('utf8');
   assert.ok(!/gridSpan/.test(xml) && !/hMerge/.test(xml));

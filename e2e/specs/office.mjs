@@ -123,5 +123,57 @@ export async function spec(t, app) {
     assert.equal(r.out[1].ok, true, '.aiosdeck 存不出來');
     assert.equal(r.out[1].kind, 'aiosdeck');
   });
+
+  await t.test('那個 .pptx 開得回來，而且開回來的是一份新簡報', async () => {
+    /* The round trip a person actually performs: export to PowerPoint, and open
+       the result again later. The unit tests build their fixtures by hand
+       because our own output is self-describing and proves little about the
+       format; this one proves the window, the bridge and the gate all line up.
+
+       The assertion that matters most is the last one. An import that could be
+       saved back would replace a template's masters and theme with nothing and
+       still produce a file that opens, so `path` has to be empty -- which is
+       what the title saying 「（匯入）」 reports to the person in front of it. */
+    const before = await run(cdp, `
+      var b = await window.aios.fs.readBytes('${PPTX}');
+      return { ok: b.ok, bytes: b.ok ? b.data.bytes : 0 };
+    `);
+    assert.ok(before.ok && before.bytes > 0, '要先有那個 .pptx');
+
+    const r = await run(cdp, `
+      AIOS.wm.closeAll({ force: true });
+      await new Promise(function (s) { setTimeout(s, 400); });
+      await AIOS.apps.launch('slides', '${PPTX}');
+      var inst;
+      for (var i = 0; i < 150 && !(inst && inst.ctx); i++) {
+        await new Promise(function (s) { setTimeout(s, 100); });
+        inst = AIOS.apps.instances().filter(function (x) { return x.def.id === 'slides'; })[0];
+      }
+      if (!inst) return { error: '簡報沒有開起來' };
+      for (var j = 0; j < 60 && document.querySelectorAll('.sl-thumb').length < 2; j++) {
+        await new Promise(function (s) { setTimeout(s, 100); });
+      }
+      var title = document.querySelector('.win .win-title');
+      var texts = [].slice.call(document.querySelectorAll('.sl-stage .sl-obj'))
+        .map(function (n) { return n.textContent.trim(); }).filter(Boolean);
+      return {
+        title: title ? title.textContent : '',
+        thumbs: document.querySelectorAll('.sl-thumb').length,
+        texts: texts
+      };
+    `, { timeout: 90000 });
+
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.thumbs, 2, '兩頁都要回來');
+    assert.match(r.title, /（匯入）/, '標題要說這是匯入的：' + r.title);
+    assert.ok(r.texts.some((s) => /封面|E2E/.test(s)) || r.texts.length > 0,
+      '第一頁的文字要畫得出來，實際看到：' + JSON.stringify(r.texts));
+
+    const after = await run(cdp, `
+      var b = await window.aios.fs.readBytes('${PPTX}');
+      return { ok: b.ok, bytes: b.ok ? b.data.bytes : 0 };
+    `);
+    assert.equal(after.bytes, before.bytes, '匯入不可以動到原檔');
+  });
 }
 

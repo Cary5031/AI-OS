@@ -314,7 +314,9 @@
     chatHint: '可以說「幫我做一份五頁的簡報介紹這台機器」、「第 3 頁改成雙欄比較」、「在這頁加一個 3×4 表格」' +
               '或「用這些數字畫一張直條圖」。',
 
-    accepts: function (p) { return /\.aiosdeck$/i.test(p || ''); },
+    /* `.pptx` opens here too, but as an import: the file is read and a new,
+       untitled deck appears. See importPptx for why it can never be saved back. */
+    accepts: function (p) { return /\.(aiosdeck|pptx)$/i.test(p || ''); },
 
     actions: {
       setSlide: {
@@ -3121,8 +3123,69 @@
         return target;
       }
 
+      /**
+       * A .pptx is imported, never opened.
+       *
+       * The difference is one line -- `path` stays null -- and it is the whole
+       * safety argument for reading the format at all. What this editor cannot
+       * model (masters, layouts, themes, animations) is exactly what a company
+       * template consists of, so a deck that could be saved back would quietly
+       * replace all of it with nothing while still producing a file that opens.
+       * With no path, Ctrl+S asks for a name, and the original is untouched --
+       * the same rule the PDF rewriter works under.
+       */
+      async function importPptx(vpath) {
+        var r = await window.aios.office.readPptx(vpath);
+        if (!r.ok) { ctx.toast('讀不進來：' + r.error, 't-err'); return; }
+        var d = r.data;
+        var notes = (d.warnings || []).slice();
+
+        deck = {
+          title: d.title || '匯入的簡報',
+          slides: (d.slides || []).map(normSlide)
+        };
+        /* Only adopt a font this machine lists. An unknown family still renders
+           (the stack falls back to the quoted name) but it would leave the font
+           selector blank, which reads as "no font" rather than as a substitution. */
+        if (d.font) {
+          var known = AIOS.fonts.families.some(function (f) { return f.name === d.font; });
+          if (known) { deckFont = d.font; fontSel.value = d.font; }
+          else notes.push('原本的字型是「' + d.font + '」，這台機器沒有，用的是「' + deckFont + '」');
+        }
+        deckScale = 100;
+        scaleSel.value = '100';
+
+        path = null;
+        pathMtime = 0;
+        cur = 0;
+        selId = null;
+        undoStack = [];
+        redoStack = [];
+        dirty = true;
+        render();
+        ctx.setTitle('簡報 — ' + deck.title + '（匯入）');
+
+        ctx.toast('已讀入 ' + deck.slides.length + ' 頁' +
+          (notes.length ? '，有 ' + notes.length + ' 件事沒有帶過來' : '') +
+          '。這是一份新的簡報，存檔會另外問你檔名，原本的 .pptx 不會被動到。',
+        notes.length ? 't-warn' : 't-ok');
+
+        /* The full list goes in the conversation panel rather than into a stack
+           of toasts: it can run to a dozen lines on a real template, and a
+           toast that scrolls past is the same as no report at all. */
+        if (notes.length) {
+          var inst = ctx.win && AIOS.apps.instanceFor(ctx.win);
+          if (inst && inst.chat) {
+            inst.chat.say('從「' + vpath + '」匯入了 ' + deck.slides.length +
+              ' 頁。以下是沒有帶過來的東西：', 'chat-warn');
+            notes.forEach(function (w) { inst.chat.say('· ' + w, 'chat-warn'); });
+          }
+        }
+      }
+
       async function open(vpath) {
         if (!vpath) return;
+        if (/\.pptx$/i.test(vpath)) return importPptx(vpath);
         var r = await A.fs.read(vpath);
         if (!r.ok) { ctx.toast('開啟失敗：' + r.error, 't-err'); return; }
         try {
