@@ -390,6 +390,21 @@
     return /^[./]/.test(href) || /^[\w\u4e00-\u9fff]/.test(href);
   }
 
+  /* The unit here is the open document, not a row: one line under the status
+     bar, and one menu item that hands the document over. */
+  AIOS.slots.declare('markdown:doc-note', {
+    desc: '狀態列底下多一行關於這份文件的字',
+    gives: '{rows:[{path, name, words, lines, headings, minutes}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('markdown:doc-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把這份文件交給擴充程式',
+    gives: '{slot, unit:{path, name, words, lines, headings, minutes}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'markdown',
     name: 'Markdown',
@@ -872,6 +887,22 @@
           '約 ' + s.minutes + ' 分鐘讀完',
           query ? '搜尋「' + query + '」：' + page.querySelectorAll('.md-hit').length + ' 處' : null
         ].filter(Boolean).join('　·　');
+        paintContributions(s);
+      }
+
+      function unitOf(s) {
+        return {
+          path: String(path || ''), name: String(path || '').split('/').pop(),
+          words: s.words, lines: s.lines, headings: s.headings, minutes: s.minutes
+        };
+      }
+
+      function paintContributions(s) {
+        if (!AIOS.slots || !path) return;
+        var unit = unitOf(s);
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('markdown:doc-note', [unit], function () { return bar; });
       }
 
       /* ------------------------------------------------------- behaviour */

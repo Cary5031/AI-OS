@@ -101,7 +101,11 @@
     '        例如 await os.ai.json("判斷這段的情緒", {type:"object",properties:{label:{type:"string"}},required:["label"]})',
     '    os.apps.list() / os.apps.do(app, action, args) / os.apps.open(path)   // 只有宣告 apps 能力才可用',
     '        叫系統裡的其他程式做事：docs、sheets、slides、editor、files、mail、browser、memory…',
-    '        list() 回每個程式的動作名稱、參數簽名與說明；do() 執行一個動作並回傳結果；',
+    '        list() 回每個程式的 { id, name, actions:[{ name, args, returns, desc }] }。',
+    '        returns 是那個動作交得出來的資料形狀；空字串代表它只回一句話，沒有資料可用。',
+    '        do() 回 { note, data }：note 是一句給人看的話，data 照 returns 的形狀。',
+    '        例如 os.apps.do("mail","search",{to:"abc.com"}) 的 data.rows 每一列都帶 to 與 cc。',
+    '        先 list() 看 returns 再決定怎麼寫，不要假設一個動作只回得出文字；',
     '        open(path) 用適合的程式開啟一個沙箱檔案（.md 進 Markdown 檢視器、.docx 進文件、.xlsx 進試算表、.txt 進編輯器）。',
     '        動作名稱只能用 list() 列出來的，不要猜：「開啟檔案」不是任何程式的動作，一律用 os.apps.open(path)。',
     '        例如 await os.apps.do("sheets", "setRange", {...})、await os.apps.do("docs", "saveAs", {path: "/notes/x.docx"})。',
@@ -263,6 +267,37 @@
       assumed: { type: 'array', items: { type: 'string' } },
       feasible: { type: 'boolean' },
       refusal: { type: 'string' },
+      /* What this program would need AI-OS itself to publish before it can be
+         written. Not a refusal and not a deferral: a request, in the shape a
+         person can act on.
+
+         This exists because of a specific dead end. An extension asked to show
+         To and Cc in the mail list reported 「郵件程式未公開讀取完整標頭的動作，
+         無法繞過其權限取得 To 或 CC」 and stopped -- a conclusion that was wrong
+         about the cause (the data was there, the capability was granted, no
+         action had simply ever been asked to hand back anything but prose) and,
+         worse, useless: it named no next step. A machine that can grow is one
+         where the missing piece ends at a button rather than at a wall. */
+      /* Places in other programs' windows this one writes into. Names only --
+         the contribution runs this program's own approved code, in a frame with
+         no capabilities, so there is no second blob to hash. See slots.js. */
+      contributes: { type: 'array', items: { type: 'string' } },
+      /* The label for an `act` contribution's menu item, per slot. Optional;
+         the program's own name is the fallback and usually the right label. */
+      slotLabels: { type: 'object', additionalProperties: { type: 'string' } },
+      needs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            app: { type: 'string' },
+            action: { type: 'string' },
+            returns: { type: 'string' },
+            why: { type: 'string' }
+          },
+          required: ['app', 'why']
+        }
+      },
       libs: {
         type: 'array',
         items: {
@@ -306,6 +341,17 @@
     [/(?:桌面|我的文件|下載資料夾|系統目錄|Program Files|AppData)[^，。]{0,10}(?:的|裡的|中的)[^，。]{0,10}(?:檔案|資料夾|文件)/i, '要碰電腦上沙箱以外的檔案']
   ];
 
+  /** The places extensions may write into, as the planner needs to read them. */
+  function slotDoc() {
+    var all = (AIOS.slots && AIOS.slots.declared()) || [];
+    if (!all.length) return '目前沒有任何貢獻點，所以 contributes 一律留空陣列。';
+    return ['目前有這些貢獻點（contributes 只能用這裡列出來的名字）：']
+      .concat(all.map(function (s) {
+        return '  ' + s.name + '　' + (s.kind === 'act' ? '【動作】' : '【註記】') + s.desc +
+          '\n    宿主給：' + s.gives + '\n    要回：' + s.wants;
+      })).join('\n');
+  }
+
   function screenRequest(request) {
     var text = String(request || '');
     for (var i = 0; i < OUTSIDE.length; i++) {
@@ -335,13 +381,20 @@
       '',
       ENV_DOC,
       '',
+      /* Read now rather than baked into ENV_DOC: a slot exists because some
+         window declared it at load, and a list frozen when this file was
+         evaluated would be a list that quietly stops matching the machine. */
+      slotDoc(),
+      '',
       '輸出 JSON：',
       '{"name":"程式名稱（4-12 字）","icon":"一個符號字元","purpose":"一句話說明用途",',
       ' "feasible":true,"refusal":"",',
       ' "capabilities":["storage"],"plan":["要做的介面元素與行為，一項一行"],',
       ' "checks":["建置時自我測試要驗證的行為，一項一行"],"size":"small|medium|large",',
       ' "assumed":["你替使用者補上的決定，一項一行"],',
-      ' "deferred":["這一版刻意不做的功能"],"readme":"使用說明"}',
+      ' "contributes":["mail:list-row"],"slotLabels":{"mail:row-actions":"轉成待辦"},',
+      ' "deferred":["這一版刻意不做的功能"],"needs":[{"app":"mail","action":"headers","returns":"{...}","why":"為什麼需要"}],',
+      ' "readme":"使用說明"}',
       '',
       '★ 把一句話的需求補完整（使用者通常只說一句話，細節是你的責任，不是他的）：',
       '使用者說「一個記帳工具」，他要的不只是一個輸入框和一張清單。先想「這個人為什麼要這個、',
@@ -375,6 +428,41 @@
       '你在這裡的判斷就是最終授權：建好的程式執行時不會再被問、不會被政策擋住，它宣告的能力就是它拿到的。',
       '所以能力要據實宣告（用到網路就寫 net、要讀沙箱就寫 sandbox-read），不該存在的程式現在就拒絕，',
       '不要把「不知道能不能」推給之後。',
+      '',
+      '★ 先判斷：這是一個新的活動，還是要加在某個內建視窗上？',
+      '需求是關於某個內建程式已經在顯示的內容（「郵件清單上多顯示…」「檔案列上加一個…」）就做成',
+      '**貢獻**，掛在那個視窗裡，不要另外開一個使用者還要自己去看的視窗；需求是一個新的活動',
+      '（記帳、番茄鐘、查詢器）就開自己的視窗；兩者都是就兩個都做（自己的視窗負責設定與資料，',
+      '貢獻負責顯示在別人的視窗裡）。需要的貢獻點不存在，就寫進 needs。',
+      '',
+      '★ 貢獻點有兩種，安全性質不同，別混用：',
+      '【註記 annotate】宿主交來它正在畫的那幾列，你回每一列一行字。把貢獻點名字列進 contributes，',
+      '程式裡發布 slotRender：',
+      '    os.actions.slotRender = { desc: "清單每列多一行", args: "{slot, rows}", run: async function (args) {',
+      '      return { items: args.rows.map(function (r) { return r.cc ? "有副本" : ""; }) };',
+      '    } };',
+      'items 要跟 rows 一一對應（那一列沒話說就給空字串）。三條規則都不能繞：slotRender 裡',
+      '**不能呼叫任何 os.***（它跑在沒有任何能力的 frame 裡，呼叫會被拒絕）；只能回字串，',
+      '不能回 HTML 或 DOM（宿主用 textContent 自己畫）；要快——超過 1.2 秒這個貢獻就會被停用。',
+      '要用到別的資料就先在自己的視窗裡算好存起來，slotRender 只讀存好的東西。',
+      '【動作 act】宿主的右鍵選單多一項，使用者按下去，宿主把游標下那一個單位交給你的 slotAct：',
+      '    os.actions.slotAct = { desc: "轉成待辦", args: "{slot, unit}", run: async function (args) {',
+      '      /* args.unit 是那一列；這裡跑在你自己的視窗、用你自己宣告的能力 */',
+      '    } };',
+      '按鈕的文字寫在 slotLabels（{"mail:row-actions":"轉成待辦"}），沒寫就用程式名稱。',
+      'slotAct 是正常的動作：可以用你宣告過的能力、可以存東西、可以叫別的程式做事。',
+      '兩種都一樣：**貢獻只能加，不能減**——不能隱藏、取代或重排宿主顯示的東西。',
+      '不確定有哪些貢獻點、每個給什麼，就看下面列出來的那份清單。',
+      '',
+      '★ 缺的是 AI-OS 自己沒發布的東西時，寫成 needs，不要只說做不到：',
+      '你要的資料在某個內建程式手上，但 os.apps.list() 裡那個動作的 returns 是空的',
+      '（它只回一句話），或者根本沒有那個動作——這種情況不要寫成 refusal 或 deferred 就算了。',
+      '那不是權限問題（apps 能力已經讓你叫得動它），是那個程式還沒被要求把那份資料講出來，',
+      '而那是可以補的。把它寫進 needs：哪個程式（app）、需要什麼動作（action）、',
+      '你要的資料形狀（returns）、為什麼需要（why）。使用者會看到這份請求並決定要不要補，',
+      '補完之後同一個需求就建得起來了。',
+      'needs 不是拒絕：做得到的部分照做，needs 只說「這一塊要等系統先開口」。',
+      '最多 4 項，而且每一項都要是你真的試過 list() 之後確定沒有的。',
       '',
       '★ 系統沒有的功能，自己去找來裝（libs）：',
       '需要現成的函式庫就列在 libs：name 是 npm 套件名，global 是它掛在 window 上的全域變數名，',
@@ -538,6 +626,41 @@
       .map(function (s) { return scrub(String(s || '')).replace(/[。；;]+$/, ''); })
       .filter(Boolean)
       .slice(0, 8);
+    /* Slot names, lower-cased and shaped. Whether the slot exists is not
+       decided here: a name nobody declares simply never gets asked, and
+       refusing a build over it would break a program the day a host renamed one
+       of its own places. main/forge.js applies the same expression again,
+       because this process is not the one that gets to decide. */
+    spec.contributes = (Array.isArray(spec.contributes) ? spec.contributes : [])
+      .map(function (c) { return String(c || '').toLowerCase().trim(); })
+      .filter(function (c) { return /^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/.test(c); })
+      .slice(0, 4);
+
+    /* Labels for act items, kept only for slots this program contributes to.
+       Forty characters because it is a menu item in somebody else's window. */
+    var labels = spec.slotLabels && typeof spec.slotLabels === 'object' ? spec.slotLabels : {};
+    spec.slotLabels = {};
+    Object.keys(labels).forEach(function (k) {
+      var slot = String(k || '').toLowerCase().trim();
+      if (spec.contributes.indexOf(slot) < 0) return;
+      var label = scrub(String(labels[k] || '')).slice(0, 40);
+      if (label) spec.slotLabels[slot] = label;
+    });
+
+    /* Requests for the machine itself, bounded and scrubbed like everything
+       else a model wrote. Four is a list somebody reads and acts on; a longer
+       one is a wish list, and a wish list is not a next step. */
+    spec.needs = (Array.isArray(spec.needs) ? spec.needs : [])
+      .map(function (n) {
+        return {
+          app: String((n && n.app) || '').trim().slice(0, 40),
+          action: String((n && n.action) || '').trim().slice(0, 40),
+          returns: scrub(String((n && n.returns) || '')).slice(0, 200),
+          why: scrub(String((n && n.why) || '')).slice(0, 300)
+        };
+      })
+      .filter(function (n) { return n.app && n.why; })
+      .slice(0, 4);
     if (spec.purpose) spec.purpose = scrub(spec.purpose);
     if (spec.readme) spec.readme = scrub(spec.readme);
     if (spec.size !== 'small' && spec.size !== 'medium' && spec.size !== 'large') spec.size = 'medium';
@@ -1512,6 +1635,19 @@
     }
 
     if (deferred.length) notes.push('這一版沒做：' + deferred.join('；').slice(0, 300));
+    /* Into the notes as well as onto the screen, because the screen scrolls
+       away and the notes are kept with the version. A request the machine
+       could not answer is exactly the thing somebody comes back to. */
+    if (spec.contributes && spec.contributes.length) {
+      say('　會掛在別的視窗上：' + spec.contributes.map(function (c) {
+        return c + (spec.slotLabels && spec.slotLabels[c] ? '「' + spec.slotLabels[c] + '」' : '');
+      }).join('、') + '（在那個視窗的右鍵選單可以隨時關掉）', 'fg-line');
+    }
+    if (spec.needs && spec.needs.length) {
+      notes.push('要 AI-OS 先發布：' + spec.needs.map(function (n) {
+        return n.app + (n.action ? '.' + n.action : '') + '（' + n.why + '）';
+      }).join('；').slice(0, 300));
+    }
 
     var seconds = Math.round((Date.now() - t0) / 1000);
     say('　共 ' + state.budget.rounds + ' 輪' +
@@ -1607,6 +1743,17 @@
     if (spec.deferred && spec.deferred.length) {
       say('　這一版先不做：' + spec.deferred.slice(0, 5).join('；').slice(0, 240) +
         (spec.deferred.length > 5 ? '…（共 ' + spec.deferred.length + ' 項）' : ''), 'fg-warn');
+    }
+    /* Said apart from `deferred`, and deliberately not in warning colour: a
+       deferral is a decision about this program, a need is a request aimed at
+       the machine. They read the same on screen if you let them, and then the
+       one thing somebody could actually act on gets skimmed with the rest. */
+    if (spec.needs && spec.needs.length) {
+      say('　這些要 AI-OS 自己先開口，程式才做得到（不是權限不夠，是還沒有人要求它講出來）：', 'fg-line');
+      spec.needs.forEach(function (n) {
+        say('　　→ 「' + n.app + '」' + (n.action ? ' 需要一個 ' + n.action + ' 動作' : ' 需要交得出資料的動作') +
+          (n.returns ? '，回 ' + n.returns : '') + '　—— ' + n.why, 'fg-line');
+      });
     }
   }
 
@@ -1709,6 +1856,7 @@
         var slug = meta.id;
         var frame = null;
         var frameToken = null;
+        function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
         var detach = null;
         var loaded = null;
         var errors = [];
@@ -2026,12 +2174,18 @@
               code: built.code,
               capabilities: built.caps,
               libs: built.libs,
+              contributes: built.spec.contributes || currentSpec.contributes || [],
+              slotLabels: built.spec.slotLabels || currentSpec.slotLabels || {},
               prompt: request,
               note: ((built.spec.plan || []).join('；') +
                 (built.notes.length ? '　⚠ ' + built.notes.join('；') : '')).slice(0, 400),
               author: 'model'
             });
             if (!res.ok) return '安裝失敗：' + res.error;
+            /* The old code is still answering from a frame this session built.
+               Dropping it is what makes 「改一下那個擴充」 mean the next list
+               draw, rather than the next restart. */
+            if (AIOS.slots) AIOS.slots.forget(slug);
 
             meta.name = res.data.manifest.name;
             meta.purpose = res.data.manifest.purpose;
@@ -2170,6 +2324,7 @@
               if (!ok) return;
               var r = await A.forge.remove(slug);
               if (!r.ok) { ctx.toast('解除安裝失敗：' + r.error, 't-err'); return; }
+              if (AIOS.slots) AIOS.slots.forget(slug);
               ctx.toast('已解除安裝，檔案保留在 ' + r.data.filesKeptAt, 't-ok');
               ctx.close();
             } }
@@ -2206,6 +2361,13 @@
            * whole catalogue living in the system prompt.
            */
           runAction: async function (name, args) {
+            /* A window that was opened a moment ago by the caller -- app.do
+               launches the program before asking it -- has a ctx.api before it
+               has a frame, and a frame before render() has run. Asking then
+               used to fail with 「程式還沒載入」 about a program the caller had
+               just watched appear. So the first few seconds are spent waiting,
+               and only a program that never gets there is refused. */
+            for (var w = 0; w < 80 && !(frame && ready); w++) await wait(100);
             if (!frame) throw new Error('程式還沒載入');
             var table = await AIOS.appshell.askAction(frame, '__list', {}, 8000)
               .catch(function () { return {}; });
@@ -2550,6 +2712,10 @@
         if (!ok) return;
         var r = await A.forge.remove(a.id);
         if (!r.ok) { ctx.toast('解除安裝失敗：' + r.error, 't-err'); return; }
+        /* An uninstalled program must stop writing into other people's windows
+           immediately, not at the next restart: the frame it answers from is
+           held by this session and nothing else would ever close it. */
+        if (AIOS.slots) AIOS.slots.forget(a.id);
 
         /* Revoking the permission in the main process is only half of it. The app
            was also registered in this document's own registry by
@@ -2948,6 +3114,8 @@
             code: code,
             capabilities: caps,
             libs: built.libs,
+            contributes: spec.contributes || [],
+            slotLabels: spec.slotLabels || {},
             prompt: request,
             note: ((spec.plan || []).join('；') +
               ((spec.assumed || []).length ? '　補上：' + spec.assumed.join('；') : '') +
@@ -2975,6 +3143,7 @@
             return;
           }
 
+          if (AIOS.slots) AIOS.slots.forget(slug);
           say('已安裝 ' + spec.name + ' v' + res.data.version + '，路徑 /apps/' + slug + '/', 'fg-ok');
           /* The grant, restated after the fact and with the way out attached.
              Nothing asked before this happened, so the one place a person can

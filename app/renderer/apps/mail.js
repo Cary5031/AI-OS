@@ -65,6 +65,31 @@
   /** What `where` from the store means on screen. */
   var WHERE = { subject: '主旨', from: '寄件人', to: '收件者' };
 
+  /* The one place an extension may write into this window.
+     A row, not the window: the narrowest slot that answers a real request, which
+     is the one this whole arrangement came from -- somebody wanting the mail
+     list to say something it does not say. The contribution gets the row the
+     list is already showing and hands back a line of text; it never sees a body,
+     never touches the DOM, and cannot stop the list being drawn. See slots.js. */
+  AIOS.slots.declare('mail:list-row', {
+    desc: '信件清單每一列底下多一行字',
+    gives: '{rows:[{handle, messageId, from, fromName, to, cc, subject, date, seen, starred, hasAttachments}]}',
+    wants: '{items:["每一列要多寫的那行字，沒有就給空字串"]}'
+  });
+  /* And a thing to do with one. The unit is read off the row under the cursor,
+     where renderList left it, so the resolver needs nothing from inside
+     mount() and the framework can build the menu without asking this file. */
+  AIOS.slots.declare('mail:row-actions', {
+    kind: 'act',
+    desc: '信件的右鍵選單多一項，按下去把那封信交給擴充程式',
+    gives: '{slot, unit:{handle, messageId, from, fromName, to, cc, subject, date, seen, starred, hasAttachments}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var row = ev && ev.target && ev.target.closest ? ev.target.closest('.ml-item') : null;
+      return row && row.__slotUnit ? row.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'mail',
     name: '郵件',
@@ -80,10 +105,19 @@
 
     actions: {
       listFolder: {
-        args: '{folder, limit}', desc: '列出某個資料夾的信',
+        args: '{folder, limit}',
+        returns: '{folder, rows:[{handle, messageId, from, fromName, to, cc, subject, date, seen, starred, hasAttachments}], truncated}',
+        taints: true,
+        desc: '列出某個資料夾的信。rows 帶得出收件者與副本；內文不在裡面',
         run: async function (args, ctx) {
-          await ctx.api.loadFolder(args.folder || 'INBOX', args.limit);
-          return { note: args.folder || 'INBOX' };
+          var name = args.folder || 'INBOX';
+          await ctx.api.loadFolder(name, args.limit);
+          var out = ctx.api.rows(args.limit);
+          return {
+            note: name + '：' + out.rows.length + ' 封' +
+              (out.truncated ? '（另有 ' + out.truncated + ' 封沒帶出來）' : ''),
+            data: { folder: name, rows: out.rows, truncated: out.truncated }
+          };
         }
       },
       check: {
@@ -101,24 +135,36 @@
         }
       },
       openMessage: {
-        args: '{index}', desc: '打開清單裡第 index 封信（從 1 開始，編號見狀態）',
+        args: '{index}',
+        returns: '{message:{handle, messageId, from, to, cc, subject, date, attachments:[{index, name, bytes}]}}',
+        taints: true,
+        desc: '打開清單裡第 index 封信（從 1 開始，編號見狀態）。回的是信頭與附件名稱，不含內文',
         run: async function (args, ctx) {
           var note = await ctx.api.openByIndex(Number(args.index));
-          return { note: note };
+          return { note: note, data: { message: ctx.api.opened() } };
         }
       },
       search: {
         args: '{text, from, to, since, until}',
+        returns: '{rows:[{handle, messageId, from, fromName, to, cc, subject, date, seen, where, snippet}], truncated}',
+        taints: true,
         desc: '搜尋本機已同步的信：text 會找主旨、寄件人、收件者（含副本）與內文；'
-          + 'from 限定寄件人、to 限定收件者或副本，兩者都可以是網域',
+          + 'from 限定寄件人、to 限定收件者或副本，兩者都可以是網域。'
+          + 'rows 的 where 說這一列為什麼命中；內文不在裡面',
         run: async function (args, ctx) {
-          return { note: await ctx.api.search(args) };
+          var note = await ctx.api.search(args);
+          var out = ctx.api.rows(args.limit);
+          return { note: note, data: { rows: out.rows, truncated: out.truncated } };
         }
       },
       openById: {
-        args: '{messageId}', desc: '用 Message-ID 打開一封信（搜尋結果或 aios-mail: 連結給的那個）',
+        args: '{messageId}',
+        returns: '{message:{handle, messageId, from, to, cc, subject, date, attachments:[{index, name, bytes}]}}',
+        taints: true,
+        desc: '用 Message-ID 或十個字的短編號打開一封信。回的是信頭與附件名稱，不含內文',
         run: async function (args, ctx) {
-          return { note: await ctx.api.openById(args.messageId) };
+          var note = await ctx.api.openById(args.messageId);
+          return { note: note, data: { message: ctx.api.opened() } };
         }
       },
       saveAttachment: {
@@ -743,6 +789,10 @@
           // Read back by the menu provider, so a right-click and a left-click
           // resolve to the same message.
           li.__mid = m.messageId;
+          /* The same row a program gets, left on the element for the act slot's
+             resolver: what an extension is handed from a right-click is exactly
+             what it would be handed from listFolder. */
+          li.__slotUnit = rowOf(m);
           li.tabIndex = 0;
           li.setAttribute('role', 'button');
           var top = el('div', 'ml-item-top');
@@ -771,6 +821,24 @@
           });
           listPane.appendChild(li);
         });
+        paintContributions();
+      }
+
+      /**
+         Ask the extensions what to add under each row, then add it.
+
+         Deliberately after the list is on screen rather than before: the
+         mailbox is the window's own content and must never wait on somebody
+         else's code. slots.js does the asking, the staleness check, the
+         provenance marking and the drawing; this file only says which rows
+         and which elements. If a contribution is slow, dead, switched off or
+         uninstalled, what happens is that no extra line appears.
+       */
+      function paintContributions() {
+        if (!messages.length || !AIOS.slots) return;
+        var items = listPane.querySelectorAll('.ml-item');
+        AIOS.slots.annotate('mail:list-row', messages.slice(0, 200).map(rowOf),
+          function (i) { return items[i] || null; });
       }
 
       /**
@@ -1558,7 +1626,80 @@
         return current ? '已打開：' + current.subject : '打不開這封信';
       }
 
+      /* -------------------------------------------------- 給程式看的那一面 --
+
+         Everything above draws a window. These two answer the other caller:
+         `app.do`, and through it a generated extension. They hand back the same
+         data the list is already showing, in a shape a program can use --
+         see the contract in apps/registry.js.
+
+         Two limits are deliberate and neither is about size.
+
+         The body is not here. A subject and a sender are on screen the moment
+         a folder is opened; a body is fetched when a person opens a message,
+         and reading one is what arms the taint gate in the main process. Handing
+         bodies to any program that asks would make that gesture meaningless, and
+         「讓擴充程式讀得到收件者」 does not need it. A program that genuinely
+         needs a body should have to ask for it through an action of its own,
+         with its own consent -- not get it as a field nobody noticed.
+
+         Every string goes through the same fence as the transcript. A display
+         name is chosen by whoever sent the message, and a program will lay these
+         out a line at a time exactly as the window description does.
+         ------------------------------------------------------------------- */
+
+      /** How many rows one call may carry. The list itself is capped at 200. */
+      var ROWS_MAX = 200;
+
+      function rowOf(m) {
+        return {
+          /* The ten-character handle, when the row came from a search -- the
+             mirror puts it on hits, not on folder listings. `messageId` is
+             always there and `openById` takes either. */
+          handle: m.handle || '',
+          messageId: m.messageId,
+          folder: m.folder || '',
+          from: P.oneLine(m.from, 200),
+          fromName: P.oneLine(m.fromName, 120),
+          to: P.oneLine(m.to, 2000),
+          cc: P.oneLine(m.cc, 2000),
+          subject: P.oneLine(m.subject, 200),
+          date: m.date || 0,
+          seen: !!m.seen,
+          starred: !!m.starred,
+          hasAttachments: !!m.hasAttachments,
+          /* Why this row is in a search result, when it is one. */
+          where: m.where || '',
+          snippet: P.oneLine(m.snippet || '', 200)
+        };
+      }
+
       ctx.api = {
+        /**
+         * What the list is showing, as a program should see it.
+         *
+         * `truncated` is a count, not a flag: a program that asked for 500 and
+         * got 200 has to be able to tell that from a mailbox with 200 in it.
+         */
+        rows: function (limit) {
+          var want = Math.max(1, Math.min(Number(limit) || ROWS_MAX, ROWS_MAX));
+          return {
+            rows: messages.slice(0, want).map(rowOf),
+            truncated: Math.max(0, messages.length - want)
+          };
+        },
+
+        /** The open message's headers and attachment names. Never its body. */
+        opened: function () {
+          if (!current) return null;
+          var m = rowOf(current);
+          m.attachments = (current.attachments || []).slice(0, 40).map(function (a, i) {
+            return { index: i + 1, name: P.oneLine(a.name, 200), bytes: Number(a.bytes) || 0 };
+          });
+          m.hasBody = !!current.hasBody;
+          return m;
+        },
+
         loadFolder: loadFolder,
         openMessage: openMessage,
         openById: openById,

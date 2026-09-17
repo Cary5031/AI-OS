@@ -359,6 +359,10 @@
 <script src="apps/chatpane.js"></script>
 <script src="apps/formula.js"></script>
 <script src="apps/appshell.js"></script>
+<!-- 貢獻點：內建視窗宣告位置，安裝好的擴充程式往裡面寫字。
+     它用 appshell 的 frame 與 broker，所以排在 appshell.js 後面、
+     任何會宣告貢獻點的視窗（mail）前面。 -->
+<script src="slots.js"></script>
 <script src="apps/files.js"></script>
 <!-- Ahead of editor.js. The editor accepts .md as source code and would win
      registry.forPath, so a Markdown file would open as plain text. Reading is

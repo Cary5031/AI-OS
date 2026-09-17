@@ -162,6 +162,24 @@
     return false;
   }
 
+  /* A to-do row is a message somebody else wrote, seen through a rule: the
+     unit an extension gets is the row as shown, never the body. */
+  AIOS.slots.declare('mailtodo:task-row', {
+    desc: '每一個郵件待辦底下多一行字',
+    gives: '{rows:[{id, handle, messageId, subject, from, date, done, mentions, aside}]}',
+    wants: '{items:["每一個待辦要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('mailtodo:task-actions', {
+    kind: 'act',
+    desc: '郵件待辦的右鍵選單多一項，按下去把那一個待辦交給擴充程式',
+    gives: '{slot, unit:{id, handle, messageId, subject, from, date, done, mentions, aside}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var row = ev && ev.target && ev.target.closest ? ev.target.closest('.mt-item') : null;
+      return row && row.__slotUnit ? row.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'mailtodo',
     name: '郵件待辦',
@@ -542,6 +560,23 @@
           box.appendChild(itemList(put, true));
           main.appendChild(box);
         }
+        /* Both lists at once, in the order they sit on screen (the drawer is
+           appended last), so one annotate call covers the window. */
+        paintContributions(live.concat(put));
+      }
+
+      function unitOf(it) {
+        return {
+          id: String(it.id || ''), handle: String(it.handle || ''), messageId: String(it.messageId || ''),
+          subject: String(it.subject || ''), from: String(it.from || ''), date: Number(it.date) || 0,
+          done: !!it.done, mentions: !!it.mentions, aside: !!it.aside
+        };
+      }
+
+      function paintContributions(all) {
+        if (!AIOS.slots || !all.length) return;
+        var rows = main.querySelectorAll('li.mt-item');
+        AIOS.slots.annotate('mailtodo:task-row', all.map(unitOf), function (i) { return rows[i] || null; });
       }
 
       function itemList(list, aside) {
@@ -553,6 +588,7 @@
              be read there and never written here, so right-clicking a row had
              never once done anything. */
           li.__item = it;
+          li.__slotUnit = unitOf(it);
 
           var box = el('input', 'mt-check');
           box.type = 'checkbox';

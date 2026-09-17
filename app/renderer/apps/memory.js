@@ -24,6 +24,24 @@
     return n;
   }
 
+  /* A memory card is the person's own note, but it is still handed to an
+     extension only as what the card shows. */
+  AIOS.slots.declare('memory:entry-row', {
+    desc: '每一則記憶底下多一行字',
+    gives: '{rows:[{id, text, tags, pinned, source, useCount, updatedAt}]}',
+    wants: '{items:["每一則要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('memory:entry-actions', {
+    kind: 'act',
+    desc: '記憶的右鍵選單多一項，按下去把那一則交給擴充程式',
+    gives: '{slot, unit:{id, text, tags, pinned, source, useCount, updatedAt}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var card = ev && ev.target && ev.target.closest ? ev.target.closest('.mem-card') : null;
+      return card && card.__slotUnit ? card.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'memory',
     name: '長期記憶',
@@ -125,6 +143,20 @@
 
       /* -------------------------------------------------------- rendering */
 
+      function unitOf(it) {
+        return {
+          id: String(it.id || ''), text: String(it.text || ''), tags: (it.tags || []).map(String),
+          pinned: !!it.pinned, source: String(it.source || ''),
+          useCount: Number(it.useCount) || 0, updatedAt: Number(it.updatedAt) || 0
+        };
+      }
+
+      function paintContributions(shown) {
+        if (!AIOS.slots || !shown.length) return;
+        var cards = list.querySelectorAll('li.mem-card');
+        AIOS.slots.annotate('memory:entry-row', shown.map(unitOf), function (i) { return cards[i] || null; });
+      }
+
       function render() {
         list.innerHTML = '';
         var shown = items;
@@ -151,6 +183,7 @@
           var li = el('li', 'mem-card' + (it.pinned ? ' pinned' : ''));
           // Read back by the menu provider.
           li.__item = it;
+          li.__slotUnit = unitOf(it);
 
           var head = el('div', 'mem-card-head');
           var src = el('span', 'mem-src mem-src-' + it.source, it.source === 'learned' ? '學習而來' : '手動輸入');
@@ -224,6 +257,7 @@
 
           list.appendChild(li);
         });
+        paintContributions(shown);
 
         var manual = items.filter(function (i) { return i.source === 'manual'; }).length;
         var learned = items.length - manual;

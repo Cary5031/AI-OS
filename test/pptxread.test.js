@@ -418,7 +418,11 @@ test('a deck written here reads back with every object intact', () => {
       ]
     }]
   };
-  const back = office.readPptx(office.writePptx(deck).buffer);
+  /* The import reading, on purpose: a file this writer made now carries its
+     own model and readPptx hands that back by default, which would make this
+     test pass without reading a single shape. `restore: false` asks for what
+     the slides actually say. */
+  const back = office.readPptx(office.writePptx(deck).buffer, { restore: false });
   /* One warning is expected and correct: this writer puts a white background on
      the master, reading does not restore it, and a deck whose text was picked
      against white does land differently on this editor's canvas. Everything
@@ -451,12 +455,12 @@ test('a merged cell survives the trip out to PowerPoint and back', () => {
   });
   const back = office.readPptx(office.writePptx(one([
     { c0: 0, r0: 0, c1: 1, r1: 0 }, { c0: 2, r0: 1, c1: 2, r1: 2 }
-  ])).buffer);
+  ])).buffer, { restore: false });
   assert.deepEqual(back.slides[0].objects[0].merges, [
     { c0: 0, r0: 0, c1: 1, r1: 0 }, { c0: 2, r0: 1, c1: 2, r1: 2 }
   ]);
   // And a table with nothing merged says nothing about merges.
-  const plain = office.readPptx(office.writePptx(one([])).buffer);
+  const plain = office.readPptx(office.writePptx(one([])).buffer, { restore: false });
   assert.equal(plain.slides[0].objects[0].merges, undefined);
 });
 

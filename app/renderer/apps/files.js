@@ -48,6 +48,25 @@
     return entry.dir ? ICONS.dir : (ICONS[ext(entry.name)] || ICONS._);
   }
 
+  /* What an extension may add to a file row: a line under it, or an item in
+     its right-click menu. The unit is what the row already shows -- name,
+     size, date, kind, whether it is trusted -- and nothing the row does not. */
+  AIOS.slots.declare('files:list-row', {
+    desc: '檔案清單每一列底下多一行字',
+    gives: '{rows:[{vpath, name, dir, bytes, mtime, untrusted}]}',
+    wants: '{items:["每一列要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('files:row-actions', {
+    kind: 'act',
+    desc: '檔案的右鍵選單多一項，按下去把那個檔案交給擴充程式',
+    gives: '{slot, unit:{vpath, name, dir, bytes, mtime, untrusted}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var row = ev && ev.target && ev.target.closest ? ev.target.closest('.fm-row') : null;
+      return row && row.__slotUnit ? row.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'files',
     name: '檔案總管',
@@ -208,6 +227,22 @@
          see the input handler. */
       var contentHits = [];
 
+      /** The row as an extension is handed it: what the row shows, nothing else. */
+      function unitOf(ent) {
+        return {
+          vpath: String(ent.vpath || ''), name: String(ent.name || ''), dir: !!ent.dir,
+          bytes: Number(ent.bytes) || 0, mtime: Number(ent.mtime) || 0, untrusted: !!ent.untrusted
+        };
+      }
+
+      /* After the list is on screen, never before: the listing is the window's
+         own content and must not wait on somebody else's code. */
+      function paintContributions(entries) {
+        if (!AIOS.slots || !entries.length) return;
+        var rows = list.querySelectorAll('li.fm-row');
+        AIOS.slots.annotate('files:list-row', entries.map(unitOf), function (i) { return rows[i] || null; });
+      }
+
       function renderList(filter) {
         list.innerHTML = '';
         var entries = listing.entries;
@@ -250,6 +285,7 @@
           // The menu provider reads this back off the DOM, so right-clicking a
           // row and right-clicking empty space go through one code path.
           li.__ent = ent;
+          li.__slotUnit = unitOf(ent);
 
           li.appendChild(el('span', 'fm-ico', icon(ent)));
           li.appendChild(el('span', 'fm-name', ent.name));
@@ -273,6 +309,7 @@
 
           list.appendChild(li);
         });
+        paintContributions(entries);
 
         var dirs = entries.filter(function (e) { return e.dir; }).length;
         status.textContent = filter

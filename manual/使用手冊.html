@@ -807,7 +807,7 @@ html { scroll-behavior: smooth; }
       <tr><td><code>.pdf</code></td><td>PDF 檢視器</td></tr>
       <tr><td><code>.docx</code> <code>.aiosdoc</code></td><td>文件</td></tr>
       <tr><td><code>.xlsx</code> <code>.aiossheet</code></td><td>試算表</td></tr>
-      <tr><td><code>.aiosdeck</code>、<code>.pptx</code></td><td>簡報（<code>.pptx</code> 是匯入，原檔不動）</td></tr>
+      <tr><td><code>.aiosdeck</code>、<code>.pptx</code></td><td>簡報（自己存的 <code>.pptx</code> 開回來就是同一份；別人的是匯入，原檔不動）</td></tr>
       <tr><td>PNG / JPEG / GIF / WebP / BMP / AVIF</td><td>圖片檢視器</td></tr>
     </tbody>
   </table>
@@ -1000,13 +1000,20 @@ html { scroll-behavior: smooth; }
     <thead><tr><th>格式</th><th>用在哪</th></tr></thead>
     <tbody>
       <tr><td><code>.aiosdeck</code></td><td>原生格式。自己要繼續改就存這個</td></tr>
-      <tr><td><code>.pptx</code></td><td>PowerPoint 打得開：七種版面、文字、備忘稿、文字方塊、19 種圖案、表格、圖片、圖表。<strong>也讀得回來</strong>，但那是匯入——見下一節</td></tr>
+      <tr><td><code>.pptx</code></td><td>PowerPoint 打得開：七種版面、文字、備忘稿、文字方塊、19 種圖案、表格、圖片、圖表。<strong>自己存的開回來就是原本那份</strong>；別人做的讀進來是匯入——見下一節</td></tr>
       <tr><td><code>.html</code></td><td>單一檔案，自帶翻頁腳本，圖片內嵌。<strong>雙擊就能播，對方不用裝任何東西</strong></td></tr>
       <tr><td><code>.pdf</code></td><td>一頁一張投影片，16:9 不壓扁</td></tr>
       <tr><td><code>.md</code></td><td>純文字大綱，表格變成 Markdown 表格</td></tr>
     </tbody>
   </table>
   </div>
+
+  <h3>存成 .pptx 再打開，就是原本那份</h3>
+  <p>
+    你在這裡做的簡報存成 <code>.pptx</code>，關掉再打開，<strong>版面、項目、雙欄、備忘、每一個物件都會原樣回來</strong>，
+    標題列不會寫「（匯入）」，按儲存就存回同一個檔。檔案裡帶著簡報自己的模型；只要沒有被 PowerPoint 改過，
+    它就認得出來。被 PowerPoint 改過的，會照下一節的方式讀進來，並告訴你為什麼。
+  </p>
 
   <h3>打開別人給的 .pptx</h3>
 
@@ -1467,6 +1474,35 @@ html { scroll-behavior: smooth; }
   <p>
     出錯不會停：它會修、會問自己「這還修得好嗎」、修不好會換一種做法、
     程式太大會拆成好幾個階段逐段做。裝好之後執行時出錯，它還會自己重建一版。
+  </p>
+
+  <h3>它也可以改內建程式的畫面</h3>
+  <p>
+    要的東西如果是<strong>加在現有視窗裡</strong>——像「郵件清單上我想再看到一點別的」——
+    就直接這樣說，它會做成一個「貢獻」裝在那個視窗上，而不是另外開一個你還要自己去看的視窗。
+    多出來的那一行會註明是哪個擴充程式加的，滑過去看得到；不想要了就把那個程式解除安裝，
+    下一次畫面就乾淨了，不用重開。
+  </p>
+  <p>
+    <strong>每一個內建程式都收得下擴充</strong>：郵件、檔案總管、記憶、排程、郵件待辦、文件萃取、簡報是
+    「每一列多一行」；Markdown、PDF、編輯器、文件、試算表、照片、瀏覽器是「這份文件多一行」，放在狀態列底下。
+    擴充也可以是<strong>一個動作</strong>：右鍵選單多一項，按下去把那一列（或那份文件）交給它處理。
+  </p>
+  <p>
+    多出來的那一行前面帶著擴充程式的圖示，滑過去看得到名字；不想要了，<strong>在那個視窗按右鍵</strong>，
+    每個擴充一個 ☑／☐ 開關，關掉就不再畫，重開電腦也記得。被自動停用的會寫原因，點一下就重試。
+    從別台機器匯入的程式包，它的擴充<strong>預設是關的</strong>，要你自己勾。
+  </p>
+  <p>
+    註記型的擴充<strong>拿不到任何權限</strong>：它只看得到那一列已經在畫面上的資料，
+    碰不到你的檔案、信箱或網路，也只能回文字，不能改視窗的外觀，更不能藏掉或換掉畫面上的東西。
+    而且它有 1.2 秒的時限——寫壞了或太慢，那一行就不出現，<strong>原本的清單不會受影響</strong>。
+    動作型的擴充跑在它自己的視窗裡、用它自己被授予的能力，跟你直接打開它是一樣的。
+  </p>
+  <p>
+    真的缺一塊 AI-OS 還沒開放的東西，它不會只說「做不到」，
+    而會列出「這些要 AI-OS 自己先開口」——哪個程式、需要什麼、為什麼。
+    那段話留在建置紀錄裡，可以直接拿去問。
   </p>
 
   <h3>它做得到什麼、做不到什麼</h3>

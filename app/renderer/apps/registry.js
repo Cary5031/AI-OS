@@ -22,6 +22,55 @@
    table, scoped to one window: the model proposes a named action with arguments,
    and the app decides what that means.
 
+   ONE ACTION, TWO AUDIENCES
+
+   An action is read by a model and called by a program, and those two want
+   different things back. For a long time it only served the first:
+
+     run(args, ctx)  ->  { note: '找到 12 封（來自 abc.com）' }
+
+   A sentence is the right answer for a chat panel. It is the wrong answer for
+   `os.apps.do(...)` in a generated program, which then has to parse Chinese
+   prose to find out what happened -- and usually cannot, because the sentence
+   says how many, not which. Measured across every built-in program: 158 actions
+   returning a note, 0 returning anything a program could use. A generated
+   extension that wanted the To and Cc of a message therefore concluded that the
+   mail program 「未公開讀取完整標頭的動作」 and stopped. The data was in the
+   mirror, the pipe was open and the capability was granted; what was missing was
+   that no action had ever been asked to say anything but a sentence.
+
+   So an action may now answer both:
+
+     run(args, ctx)  ->  { note: '一句給模型看的話', data: { rows: [...] } }
+
+   and declares what `data` looks like the same way it declares its arguments:
+
+     args      '{text, from, to}'          what to pass in
+     returns   '{rows:[{handle, from, ...}], truncated}'   what comes back
+     taints    true, when `data` carries text a stranger wrote
+     desc      what the action is for
+
+   Three rules, none of them optional:
+
+   1. `data` may only carry what the action was already allowed to read. This
+      widens the *shape* that gets spoken, never the *reach*. mail's `search`
+      already runs under `mail.read`; handing back the To header it already had
+      is not a new permission, and handing back another account's mail would be
+      a hole whether or not anybody declared it.
+   2. An action that returns `data` must declare `returns`. Without it a program
+      has to guess the shape, and guessing wrong looks exactly like 「這做不到」
+      -- which is the failure this whole arrangement exists to end. A test pins
+      this, because the rule will otherwise rot at the third app.
+   3. An action bounds its own `data` and says so when it cut something. The
+      action knows its shape; the transport does not. `app.do` enforces a hard
+      ceiling on top of that, and refuses rather than silently truncating.
+
+   `taints` is read at the boundary, in surfaces.js's `app.do` -- the point where
+   an action's data leaves the window it belongs to. Inside the window the chat
+   panel already sees this content through ctx.describe and ctx.publish, both of
+   which fence it; crossing into the planner or into another program is the new
+   thing, and that is where the gate is armed.
+
    An application may also declare:
 
      menu(event, ctx)            right-click menu items for this window
@@ -277,6 +326,18 @@
               }
             }
             items = editItems.concat((items || []).filter(Boolean));
+            /* What extensions add to this window: an item per act contribution
+               for the unit under the cursor, and a switch per contribution to
+               any of this app's slots. Framework-level on purpose -- a host
+               declares its slots and gets the switches for free, so 「在程式裡
+               啟用、禁用」 costs a host nothing and cannot be forgotten. */
+            if (AIOS.slots) {
+              try {
+                items = items.concat(AIOS.slots.menuItems(def, ev, instance));
+              } catch (e) {
+                if (AIOS.ui) AIOS.ui.trace(id + ' 擴充選單失敗：' + (e.message || e), 't-err');
+              }
+            }
             // Every window gets the same tail, so there is always a menu and
             // window-level actions are in one predictable place.
             items = items.concat(windowMenuTail(instance, def));

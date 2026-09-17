@@ -1427,6 +1427,12 @@ function register(getWindow) {
   /* ------------------------------------------------------------- forge ---- */
 
   ipcMain.handle('forge:list', plain(async () => forge.listApps()));
+  /* A switch on a contribution, from the host window's own menu. Ungated for
+     the same reason as forge:setConfirmInstall: a person flipping a switch
+     in the window it affects is not a request the kernel needs to relay back
+     to that same person. The main process still decides whether the slot
+     exists for that program. */
+  ipcMain.handle('forge:setSlot', plain(async ({ slug, slot, on } = {}) => forge.setSlotEnabled(slug, slot, !!on)));
   ipcMain.handle('forge:load', guarded('app.run', async ({ slug }) => forge.load(slug)));
   /* All four are gated under app.create, so each has to say what it actually does.
      Without the fourth argument every one of them announced itself with that

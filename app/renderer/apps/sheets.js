@@ -115,6 +115,22 @@
     }
   }
 
+  /* The unit is the active sheet of the open workbook -- what the status bar
+     already says -- not the cells: a per-cell slot would hand a frame the
+     whole table on every keystroke. */
+  AIOS.slots.declare('sheets:sheet-note', {
+    desc: '狀態列底下多一行關於目前這張工作表的字',
+    gives: '{rows:[{path, name, sheet, sheetIndex, sheets, used, formulas, errors}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('sheets:sheet-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把目前這張工作表交給擴充程式',
+    gives: '{slot, unit:{path, name, sheet, sheetIndex, sheets, used, formulas, errors}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'sheets',
     name: '試算表',
@@ -3220,6 +3236,19 @@
         if (errs) bits.push(errs + ' 個錯誤');
         if (computed.cyclic && computed.cyclic.length) bits.push('循環參照：' + computed.cyclic.join(','));
         status.textContent = bits.join('　·　');
+        paintContributions(used, formulas, errs);
+      }
+
+      function paintContributions(used, formulas, errs) {
+        if (!AIOS.slots || !book[active]) return;
+        var unit = {
+          path: String(path || ''), name: path ? String(path).split('/').pop() : '',
+          sheet: String(book[active].name || ''), sheetIndex: active + 1, sheets: book.length,
+          used: Number(used) || 0, formulas: Number(formulas) || 0, errors: Number(errs) || 0
+        };
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('sheets:sheet-note', [unit], function () { return bar; });
       }
 
       /**

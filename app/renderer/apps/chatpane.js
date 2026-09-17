@@ -89,7 +89,11 @@
   function actionList(def) {
     return Object.keys(def.actions || {}).map(function (name) {
       var a = def.actions[name];
-      return '  ' + name + '  ' + (a.args || '{}') + '  // ' + (a.desc || '');
+      /* The return shape when the action has one. The panel's model chains
+         actions too -- 「找出被 cc 的那些，再把清單寫成筆記」 needs to know that
+         the first one hands back rows rather than a sentence. */
+      return '  ' + name + '  ' + (a.args || '{}') +
+        (a.returns ? ' -> ' + a.returns : '') + '  // ' + (a.desc || '');
     });
   }
 

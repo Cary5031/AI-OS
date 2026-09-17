@@ -7651,3 +7651,318 @@ test('a scheduled run never waits on a dialog nobody is there to answer', async 
   assert.equal(gate.setUnattended(false).unattended, false);
   assert.equal(gate.setUnattended(false).depth, 0, '多解除幾次也不會變成負的');
 });
+
+/* =========================================================== 動作交出來的資料
+
+   The action contract lives in apps/registry.js: an action answers a note for
+   the model and, when a program needs it, `data` for the program. Two of its
+   three rules are the kind that rot invisibly -- nothing fails when an action
+   quietly stops declaring what it returns, until somebody's extension has to
+   guess and gets it wrong. So they are pinned here. */
+
+/**
+ * Every application definition, loaded the way the browser loads them.
+ *
+ * The stub namespace is a proxy that answers to anything, because the point is
+ * to reach `AIOS.apps.register` -- not to run a window. `AIOS.apps` is reset
+ * before every file because registry.js replaces it with the real registry
+ * partway through the directory, and the three apps that load after it would
+ * otherwise register somewhere this cannot see, silently shrinking what the
+ * test covers to whatever happens to sort before `registry.js`.
+ */
+function appDefs() {
+  const vm = require('node:vm');
+  const dir = path.join(APP, 'renderer', 'apps');
+
+  const anything = () => {
+    const f = function () { return anything(); };
+    return new Proxy(f, {
+      get(t, k) {
+        // `then` has to stay undefined or an await on one of these never settles.
+        if (k === 'then') return undefined;
+        if (!(k in t)) t[k] = anything();
+        return t[k];
+      },
+      apply() { return anything(); }
+    });
+  };
+
+  const defs = [];
+  const AIOS = anything();
+  AIOS.mailparty = require('../app/renderer/mailparty');
+  const ctx = {
+    AIOS, console, setTimeout, clearTimeout,
+    window: { AIOS, aios: anything() },
+    document: anything(), navigator: anything(), location: anything()
+  };
+  ctx.window.document = ctx.document;
+
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.js'))) {
+    AIOS.apps = {
+      register: (d) => defs.push(d),
+      list: () => [], get: () => null, instances: () => []
+    };
+    vm.runInNewContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
+  }
+  return defs;
+}
+
+test('一個動作交得出資料，就必須說出那份資料長什麼樣', () => {
+  /* Rule 2 of the contract. Without `returns`, the only way to find out what an
+     action answers is to call it and look -- and an action that answers a
+     sentence is indistinguishable from one that has nothing to give. That is
+     exactly how a generated extension concluded the mail program 「未公開讀取
+     完整標頭的動作」 while the To header sat in the mirror the whole time.
+
+     The match is deliberately blunt: any `data:` in the action's body. A local
+     called data that is not returned would fail this, and the fix for that is
+     to declare one line of `returns` anyway, which costs nothing and is never
+     wrong. A rule that is cheap to satisfy is a rule that survives. */
+  const defs = appDefs();
+  assert.ok(defs.length >= 12,
+    '載不到應用程式定義，這個測試就什麼都沒檢查：' + defs.length + ' 個');
+
+  const silent = [];
+  const shapeless = [];
+  for (const def of defs) {
+    for (const [name, spec] of Object.entries(def.actions || {})) {
+      const where = def.id + '.' + name;
+      if (/\bdata\s*:/.test(String(spec.run || '')) && !spec.returns) silent.push(where);
+      if (spec.returns && !/^\{[\s\S]*\}$/.test(String(spec.returns).trim())) shapeless.push(where);
+    }
+  }
+  assert.deepEqual(silent, [],
+    '這些動作回了 data 卻沒有宣告 returns，程式只能用猜的：' + silent.join('、'));
+  assert.deepEqual(shapeless, [],
+    'returns 要寫成一個形狀（{...}），跟 args 一樣：' + shapeless.join('、'));
+});
+
+test('郵件交出去的每一列都是別人寫的字，所以過境的時候要武裝汙染閘門', () => {
+  const mail = appDefs().find((d) => d.id === 'mail');
+  assert.ok(mail, '找不到郵件程式的定義');
+
+  for (const name of ['listFolder', 'search', 'openMessage', 'openById']) {
+    const a = (mail.actions || {})[name];
+    assert.ok(a, '郵件少了這個動作：' + name);
+    assert.ok(a.returns, name + ' 應該交得出資料，不然擴充程式還是只拿得到一句話');
+    assert.equal(a.taints, true,
+      name + ' 交出來的是寄件人、主旨與收件者，那是別人寫的字');
+  }
+
+  /* The body is not in any of those shapes, and that is the point: a subject is
+     on screen the moment a folder opens, a body is fetched when a person opens
+     a message, and reading one is what arms the gate in the main process. A
+     field nobody noticed would make that gesture meaningless. */
+  for (const name of ['listFolder', 'search', 'openMessage', 'openById']) {
+    assert.ok(!/\bbody\b|\btext\b/.test(mail.actions[name].returns),
+      name + ' 的 returns 不該包含內文');
+  }
+});
+
+test('別人寫的字離開視窗的那一刻武裝閘門，而 data 有一個會拒絕的上限', () => {
+  /* Both live at the boundary rather than inside the action. Inside the window
+     the chat panel already sees this content through ctx.describe and
+     ctx.publish, which fence it; crossing into the planner or into a generated
+     program is the new thing. And leaving either rule to each action to
+     remember means one of them eventually does not. */
+  const surfaces = read('renderer/surfaces.js');
+  /* Escaped, and carrying the closing quote: `app.do` is a quoted key in the
+     executor table, and funcBody builds `<name>:` -- unescaped it would look
+     for `app.do:` and walk straight past `'app.do':`. */
+  const body = funcBody(surfaces, "app\\.do'");
+
+  assert.match(body, /spec\.taints/, 'app.do 要讀動作的 taints 宣告');
+  assert.match(body, /taint\.add/, '宣告了就要真的武裝閘門');
+  assert.match(body, /MAX_ACTION_DATA/, 'data 要有硬上限');
+  assert.match(codeOnly(surfaces), /MAX_ACTION_DATA\s*=\s*\d+/, '上限要是一個寫出來的數字');
+  /* Refusing beats truncating: a silently shortened answer looks exactly like a
+     short mailbox, and nothing downstream can tell the difference. */
+  assert.match(body, /throw new Error\([^)]*MAX_ACTION_DATA|超過|上限/,
+    '超過上限要拒絕並說出來，不是靜靜截掉');
+});
+
+test('returns 一路傳到會用它的三個地方', () => {
+  /* Declaring a return shape is worth nothing if the three things that read an
+     action's signature do not carry it: the generated program's discovery call,
+     the planner's prompt, and each window's own chat panel. All three used to
+     print `args` alone. */
+  assert.match(codeOnly(read('renderer/apps/appshell.js')),
+    /returns:\s*d\.actions\[k\]\.returns/, 'apps.list 要把 returns 交給生成程式');
+  assert.match(codeOnly(read('renderer/kernel.js')),
+    /d\.actions\[k\]\.returns/, '核心的規劃提示要看得到 returns');
+  assert.match(codeOnly(read('renderer/apps/chatpane.js')),
+    /a\.returns/, '視窗自己的對話面板也要看得到 returns');
+});
+
+/* ============================================================== 貢獻點 ====
+
+   Letting an extension write into a built-in window is the point where this
+   machine's isolation could quietly stop being real. These pin the three
+   properties that make it safe rather than the feature that makes it useful. */
+
+test('一個貢獻點跑在沒有任何能力的 frame 裡', () => {
+  /* The whole security argument in one argument. A contribution is answering
+     「這一列要多寫什麼」 about a row it was handed; it has no business reading
+     the mailbox, the sandbox or the network, and with nothing declared the
+     broker refuses every os.* call but the ones that cannot leave the frame.
+     The program was granted more than this when it was installed -- a
+     contribution deliberately runs with less. */
+  const slots = codeOnly(read('renderer/slots.js'));
+  assert.match(slots, /broker\(frame,\s*\{[^}]*capabilities:\s*\[\]/,
+    '貢獻點的 frame 必須用空能力建起來');
+  assert.match(slots, /FRAME_SANDBOX/, '要用跟真正程式視窗同一個 sandbox 屬性');
+});
+
+test('貢獻點回的是字，宿主自己畫', () => {
+  /* Text, never markup. If a contribution could hand back DOM or HTML it could
+     restyle the window, cover a control with something that looks like another
+     control, or simply say something in the host's own voice. The host paints
+     with textContent, into its own elements, with its own classes. */
+  const slots = codeOnly(read('renderer/slots.js'));
+  assert.doesNotMatch(slots, /innerHTML|insertAdjacentHTML|outerHTML/,
+    'slots.js 不該碰任何 HTML 注入的出口');
+
+  /* The drawing is the framework's, in one function, so the provenance
+     marking cannot drift between hosts: the icon in front, the name on hover,
+     textContent only. */
+  const maker = funcBody(read('renderer/slots.js'), 'element');
+  assert.match(maker, /createTextNode|textContent/, '貢獻的字要用 textContent 放進去');
+  assert.doesNotMatch(maker, /innerHTML/, '不能把貢獻當成標記貼進去');
+  assert.match(maker, /slot-ext-icon/, '每一行前面要帶著擴充程式的圖示');
+  assert.match(maker, /line\.title/, '那一行要說得出是哪個擴充程式加的');
+
+  /* Read raw, not through codeOnly: the slot's name is a string literal, and
+     blanking the strings is exactly what would hide it. */
+  const mail = read('renderer/apps/mail.js');
+  assert.ok(mail.includes("AIOS.slots.declare('mail:list-row'"),
+    '郵件要宣告它開放的那個位置');
+  assert.match(funcBody(mail, 'paintContributions'), /AIOS\.slots\.annotate\('mail:list-row'/,
+    '郵件要透過框架畫，不是自己畫');
+});
+
+test('慢掉或壞掉的貢獻不會拖垮宿主的清單', () => {
+  /* This runs while a list is drawn, so slow and broken are the same thing. A
+     contributor that misses the deadline is dropped for the session rather than
+     retried on every draw -- one broken extension would otherwise turn into a
+     window that stutters. */
+  const slots = codeOnly(read('renderer/slots.js'));
+  assert.match(slots, /DEADLINE_MS\s*=\s*\d+/, '要有一個寫出來的時限');
+  assert.match(slots, /askAction\([\s\S]{0,240}DEADLINE_MS/, '時限要真的傳給那次呼叫');
+  assert.match(slots, /function kill\(/, '答不出來的貢獻者要被停用，而不是每次重試');
+
+  const painter = funcBody(read('renderer/slots.js'), 'annotate');
+  assert.match(painter, /tokens\[id\]\s*!==\s*token/,
+    '晚回來的答案不能畫到下一次的清單上');
+  assert.match(funcBody(read('renderer/slots.js'), 'render'), /try\s*\{[\s\S]*contributorsOf/,
+    'render 自己接住失敗：別人的程式壞掉不該讓宿主的清單壞掉');
+});
+
+test('貢獻點的名字在兩個行程裡是同一條規則', () => {
+  /* The renderer owns the list of declared slots; the main process owns what a
+     manifest is allowed to claim, and must not take a program's word for the
+     shape. Two copies, therefore -- and a test, because two copies that drift
+     is how a name that installs cleanly never gets asked for anything. */
+  const inMain = String(forge.SLOT_NAME);
+  const renderer = /var SLOT_NAME = (\/.*\/);/.exec(read('renderer/slots.js'));
+  assert.ok(renderer, 'slots.js 要有一個寫出來的 SLOT_NAME');
+  assert.equal(renderer[1], inMain, '兩邊的貢獻點名字規則不一樣了');
+});
+
+test('撞牆的擴充程式要產出一份可審的請求，不是一句做不到', () => {
+  /* The dead end this whole item came from: 「郵件程式未公開讀取完整標頭的動作，
+     無法繞過其權限取得 To 或 CC」. Wrong about the cause, and -- worse -- it
+     named no next step. `needs` is the next step, in a shape somebody can act
+     on. */
+  const src = read('renderer/apps/forge.js');
+  const code = codeOnly(src);
+  assert.match(code, /needs:\s*\{/, '規格裡要有 needs');
+  assert.match(code, /spec\.needs\s*=/, 'needs 要被清洗與夾長度');
+  assert.match(src, /這些要 AI-OS 自己先開口/, '畫面上要說得出那是一份請求');
+  assert.match(code, /notes\.push\([^)]*needs|spec\.needs && spec\.needs\.length/,
+    '請求要跟著版本一起留下來，不能只在會捲掉的畫面上');
+
+  /* And the planner has to know the slots exist, read at prompt time rather
+     than frozen into the environment document when this file was evaluated. */
+  assert.match(code, /function slotDoc\(/, '規劃器要看得到有哪些貢獻點');
+  assert.match(code, /AIOS\.slots && AIOS\.slots\.declared\(\)/,
+    '那份清單要現讀，不能是載入時就固定的');
+});
+
+test('每一個內建程式都開了門：至少一個註記插槽、一個動作插槽，而動作插槽有解析游標下單位的方法', () => {
+  /* The platform promise, pinned: extensibility is worth having before the
+     need arrives, because the need arrives when there is no developer around.
+     A host that opens no slot is a host whose users are back to waiting. The
+     forge is the one exception -- it is the thing that writes extensions, and
+     an extension writing into the forge would be writing into its own author. */
+  const dir = path.join(APP, 'renderer', 'apps');
+  const hosts = fs.readdirSync(dir).filter((f) => f.endsWith('.js'))
+    .map((f) => f.replace(/\.js$/, ''))
+    .filter((id) => !['registry', 'chatpane', 'appshell', 'formula', 'forge'].includes(id));
+  const missing = [];
+  for (const id of hosts) {
+    const src = read('renderer/apps/' + id + '.js');
+    const declares = [...src.matchAll(/AIOS\.slots\.declare\('([a-z0-9-]+):([a-z0-9-]+)',\s*\{([\s\S]*?)\n\s*\}\);/g)]
+      .map((m) => ({ host: m[1], place: m[2], body: m[3] }));
+    const own = declares.filter((d) => d.host === id);
+    const annotate = own.filter((d) => !/kind:\s*'act'/.test(d.body));
+    const act = own.filter((d) => /kind:\s*'act'/.test(d.body));
+    if (!annotate.length) missing.push(id + '：沒有註記插槽');
+    if (!act.length) missing.push(id + '：沒有動作插槽');
+    for (const d of act) {
+      if (!/unitAt:\s*function/.test(d.body)) missing.push(id + ':' + d.place + '：動作插槽沒有 unitAt');
+    }
+    for (const d of declares) {
+      if (d.host !== id) missing.push(id + ' 宣告了別人的插槽：' + d.host + ':' + d.place);
+      if (!/gives:\s*'\{/.test(d.body)) missing.push(id + ':' + d.place + '：gives 要寫成形狀');
+    }
+    if (!/AIOS\.slots\.annotate\('/.test(src)) missing.push(id + '：宣告了註記插槽卻從來沒畫過');
+  }
+  assert.deepEqual(missing, [], '\n  ' + missing.join('\n  '));
+  assert.ok(hosts.length >= 14, '宿主數量不對：' + hosts.length);
+});
+
+test('開關做在框架層：每個視窗的選單都問過 slots.js，而開關存在主程序', () => {
+  /* 「在程式裡啟用、禁用」 costs a host nothing because the registry appends
+     the switches to every window's menu; a host cannot forget them. The state
+     lives beside the grant in the forge index, so the renderer asks and the
+     main process decides -- and a slot the program does not contribute to has
+     no switch to flip. */
+  const reg = codeOnly(read('renderer/apps/registry.js'));
+  assert.match(reg, /AIOS\.slots\.menuItems\(def,\s*ev,\s*instance\)/, '選單要問 slots.js');
+  assert.match(codeOnly(read('renderer/slots.js')), /function menuItems\(def, ev, instance\)/);
+
+  assert.match(codeOnly(read('preload/index.js')), /setSlot:\s*\(slug, slot, on\)\s*=>\s*invoke\(/, 'preload 要有 setSlot');
+  /* Raw, like the other ipc assertions in this file: codeOnly's string scanner
+     does not know regex literals, and ipc.js has enough of them before this
+     line to desynchronise it. */
+  assert.match(read('main/ipc.js'), /forge\.setSlotEnabled\(slug, slot, !!on\)/, 'ipc 要接到 setSlotEnabled');
+  assert.equal(typeof forge.setSlotEnabled, 'function');
+
+  /* Provenance on the switch and on the item: the icon, the name, the reason. */
+  const menu = funcBody(read('renderer/slots.js'), 'menuItems');
+  assert.match(menu, /app\.icon \+ ' ' \+ labelFor\(app, k\)/, '動作項要帶擴充程式的圖示');
+  assert.match(menu, /停用：' \+ dead\.why/, '停用的開關要說原因');
+  assert.match(menu, /匯入的，預設關/, '匯入的要說明為什麼是關的');
+});
+
+test('動作型貢獻走 app.do，不走註記那個沒有能力的 frame', () => {
+  /* An act contribution runs in the extension's own window with its own grant,
+     through the same path a plan uses -- no second execution path to audit.
+     And nothing runs until a person picks the item. */
+  const act = funcBody(read('renderer/slots.js'), 'act');
+  assert.match(act, /AIOS\.exec\['app\.do'\]/, 'act 要透過 app.do');
+  assert.match(act, /action:\s*'slotAct'/, '叫的是擴充程式的 slotAct');
+  assert.doesNotMatch(act, /askAction|runnerFor/, '不能用註記的 frame 跑動作');
+  assert.match(act, /kind !== 'act'/, '註記插槽不能被當成動作叫');
+});
+
+test('匯入的程式包，貢獻是關著進來的（主程序決定，不看包裹怎麼說）', () => {
+  const main = read('main/forge.js');
+  const imp = funcBody(main, 'importInstall');
+  assert.match(imp, /imported = true/, '匯入要記下來');
+  assert.match(imp, /slotsOff = \(index\.apps\[slug\]\.contributes \|\| \[\]\)\.slice\(\)/, '匯入時全部關掉');
+  /* And the package format carries names, never switches. */
+  const exp = funcBody(main, 'exportApp');
+  assert.match(exp, /contributes: sanitiseSlots\(meta\.contributes\)/, '程式包要帶貢獻點');
+  assert.doesNotMatch(exp, /slotsOff/, '開關不是程式包的一部分');
+});

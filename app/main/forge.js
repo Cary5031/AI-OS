@@ -337,6 +337,73 @@ function sanitiseCaps(list) {
   return [...new Set((Array.isArray(list) ? list : []).map(String))].filter((c) => APP_CAPS.includes(c));
 }
 
+/* A slot name is `<host>:<place>`, and the same expression lives in
+   renderer/slots.js. Two copies because this process cannot see that file and
+   must not take a program's word for the shape of what it declares; a test pins
+   them together. */
+const SLOT_NAME = /^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/;
+
+/**
+ * The slots a program says it writes into.
+ *
+ * Names only -- never code. A contribution runs the program's own already-hashed
+ * app.js, in a frame with no capabilities, so declaring one adds nothing to
+ * review and nothing to trust. Four is the cap because a program that writes
+ * into five places in other people's windows is not an extension any more.
+ *
+ * Whether the slot exists is not checked here: the renderer owns the list of
+ * declared slots, a name for a slot nobody declares simply never gets asked,
+ * and refusing an install over it would break a program the day a host renamed
+ * one of its own places.
+ */
+function sanitiseSlots(list) {
+  return [...new Set((Array.isArray(list) ? list : []).map((s) => String(s || '').toLowerCase().trim()))]
+    .filter((s) => SLOT_NAME.test(s))
+    .slice(0, 4);
+}
+
+/**
+ * The label an extension gives the menu item it contributes to an `act` slot.
+ *
+ * Optional: a contribution without one is offered under the program's own
+ * name, which is usually the right label anyway. Bounded and stripped of
+ * control characters because it is painted into another program's menu, and
+ * only kept for slots the program actually contributes to.
+ */
+function sanitiseSlotLabels(map, contributes) {
+  const out = {};
+  if (!map || typeof map !== 'object') return out;
+  for (const [k, v] of Object.entries(map)) {
+    const slot = String(k || '').toLowerCase().trim();
+    if (!contributes.includes(slot)) continue;
+    const label = String(v == null ? '' : v).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (label) out[slot] = label;
+  }
+  return out;
+}
+
+/**
+ * Switch one program's contribution to one slot on or off, and keep it.
+ *
+ * Kept in the index, beside the grant, because it is the same kind of fact:
+ * what this program may do on this machine. The renderer asks; it does not
+ * decide. A slot the program does not contribute to cannot be switched --
+ * there is nothing to switch, and a stale entry would come back to life the
+ * day a rebuild added that slot.
+ */
+async function setSlotEnabled(slug, slot, on) {
+  const id = assertSlug(slug);
+  const meta = index.apps[id];
+  if (!meta) throw new Error('沒有這個程式：' + id);
+  const name = String(slot || '').toLowerCase().trim();
+  if (!(meta.contributes || []).includes(name)) throw new Error('這個程式沒有貢獻到 ' + name);
+  const off = new Set(meta.slotsOff || []);
+  if (on) off.delete(name); else off.add(name);
+  meta.slotsOff = [...off];
+  await saveIndex();
+  return { id, slot: name, enabled: !!on, slotsOff: meta.slotsOff };
+}
+
 /* ------------------------------------------------------------ does it parse?
 
    The static checks in the renderer look for forbidden APIs and undeclared
@@ -381,7 +448,7 @@ function checkSyntax(code) {
  * Install a new version. Used both for the first build and every later edit;
  * the difference is only whether a manifest already exists.
  */
-async function install({ slug, name, purpose, icon, code, capabilities, libs, prompt, note, author } = {}) {
+async function install({ slug, name, purpose, icon, code, capabilities, libs, contributes, slotLabels, prompt, note, author } = {}) {
   const id = assertSlug(slug || toSlug(name));
   const src = String(code || '');
   if (!src.trim()) throw new Error('沒有程式碼');
@@ -400,6 +467,9 @@ async function install({ slug, name, purpose, icon, code, capabilities, libs, pr
     /* Libraries travel with the version, like capabilities: a rebuild that
        stops needing one drops it; one that omits the field keeps them. */
     libs: sanitiseLibs(libs !== undefined ? libs : existing?.libs),
+    /* Contributions travel with the version too, for the same reason as libs:
+       a rebuild that stops writing into a slot stops being asked. */
+    contributes: sanitiseSlots(contributes !== undefined ? contributes : existing?.contributes),
     createdAt: existing?.createdAt || Date.now(),
     updatedAt: Date.now()
   };
@@ -438,6 +508,12 @@ async function install({ slug, name, purpose, icon, code, capabilities, libs, pr
     hash: record.codeHash,
     capabilities: manifest.capabilities,
     libs: manifest.libs,
+    contributes: manifest.contributes,
+    slotLabels: sanitiseSlotLabels(slotLabels !== undefined ? slotLabels : existing?.slotLabels, manifest.contributes),
+    /* The person's switches survive a rebuild, trimmed to slots that still
+       exist; where the program came from is a fact about it, not a version. */
+    slotsOff: (existing?.slotsOff || []).filter((s) => manifest.contributes.includes(s)),
+    imported: !!existing?.imported,
     approvedAt: Date.now(),
     createdAt: manifest.createdAt
   };
@@ -588,6 +664,12 @@ async function approveCurrent(slug) {
   if (manifest && typeof manifest === 'object') {
     meta.capabilities = sanitiseCaps(manifest.capabilities);
     meta.libs = sanitiseLibs(manifest.libs);
+    /* The grant follows the code, and so does what the code may write into:
+       approving a version that no longer contributes has to stop it being
+       asked, or the old contribution keeps running from the new hash. */
+    meta.contributes = sanitiseSlots(manifest.contributes);
+    meta.slotLabels = sanitiseSlotLabels(manifest.slotLabels, meta.contributes);
+    meta.slotsOff = (meta.slotsOff || []).filter((s) => meta.contributes.includes(s));
     if (manifest.name) meta.name = String(manifest.name).slice(0, 60);
     if (manifest.purpose) meta.purpose = String(manifest.purpose).slice(0, 400);
     if (manifest.icon) meta.icon = String(manifest.icon).slice(0, 4);
@@ -774,6 +856,10 @@ async function exportApp(slug, opts = {}) {
       icon: meta.icon,
       version: meta.version,
       capabilities: sanitiseCaps(meta.capabilities),
+      /* What it writes into travels with it; whether it is switched on does
+         not. The receiving machine decides that, and decides it off. */
+      contributes: sanitiseSlots(meta.contributes),
+      slotLabels: sanitiseSlotLabels(meta.slotLabels, sanitiseSlots(meta.contributes)),
       createdAt: manifest.createdAt || meta.createdAt || null,
       updatedAt: manifest.updatedAt || null
     },
@@ -848,6 +934,11 @@ function parsePackage(text) {
       icon: String(app.icon || '◈').slice(0, 4),
       version: Number(app.version) || 0,
       capabilities: sanitiseCaps(app.capabilities),
+      /* Slot names and labels are shaped here like everything else in a
+         package. Whether they are switched on is not read from the package at
+         all: importInstall decides that, and decides off. */
+      contributes: sanitiseSlots(app.contributes),
+      slotLabels: sanitiseSlotLabels(app.slotLabels, sanitiseSlots(app.contributes)),
       /* The sender's id is a suggestion for the slug, nothing more: it goes
          through the same charset rule as a name typed here. */
       id: toSlug(app.id || app.name)
@@ -975,11 +1066,22 @@ async function importInstall(token, choice) {
     code: pkg.code,
     capabilities: pkg.app.capabilities,
     libs: pkg.libs.map((l) => ({ key: l.key, global: l.global })),
+    contributes: pkg.app.contributes,
+    slotLabels: pkg.app.slotLabels,
     prompt: '匯入自 ' + from,
     note: '來自 ' + (pkg.exportedBy || '另一台 AI-OS') + '，原版本 v' + pkg.app.version +
       (pkg.history.length ? '，附 ' + pkg.history.length + ' 筆歷史' : ''),
     author: 'user'
   });
+
+  /* A package's contributions arrive switched off. A manifest somebody else
+     wrote is not a request this person made -- the same line the import flow
+     draws for capabilities -- and a contribution is precisely the thing that
+     can say 「已通過安全檢查」 under every message in the inbox with no
+     capability at all. The switch is in the host window's menu. */
+  index.apps[slug].imported = true;
+  index.apps[slug].slotsOff = (index.apps[slug].contributes || []).slice();
+  await saveIndex();
 
   /* The sender's build trail, kept beside ours rather than merged into it:
      their v1..vN and our v1 are different lines, and listHistory() reads only
@@ -1016,5 +1118,6 @@ module.exports = {
   fetchLib, libSource, sanitiseLibs, libKey, NPM_NAME, MAX_LIBS_PER_APP,
   exportApp, parsePackage, importPreview, pendingImport, dropImport, importInstall, freeSlug, installedMeta,
   PACKAGE_FORMAT, PACKAGE_VERSION, EXPORT_DIR,
-  APP_CAPS, APP_CAP_NOTES, CAPS_REACHING_OUT, APPS_DIR, FRAME_SCHEME
+  APP_CAPS, APP_CAP_NOTES, CAPS_REACHING_OUT, APPS_DIR, FRAME_SCHEME, SLOT_NAME, sanitiseSlots,
+  sanitiseSlotLabels, setSlotEnabled
 };

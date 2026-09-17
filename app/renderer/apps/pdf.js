@@ -46,6 +46,19 @@
     return n;
   }
 
+  AIOS.slots.declare('pdf:doc-note', {
+    desc: '狀態列底下多一行關於這份 PDF 的字',
+    gives: '{rows:[{path, name, page, pages, title, chars, textless, encrypted}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('pdf:doc-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把這份 PDF 交給擴充程式',
+    gives: '{slot, unit:{path, name, page, pages, title, chars, textless, encrypted}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'pdf',
     name: 'PDF',
@@ -519,6 +532,25 @@
           if (doc.warnings && doc.warnings.length) bits.push('\u26a0 ' + doc.warnings[0]);
         }
         status.textContent = bits.join('　·　');
+        paintContributions();
+      }
+
+      function unitOf() {
+        return {
+          path: String(path || ''), name: String(path || '').split('/').pop(),
+          page: Number(view.page) || 1, pages: Number(view.count || (doc && doc.pageCount)) || 0,
+          title: doc && doc.meta && doc.meta.title ? String(doc.meta.title) : '',
+          chars: doc ? Number(doc.chars) || 0 : 0,
+          textless: !!(doc && doc.textless), encrypted: !!(doc && doc.encrypted)
+        };
+      }
+
+      function paintContributions() {
+        if (!AIOS.slots || !path) return;
+        var unit = unitOf();
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('pdf:doc-note', [unit], function () { return bar; });
       }
 
       /* ------------------------------------------------------- behaviour */

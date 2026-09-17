@@ -214,6 +214,52 @@ const CASES = [
   }
 ];
 
+
+/* ------------------------------------------------------------- 貢獻點 ---- */
+
+/* A contribution: it is handed rows and answers with one line each. Nothing
+   else -- no capability call, no DOM, no waiting. */
+const CONTRIB = [
+  'function render(root, os) {',
+  '  root.textContent = "貢獻點測試";',
+  '  os.actions.slotRender = { run: async function (args) {',
+  '    return { items: (args.rows || []).map(function (r) {',
+  '      return r.cc ? "有副本" : "";',
+  '    }) };',
+  '  } };',
+  '}',
+  ''
+].join('\n');
+
+/* The same thing, but it tries to use a capability it was granted at install.
+   From inside a contribution it must not have it. */
+const GREEDY = [
+  'function render(root, os) {',
+  '  root.textContent = "貪心的貢獻點";',
+  '  os.actions.slotRender = { run: async function () {',
+  '    try {',
+  '      await os.storage.set("k", 1);',
+  '      return { items: ["拿到了"] };',
+  '    } catch (e) {',
+  '      return { items: ["被拒絕"] };',
+  '    }',
+  '  } };',
+  '}',
+  ''
+].join('\n');
+
+/* And one that never answers in time. */
+const SLOW = [
+  'function render(root, os) {',
+  '  root.textContent = "慢的貢獻點";',
+  '  os.actions.slotRender = { run: async function () {',
+  '    await new Promise(function (r) { setTimeout(r, 4000); });',
+  '    return { items: ["終於"] };',
+  '  } };',
+  '}',
+  ''
+].join('\n');
+
 export async function spec(t, app) {
   const { cdp } = app;
 
@@ -422,5 +468,186 @@ export async function spec(t, app) {
     assert.match(r.junk, /不是 AI-OS 的程式包/, '不是程式包：' + r.junk);
     assert.match(r.confirm, /過期或不存在/, '沒有預覽過的 token 不能安裝：' + r.confirm);
     assert.equal(await dialogOpen(app.port), false, '這三條路都不該留下一個確認視窗在畫面上');
+  });
+
+  await t.test('擴充程式寫得進內建視窗，而且只寫得進去字', async () => {
+    /* The whole of TODO item 4's third layer, exercised for real: an installed
+       program answering a question about rows it was handed, in a frame this
+       session built for it. Source-shape tests can check that the frame is
+       built with no capabilities; only this can check that the answer comes
+       back at all. */
+    const r = await run(cdp, `
+      await window.aios.forge.remove('e2e-slot').catch(function () {});
+      var inst = await window.aios.forge.install({
+        slug: 'e2e-slot', name: 'E2E 貢獻', purpose: '測試貢獻點', icon: '◈',
+        code: ${JSON.stringify(CONTRIB)}, capabilities: [],
+        contributes: ['mail:list-row'], prompt: 'e2e', note: 'e2e', author: 'model'
+      });
+      if (!inst.ok) return { error: '安裝失敗：' + inst.error };
+
+      var declared = AIOS.slots.declared().map(function (s) { return s.name; });
+      var got = await AIOS.slots.render('mail:list-row', { rows: [
+        { subject: '一', cc: 'a@b.com' },
+        { subject: '二', cc: '' }
+      ] });
+      await window.aios.forge.remove('e2e-slot');
+      AIOS.slots.forget('e2e-slot');
+      return { out: [declared, got.length, got[0] && got[0].items, got[0] && got[0].name] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.ok(r.out[0].includes('mail:list-row'), '郵件應該宣告了那個貢獻點：' + r.out[0].join('、'));
+    assert.equal(r.out[1], 1, '安裝好的貢獻程式應該被問到');
+    assert.deepEqual(r.out[2], ['有副本', ''], '每一列要一一對應，沒話說就是空字串');
+    assert.equal(r.out[3], 'E2E 貢獻', '宿主要說得出這行字是誰加的');
+  });
+
+  await t.test('貢獻點裡拿不到那個程式自己被授予的能力', async () => {
+    /* The property that makes this safe to ship. The program declares storage
+       and is granted it in its own window; the frame a contribution answers
+       from is built with `capabilities: []`, so the broker refuses. If this
+       ever comes back 「拿到了」, an extension has been handed the run of the
+       machine on a path nobody looks at. */
+    const r = await run(cdp, `
+      await window.aios.forge.remove('e2e-greedy').catch(function () {});
+      var inst = await window.aios.forge.install({
+        slug: 'e2e-greedy', name: 'E2E 貪心', purpose: '測試貢獻點沒有能力', icon: '◈',
+        code: ${JSON.stringify(GREEDY)}, capabilities: ['storage'],
+        contributes: ['mail:list-row'], prompt: 'e2e', note: 'e2e', author: 'model'
+      });
+      if (!inst.ok) return { error: '安裝失敗：' + inst.error };
+      var got = await AIOS.slots.render('mail:list-row', { rows: [{ subject: '一' }] });
+      await window.aios.forge.remove('e2e-greedy');
+      AIOS.slots.forget('e2e-greedy');
+      return { out: [inst.data.manifest.capabilities, got[0] && got[0].items] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.deepEqual(r.out[0], ['storage'], '這個程式在自己的視窗裡是有 storage 的');
+    assert.deepEqual(r.out[1], ['被拒絕'],
+      '但貢獻點裡不該拿得到——回來的是：' + JSON.stringify(r.out[1]));
+  });
+
+  await t.test('答不出來的貢獻者會被停用，而且不會每次重問', async () => {
+    /* A list being drawn cannot wait. A contributor over the deadline is dropped
+       for the session rather than retried, or one broken extension becomes a
+       window that stutters on every draw. The second call is the point: it has
+       to come back empty and fast, not slow again. */
+    const r = await run(cdp, `
+      await window.aios.forge.remove('e2e-slow').catch(function () {});
+      var inst = await window.aios.forge.install({
+        slug: 'e2e-slow', name: 'E2E 慢', purpose: '測試貢獻點時限', icon: '◈',
+        code: ${JSON.stringify(SLOW)}, capabilities: [],
+        contributes: ['mail:list-row'], prompt: 'e2e', note: 'e2e', author: 'model'
+      });
+      if (!inst.ok) return { error: '安裝失敗：' + inst.error };
+
+      var first = await AIOS.slots.render('mail:list-row', { rows: [{ subject: '一' }] });
+      var t0 = Date.now();
+      var second = await AIOS.slots.render('mail:list-row', { rows: [{ subject: '一' }] });
+      var again = Date.now() - t0;
+      await window.aios.forge.remove('e2e-slow');
+      AIOS.slots.forget('e2e-slow');
+      return { out: [first.length, second.length, again] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.out[0], 0, '超過時限的貢獻不該被畫出來');
+    assert.equal(r.out[1], 0, '停用之後也不該再出現');
+    assert.ok(r.out[2] < 500, '第二次應該立刻回來，不是再等一次時限：' + r.out[2] + 'ms');
+  });
+
+  await t.test('開關：在宿主的選單裡關掉一個貢獻，它就不再被畫；打開就回來', async () => {
+    /* The switch is the host window's own menu item, built by the framework
+       from the same catalogue the painter reads. Off means not asked at all --
+       not asked-and-hidden -- and the state survives in the forge index. */
+    const r = await run(cdp, `
+      await window.aios.forge.remove('e2e-switch').catch(function () {});
+      var inst = await window.aios.forge.install({
+        slug: 'e2e-switch', name: 'E2E 開關', purpose: '測試開關', icon: '◈',
+        code: ${JSON.stringify(CONTRIB)}, capabilities: [],
+        contributes: ['mail:list-row'], prompt: 'e2e', note: 'e2e', author: 'model'
+      });
+      if (!inst.ok) return { error: '安裝失敗：' + inst.error };
+      var rows = [{ subject: '一', cc: 'a@b.com' }];
+      var before = (await AIOS.slots.render('mail:list-row', { rows: rows })).length;
+
+      /* The same switch a person flips: the menu item for this contribution. */
+      var items = AIOS.slots.menuItems({ id: 'mail' }, { target: document.body }, null);
+      var sw = items.find(function (i) { return i.label && i.label.indexOf('E2E 開關') >= 0; });
+      if (!sw) return { error: '選單裡沒有這個貢獻的開關：' + JSON.stringify(items.map(function (i) { return i.label; })) };
+      var labelBefore = sw.label;
+      sw.run();
+      for (var i = 0; i < 40; i++) {
+        await new Promise(function (r) { setTimeout(r, 100); });
+        var l = await window.aios.forge.list();
+        var me = (l.data || []).find(function (a) { return a.id === 'e2e-switch'; });
+        if (me && (me.slotsOff || []).indexOf('mail:list-row') >= 0) break;
+      }
+      var off = (await AIOS.slots.render('mail:list-row', { rows: rows })).length;
+      var items2 = AIOS.slots.menuItems({ id: 'mail' }, { target: document.body }, null);
+      var sw2 = items2.find(function (i) { return i.label && i.label.indexOf('E2E 開關') >= 0; });
+      var labelOff = sw2 && sw2.label;
+      var hintOff = sw2 && sw2.hint;
+      await AIOS.slots.setEnabled('e2e-switch', 'mail:list-row', true);
+      var on = (await AIOS.slots.render('mail:list-row', { rows: rows })).length;
+      await window.aios.forge.remove('e2e-switch');
+      AIOS.slots.forget('e2e-switch');
+      return { out: [before, labelBefore, off, labelOff, hintOff, on] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.out[0], 1, '關之前有畫');
+    assert.match(r.out[1], /^☑ ◈ E2E 開關/, '開著的開關要打勾並帶圖示：' + r.out[1]);
+    assert.equal(r.out[2], 0, '關掉之後不該再問它');
+    assert.match(String(r.out[3]), /^☐/, '關掉之後開關要顯示為關：' + r.out[3]);
+    assert.equal(r.out[4], '已關');
+    assert.equal(r.out[5], 1, '打開之後又回來了');
+  });
+
+  await t.test('動作：右鍵選單裡的擴充項把游標下的那一列交給擴充程式，跑在它自己的能力裡', async () => {
+    /* The act path: the item is built from the unit the host left on the row,
+       and choosing it runs the extension's slotAct through app.do -- its own
+       window, its own grant. Here the extension declares storage and uses it,
+       which an annotation could not. */
+    const ACT = [
+      'function render(root, os) {',
+      '  root.textContent = "動作測試";',
+      '  os.actions.slotAct = { desc: "記下這封", args: "{slot, unit}", run: async function (args) {',
+      '    await os.storage.set("last", args.unit.subject);',
+      '    return "記下了：" + args.unit.subject + "（" + args.slot + "）";',
+      '  } };',
+      '}',
+      ''
+    ].join('\n');
+    const r = await run(cdp, `
+      await window.aios.forge.remove('e2e-act').catch(function () {});
+      var inst = await window.aios.forge.install({
+        slug: 'e2e-act', name: 'E2E 動作', purpose: '測試動作插槽', icon: '⚑',
+        code: ${JSON.stringify(ACT)}, capabilities: ['storage'],
+        contributes: ['mail:row-actions'], slotLabels: { 'mail:row-actions': '記下這封' },
+        prompt: 'e2e', note: 'e2e', author: 'model'
+      });
+      if (!inst.ok) return { error: '安裝失敗：' + inst.error };
+      await AIOS.slots.refresh();
+
+      /* A row as the mail window leaves it, and an event that landed on it. */
+      var row = document.createElement('li');
+      row.className = 'ml-item';
+      row.__slotUnit = { subject: '九月份報價單', from: 'ming@abc.com' };
+      document.body.appendChild(row);
+      var items = AIOS.slots.menuItems({ id: 'mail' }, { target: row }, null);
+      row.remove();
+      var actItem = items.find(function (i) { return i.hint === '擴充'; });
+      if (!actItem) return { error: '選單裡沒有動作項：' + JSON.stringify(items.map(function (i) { return i.label; })) };
+
+      var res = await AIOS.slots.act('mail:row-actions', 'e2e-act', row.__slotUnit);
+      var note = res && res.data && res.data.note;
+      var opened = (AIOS.apps.instances() || []).some(function (i) { return i.def && i.def.id === 'gen:e2e-act'; });
+      await window.aios.forge.remove('e2e-act');
+      AIOS.apps.unregister('gen:e2e-act');
+      AIOS.slots.forget('e2e-act');
+      return { out: [actItem.label, note, opened] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.out[0], '⚑ 記下這封', '動作項要用擴充程式的圖示與它給的標籤：' + r.out[0]);
+    assert.match(String(r.out[1]), /記下了：九月份報價單（mail:row-actions）/, '擴充程式要拿到那一列並在自己的能力裡跑：' + r.out[1]);
+    assert.equal(r.out[2], true, '動作跑在擴充程式自己的視窗裡，所以視窗會開');
   });
 }

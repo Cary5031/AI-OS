@@ -216,6 +216,18 @@
       '        var reply = { aios: 6, id: m.id };',
       '        try {',
       '          var table = (window.__aiosOS && window.__aiosOS.actions) || {};',
+      /* A bare function is an action too. The documented shape is
+         `{ desc, args, run }`, and every example says so -- but `os.actions.x =
+         async function` is what a model writes when it is thinking about the
+         behaviour and not the catalogue, and the first contribution written for
+         a slot did exactly that. Refusing it with 「沒有這個動作」 names an action
+         that is plainly there, which is the kind of message people stop
+         believing. So the shorthand is read as `{ run }`, with nothing to say in
+         the catalogue. */
+      '          var entry = function (k) {',
+      '            var e = table[k];',
+      '            return typeof e === "function" ? { run: e } : e;',
+      '          };',
       /* `__list` answers with the catalogue rather than running anything, so the
          shell can find out what a program offers without the program having to
          publish a describe-yourself action of its own. Reserved: a program that
@@ -224,12 +236,13 @@
       '            var out = {};',
       '            Object.keys(table).forEach(function (k) {',
       '              if (k.indexOf("__") === 0) return;',
-      '              if (!table[k] || typeof table[k].run !== "function") return;',
-      '              out[k] = { desc: String(table[k].desc || ""), args: String(table[k].args || "") };',
+      '              var a = entry(k);',
+      '              if (!a || typeof a.run !== "function") return;',
+      '              out[k] = { desc: String(a.desc || ""), args: String(a.args || "") };',
       '            });',
       '            reply.result = out;',
       '          } else {',
-      '            var fn = table[m.action] && table[m.action].run;',
+      '            var fn = entry(m.action) && entry(m.action).run;',
       '            if (typeof fn !== "function") throw new Error("沒有這個動作：" + m.action);',
       '            reply.result = await fn(m.args || {});',
       '          }',
@@ -857,8 +870,18 @@
           }).map(function (d) {
             return {
               id: d.id, name: d.name,
+              /* `returns` is what a program needs and the chat panel does not:
+                 without it the only way to find out what an action answers is to
+                 call it and look, and an action that answers a sentence looks
+                 exactly like one that has nothing to give. Absent means the
+                 action only speaks -- see the contract in apps/registry.js. */
               actions: Object.keys(d.actions).map(function (k) {
-                return { name: k, args: d.actions[k].args || '{}', desc: d.actions[k].desc || '' };
+                return {
+                  name: k,
+                  args: d.actions[k].args || '{}',
+                  returns: d.actions[k].returns || '',
+                  desc: d.actions[k].desc || ''
+                };
               })
             };
           });

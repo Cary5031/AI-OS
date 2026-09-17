@@ -355,7 +355,14 @@ AIOS.kernel = (function () {
       withActions.forEach(function (d) {
         lines.push('  ' + d.id + '：');
         Object.keys(d.actions).forEach(function (k) {
-          lines.push('    ' + k + ' ' + (d.actions[k].args || '{}'));
+          /* The return shape, for the actions that have one. Only those: the
+             signatures already cost about a thousand tokens, and an action that
+             answers a sentence has nothing to declare. The ones that do are
+             exactly the ones a plan can chain from -- knowing that mail's search
+             hands back rows with `cc` on them is the difference between
+             answering 「誰被 cc 了」 in one round and in three. */
+          lines.push('    ' + k + ' ' + (d.actions[k].args || '{}') +
+            (d.actions[k].returns ? ' -> ' + d.actions[k].returns : ''));
         });
       });
     }

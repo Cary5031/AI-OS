@@ -124,16 +124,17 @@ export async function spec(t, app) {
     assert.equal(r.out[1].kind, 'aiosdeck');
   });
 
-  await t.test('那個 .pptx 開得回來，而且開回來的是一份新簡報', async () => {
-    /* The round trip a person actually performs: export to PowerPoint, and open
-       the result again later. The unit tests build their fixtures by hand
-       because our own output is self-describing and proves little about the
-       format; this one proves the window, the bridge and the gate all line up.
+  await t.test('那個 .pptx 開得回來，而且開回來的就是原本那份簡報', async () => {
+    /* The round trip a person actually performs: save as .pptx, close, open it
+       again later. It used to come back as an import -- every slide blank, the
+       bullets gone, the cover centred -- which is right for a file PowerPoint
+       wrote and was reported as 「整個版面都跑掉了」 for one this editor wrote.
+       Now the writer embeds the deck and the reader hands it back when nothing
+       else has touched the slides, so the file opens as itself: same layouts,
+       a real path, no 「（匯入）」. Somebody else's .pptx still imports; the unit
+       tests cover that boundary with a hand-edited file.
 
-       The assertion that matters most is the last one. An import that could be
-       saved back would replace a template's masters and theme with nothing and
-       still produce a file that opens, so `path` has to be empty -- which is
-       what the title saying 「（匯入）」 reports to the person in front of it. */
+       The last assertion still matters: opening must not write the file. */
     const before = await run(cdp, `
       var b = await window.aios.fs.readBytes('${PPTX}');
       return { ok: b.ok, bytes: b.ok ? b.data.bytes : 0 };
@@ -154,20 +155,29 @@ export async function spec(t, app) {
         await new Promise(function (s) { setTimeout(s, 100); });
       }
       var title = document.querySelector('.win .win-title');
-      var texts = [].slice.call(document.querySelectorAll('.sl-stage .sl-obj'))
+      var canvas = document.querySelector('.sl-stage .sl-canvas');
+      var texts = [].slice.call(document.querySelectorAll('.sl-stage .sl-title, .sl-stage .sl-text, .sl-stage .sl-obj'))
         .map(function (n) { return n.textContent.trim(); }).filter(Boolean);
+      var st = inst.ctrl && inst.ctrl.getState ? inst.ctrl.getState() : {};
       return {
         title: title ? title.textContent : '',
         thumbs: document.querySelectorAll('.sl-thumb').length,
-        texts: texts
+        texts: texts,
+        path: st.path || '',
+        layouts: (st.deck && st.deck.slides || []).map(function (s) { return s.layout; }),
+        canvas: canvas ? canvas.className : '',
+        dirty: !!st.dirty
       };
     `, { timeout: 90000 });
 
     assert.equal(r.error, undefined, r.error);
     assert.equal(r.thumbs, 2, '兩頁都要回來');
-    assert.match(r.title, /（匯入）/, '標題要說這是匯入的：' + r.title);
-    assert.ok(r.texts.some((s) => /封面|E2E/.test(s)) || r.texts.length > 0,
-      '第一頁的文字要畫得出來，實際看到：' + JSON.stringify(r.texts));
+    assert.doesNotMatch(r.title, /（匯入）/, '自己存的檔不是匯入：' + r.title);
+    assert.equal(r.path, PPTX, '開的就是那個檔，Ctrl+S 會存回去');
+    assert.equal(r.dirty, false, '剛開的檔沒有未儲存的變更');
+    assert.deepEqual(r.layouts, ['title', 'bullets'], '版面要跟存的時候一樣，不是全部變空白：' + r.layouts.join(','));
+    assert.match(r.canvas, /layout-title/, '第一頁畫的是封面版面：' + r.canvas);
+    assert.ok(r.texts.length > 0, '第一頁的文字要畫得出來，實際看到：' + JSON.stringify(r.texts));
 
     const after = await run(cdp, `
       var b = await window.aios.fs.readBytes('${PPTX}');

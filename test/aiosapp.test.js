@@ -307,3 +307,98 @@ test('the round trip is lossless for a program with everything', async () => {
   const imported = await readJson('/apps/todo/imported-history.json');
   assert.deepEqual(imported.history.map((h) => h.note), ['第一版', '第二版']);
 });
+
+/* ------------------------------------------------------------ 貢獻點 ---- */
+
+test('一個擴充程式宣告要寫進哪些視窗，而那份宣告跟著程式碼一起被核准', async () => {
+  /* Declaring a contribution adds nothing to review: the contribution runs this
+     program's own already-hashed app.js in a frame with no capabilities, so what
+     is stored here is a list of names and nothing else. Names still have to be
+     shaped, deduplicated and bounded -- a manifest is written by a model, and
+     this process does not get to take its word for anything. */
+  await machine();
+
+  const inst = await installTodo({
+    contributes: ['Mail:List-Row', 'mail:list-row', '不是一個名字', 'a:b', 'c:d', 'e:f', 'g:h']
+  });
+  assert.deepEqual(inst.manifest.contributes, ['mail:list-row', 'a:b', 'c:d', 'e:f'],
+    '大小寫要正規化、重複要去掉、寫壞的要丟掉、最多四個');
+
+  const listed = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(listed.contributes, ['mail:list-row', 'a:b', 'c:d', 'e:f'],
+    '清單也要帶著，不然沒有人問得出誰貢獻了什麼');
+
+  /* The grant follows the code, and so does what the code may write into. A
+     version that stops contributing has to stop being asked, or the old
+     contribution keeps running under the new hash. */
+  const after = await installTodo({ contributes: [] });
+  assert.deepEqual(after.manifest.contributes, [],
+    '不再貢獻的版本就不該再被問');
+  const relisted = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(relisted.contributes, [], '索引也要跟著改');
+});
+
+test('沒有提到貢獻點的重建，不會把原本的貢獻弄丟', async () => {
+  /* Same rule as libs and capabilities: a field that is absent means "keep",
+     a field that is empty means "drop". A rebuild that never mentions slots is
+     a rebuild about something else. */
+  await machine();
+  await installTodo({ contributes: ['mail:list-row'] });
+  const again = await forge.install({
+    slug: 'todo', name: '待辦', code: CODE, capabilities: ['storage'], note: '第二版'
+  });
+  assert.deepEqual(again.manifest.contributes, ['mail:list-row'],
+    '沒提到就是照舊，不是清空');
+});
+
+test('匯入的程式包，貢獻是關著進來的；本機建的是開著的', async () => {
+  /* A manifest somebody else wrote is not a request this person made -- the
+     same line the import flow draws for capabilities -- and a contribution is
+     precisely the thing that can write 「已通過安全檢查」 under every message
+     in the inbox with no capability at all. So a package's contributions
+     arrive switched off; a program the forge built here is on, because the
+     person asked for it three seconds ago. */
+  await machine();
+  const built = await installTodo({ contributes: ['mail:list-row'], slotLabels: { 'mail:list-row': '無用的標籤' } });
+  const mine = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(mine.slotsOff, [], '本機建的預設開');
+  assert.equal(mine.imported, false);
+  assert.deepEqual(built.manifest.contributes, ['mail:list-row']);
+
+  /* Round trip through a package: what it writes into travels; whether it is
+     on does not. */
+  const out = await forge.exportApp('todo', { appVersion: '9.9.9' });
+  const pkg = await readJson(out.vpath);
+  assert.deepEqual(pkg.app.contributes, ['mail:list-row'], '程式包要帶著貢獻點');
+  assert.equal(pkg.app.slotsOff, undefined, '開關不是程式包的一部分');
+
+  await forge.remove('todo');
+  const pv = await forge.importPreview(out.vpath);
+  await forge.importInstall(pv.token, 'new');
+  const back = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(back.contributes, ['mail:list-row'], '匯入回來還是有貢獻');
+  assert.deepEqual(back.slotsOff, ['mail:list-row'], '但是關著的');
+  assert.equal(back.imported, true, '而且記得自己是匯入的');
+});
+
+test('開關存在索引裡，而且只認得程式真的貢獻的插槽', async () => {
+  await machine();
+  await installTodo({ contributes: ['mail:list-row', 'mail:row-actions'], slotLabels: { 'mail:row-actions': '轉成待辦', 'x:y': '不算' } });
+  const before = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(before.slotLabels, { 'mail:row-actions': '轉成待辦' }, '標籤只留給真的貢獻的插槽');
+
+  const off = await forge.setSlotEnabled('todo', 'mail:list-row', false);
+  assert.deepEqual(off.slotsOff, ['mail:list-row']);
+  const on = await forge.setSlotEnabled('todo', 'mail:list-row', true);
+  assert.deepEqual(on.slotsOff, [], '再開回來');
+  await assert.rejects(forge.setSlotEnabled('todo', 'files:list-row', false), /沒有貢獻到/,
+    '沒貢獻的插槽沒有開關可以關');
+
+  /* A rebuild that drops a slot drops its switch too, or the old switch would
+     come back to life the day a later rebuild added that slot again. */
+  await forge.setSlotEnabled('todo', 'mail:row-actions', false);
+  const rebuilt = await installTodo({ contributes: ['mail:list-row'] });
+  assert.deepEqual(rebuilt.manifest.contributes, ['mail:list-row']);
+  const after = (await forge.listApps()).find((a) => a.id === 'todo');
+  assert.deepEqual(after.slotsOff, [], '不再貢獻的插槽，開關也一起走');
+});

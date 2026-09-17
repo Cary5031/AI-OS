@@ -134,6 +134,22 @@
       : '執行 ' + j.app + '.' + j.action + (j.args && Object.keys(j.args).length ? ' ' + JSON.stringify(j.args) : '');
   }
 
+  AIOS.slots.declare('schedule:job-row', {
+    desc: '每一個排程底下多一行字',
+    gives: '{rows:[{id, name, kind, enabled, running, runs, dueIn, lastOk, lastNote}]}',
+    wants: '{items:["每一個排程要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('schedule:job-actions', {
+    kind: 'act',
+    desc: '排程的右鍵選單多一項，按下去把那個排程交給擴充程式',
+    gives: '{slot, unit:{id, name, kind, enabled, running, runs, dueIn, lastOk, lastNote}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var card = ev && ev.target && ev.target.closest ? ev.target.closest('.sc-card') : null;
+      return card && card.__slotUnit ? card.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'schedule',
     name: '排程',
@@ -304,6 +320,7 @@
         }
         jobs.forEach(function (j) {
           var card = el('li', 'sc-card' + (j.enabled ? '' : ' off'));
+          card.__slotUnit = unitOf(j);
           var head = el('div', 'sc-head');
           head.appendChild(el('span', 'sc-name', j.name));
           head.appendChild(el('span', 'sc-badge', j.kind === 'intent' ? '意圖' : '動作'));
@@ -332,6 +349,23 @@
           card.appendChild(acts);
           list.appendChild(card);
         });
+        paintContributions();
+      }
+
+      function unitOf(j) {
+        return {
+          id: String(j.id || ''), name: String(j.name || ''), kind: String(j.kind || ''),
+          enabled: !!j.enabled, running: !!j.running, runs: Number(j.runs) || 0,
+          dueIn: Number(j.dueIn) || 0,
+          lastOk: j.lastResult ? !!j.lastResult.ok : null,
+          lastNote: j.lastResult ? String(j.lastResult.note || '') : ''
+        };
+      }
+
+      function paintContributions() {
+        if (!AIOS.slots || !jobs.length) return;
+        var cards = list.querySelectorAll('li.sc-card');
+        AIOS.slots.annotate('schedule:job-row', jobs.map(unitOf), function (i) { return cards[i] || null; });
       }
 
       async function refresh() {

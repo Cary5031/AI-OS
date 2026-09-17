@@ -430,6 +430,7 @@ contextBridge.exposeInMainWorld('aios', {
   /* --------------------------------------------------------------- forge */
   forge: {
     list: () => invoke('forge:list'),
+    setSlot: (slug, slot, on) => invoke('forge:setSlot', { slug, slot, on }),
     load: (slug) => invoke('forge:load', { slug }),
     install: (spec) => invoke('forge:install', spec),
     /* The build button's path: ungated, because pressing the button is the

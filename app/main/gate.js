@@ -391,10 +391,23 @@ function isUnattended() { return unattended > 0; }
 /** What to tell someone reading a job card about a refusal nobody could answer. */
 function unattendedReason(verdict) {
   const cap = verdict.cap || '這個能力';
+  /* Two different refusals wearing the same words, and only one of them has the
+     fix this used to offer. A plain ASK is a policy level and raising it to
+     ALLOW does lift it. A taint downgrade is not a level: `decide` reads the
+     policy first and downgrades afterwards, so ALLOW is exactly what got
+     downgraded and setting it again changes nothing. Sending somebody to a
+     switch that cannot help is worse than saying less -- they flip it, the job
+     fails the same way, and the message has spent the credit it needed to be
+     believed the next time. */
+  const how = verdict.taint
+    ? '把要動的目標寫進排程的那一句話裡（寫到目錄就夠，例如「…追加到 /notes」）——' +
+      '你自己指名的目標不受降級影響。另外要知道：' + cap +
+      ' 這次不是政策擋的，是被「這一輪讀過別人寫的東西」降級的，' +
+      '所以在能力閘門把它設成 ALLOW 沒有用——ALLOW 正是被降級的那一個。'
+    : '把要動的目標寫進排程的那一句話裡（寫到目錄就夠，例如「…追加到 /notes」），' +
+      '或在能力閘門把 ' + cap + ' 設成 ALLOW。';
   return '排程是在沒有人看著的時候執行的，所以授權視窗不會跳出來問，這個動作直接被擋下：' +
-    verdict.reason +
-    '。要讓它下次自己跑完，把要動的目標寫進排程的那一句話裡' +
-    '（寫到目錄就夠，例如「…追加到 /notes」），或在能力閘門把 ' + cap + ' 設成 ALLOW。';
+    verdict.reason + '。要讓它下次自己跑完，' + how;
 }
 
 function taintState() {

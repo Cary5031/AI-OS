@@ -302,6 +302,22 @@
     }
   };
 
+  AIOS.slots.declare('slides:slide-row', {
+    desc: '左邊縮圖列每一張投影片底下多一行字',
+    gives: '{rows:[{index, title, layout, hasNotes}]}',
+    wants: '{items:["每一張要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('slides:slide-actions', {
+    kind: 'act',
+    desc: '投影片縮圖的右鍵選單多一項，按下去把那一張交給擴充程式',
+    gives: '{slot, unit:{index, title, layout, hasNotes}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest('.sl-thumb') : null;
+      return t && t.__slotUnit ? t.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'slides',
     name: '簡報',
@@ -314,8 +330,9 @@
     chatHint: '可以說「幫我做一份五頁的簡報介紹這台機器」、「第 3 頁改成雙欄比較」、「在這頁加一個 3×4 表格」' +
               '或「用這些數字畫一張直條圖」。',
 
-    /* `.pptx` opens here too, but as an import: the file is read and a new,
-       untitled deck appears. See importPptx for why it can never be saved back. */
+    /* `.pptx` opens here too. One this editor wrote, and nothing touched since,
+       opens as itself; anybody else's is an import -- a new, untitled deck. See
+       importPptx for why that one can never be saved back. */
     accepts: function (p) { return /\.(aiosdeck|pptx)$/i.test(p || ''); },
 
     actions: {
@@ -1175,6 +1192,7 @@
         rail.innerHTML = '';
         deck.slides.forEach(function (s, i) {
           var t = el('div', 'sl-thumb' + (i === cur ? ' on' : ''));
+          t.__slotUnit = unitOf(s, i);
           t.setAttribute('role', 'button');
           t.tabIndex = 0;
           t.setAttribute('aria-label', '第 ' + (i + 1) + ' 頁：' +
@@ -1189,6 +1207,22 @@
           });
           rail.appendChild(t);
         });
+        paintContributions();
+      }
+
+      function unitOf(s, i) {
+        return {
+          index: i + 1, title: String(s.title || ''), layout: String(s.layout || ''),
+          hasNotes: !!(s.notes && String(s.notes).trim())
+        };
+      }
+
+      /* The rail redraws whole; a single thumbnail repaint (renderThumb) swaps
+         only the picture, so a contributed line under it survives typing. */
+      function paintContributions() {
+        if (!AIOS.slots || !deck.slides.length) return;
+        var thumbs = rail.querySelectorAll('.sl-thumb');
+        AIOS.slots.annotate('slides:slide-row', deck.slides.map(unitOf), function (i) { return thumbs[i] || null; });
       }
 
       /** Repaint one thumbnail. Typing must not rebuild sixty of them. */
@@ -3008,7 +3042,15 @@
         if (/\.html?$/i.test(target)) return exportAs('html', target);
         if (/\.(md|markdown)$/i.test(target)) return exportAs('md', target);
         if (/\.pdf$/i.test(target)) return exportAs('pdf', target);
-        if (/\.pptx$/i.test(target)) return exportAs('pptx', target);
+        if (/\.pptx$/i.test(target)) {
+          /* A save, not only an export: the file carries the deck and reopens
+             as itself, so the window is clean afterwards -- or closing it would
+             ask about unsaved changes that were just written. */
+          var wrote = await exportAs('pptx', target);
+          dirty = false;
+          render();
+          return wrote;
+        }
 
         /* Anything else, refused rather than written.
 
@@ -3124,7 +3166,7 @@
       }
 
       /**
-       * A .pptx is imported, never opened.
+       * A .pptx somebody else wrote is imported, never opened.
        *
        * The difference is one line -- `path` stays null -- and it is the whole
        * safety argument for reading the format at all. What this editor cannot
@@ -3133,11 +3175,20 @@
        * replace all of it with nothing while still producing a file that opens.
        * With no path, Ctrl+S asks for a name, and the original is untouched --
        * the same rule the PDF rewriter works under.
+       *
+       * The exception is a .pptx this editor wrote and nothing else has touched
+       * since: the writer embeds the deck beside the slides and the reader hands
+       * it back (`native`), so that file opens as itself -- layouts, bullets,
+       * the type scale, the lot -- and Ctrl+S writes it again. There is no
+       * template in it to destroy; it is ours. See open().
        */
-      async function importPptx(vpath) {
-        var r = await window.aios.office.readPptx(vpath);
-        if (!r.ok) { ctx.toast('讀不進來：' + r.error, 't-err'); return; }
-        var d = r.data;
+      async function importPptx(vpath, data) {
+        var d = data;
+        if (!d) {
+          var r = await window.aios.office.readPptx(vpath);
+          if (!r.ok) { ctx.toast('讀不進來：' + r.error, 't-err'); return; }
+          d = r.data;
+        }
         var notes = (d.warnings || []).slice();
 
         deck = {
@@ -3185,7 +3236,35 @@
 
       async function open(vpath) {
         if (!vpath) return;
-        if (/\.pptx$/i.test(vpath)) return importPptx(vpath);
+        if (/\.pptx$/i.test(vpath)) {
+          var pr = await window.aios.office.readPptx(vpath);
+          if (!pr.ok) { ctx.toast('讀不進來：' + pr.error, 't-err'); return; }
+          if (!pr.data.native) return importPptx(vpath, pr.data);
+          /* Ours, and untouched: open it like a .aiosdeck. The model came back
+             whole, so nothing is re-derived from the slides. */
+          var nd = pr.data;
+          deck = {
+            title: nd.title || '未命名簡報',
+            slides: (nd.slides || []).length ? nd.slides.map(normSlide) : [blank('title')]
+          };
+          if (nd.font) {
+            var have = AIOS.fonts.families.some(function (f) { return f.name === nd.font; });
+            if (have) { deckFont = nd.font; fontSel.value = nd.font; }
+          }
+          deckScale = Math.max(50, Math.min(300, Number(nd.scale) || 100));
+          scaleSel.value = String(deckScale);
+          path = vpath;
+          pathMtime = 0;
+          cur = 0;
+          selId = null;
+          dirty = false;
+          undoStack = [];
+          redoStack = [];
+          render();
+          ctx.setTitle('簡報 — ' + deck.title);
+          (nd.warnings || []).forEach(function (w) { ctx.toast(w, 't-warn'); });
+          return;
+        }
         var r = await A.fs.read(vpath);
         if (!r.ok) { ctx.toast('開啟失敗：' + r.error, 't-err'); return; }
         try {

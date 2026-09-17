@@ -1127,3 +1127,94 @@ test('a byte-order mark is stripped when reading, whoever wrote it', () => {
   // Only a leading one, and only one: a mark in the middle is data.
   assert.deepEqual(office.parseCsv('a,b\r\nc,\uFEFFd')[1], ['c', '\uFEFFd']);
 });
+
+/* ------------------------------------------------- a deck of our own, back */
+
+test('a .pptx this writer made reopens as the same deck, layouts and all', () => {
+  /* The failure this is written against was reported from the editor: build a
+     deck, format it, save as .pptx, close, reopen -- and every slide came back
+     as a blank one with text boxes on it, the bullets gone, the cover centred
+     because a cover is centred and nothing else was. Import is lossy by
+     design for a file PowerPoint wrote; for one this writer wrote an hour ago
+     the model is right there, and the reader hands it back. */
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const deck = {
+    title: '複雜版面', font: 'Calibri', scale: 120,
+    slides: [
+      { layout: 'title', title: '年度報告', body: ['2026 第三季'], notes: '', objects: [] },
+      { layout: 'bullets', title: '重點', body: ['第一點\n第二點'], notes: '講者備忘', objects: [
+        { id: 'a1', kind: 'text', text: '右下角', x: 60, y: 70, w: 32, h: 12, size: 14, align: 'right', valign: 'bottom', bold: true, italic: true, colour: 'C0392B', fill: '', stroke: '' },
+        { id: 'a2', kind: 'shape', shape: 'hexagon', text: 'HEX', x: 5, y: 60, w: 20, h: 25, size: 18, align: 'center', valign: 'middle', bold: false, italic: false, fill: '2E86DE', stroke: '', colour: '' }
+      ] },
+      { layout: 'two', title: '比較', body: ['左一\n左二', '右一\n右二'], notes: '', objects: [] },
+      { layout: 'blank', title: '', body: [''], notes: '', objects: [
+        { id: 'a3', kind: 'image', src: png, x: 5, y: 40, w: 20, h: 20, fit: 'contain' },
+        { id: 'a4', kind: 'chart', chart: { type: 'bar', title: '營收', categories: ['Q1', 'Q2'], series: [{ name: 'A', values: [3, 5] }] }, x: 50, y: 10, w: 45, h: 40 }
+      ] }
+    ]
+  };
+  const out = office.writePptx(deck);
+  const back = office.readPptx(out.buffer);
+  assert.equal(back.native, true, '自己寫的檔要認得出來');
+  assert.deepEqual(back.warnings, []);
+  assert.equal(back.title, '複雜版面');
+  assert.equal(back.font, 'Calibri');
+  assert.equal(back.scale, 120, '字級比例跟著回來，不是烘進字級裡');
+  assert.deepEqual(back.slides.map((s) => s.layout), ['title', 'bullets', 'two', 'blank'], '版面一頁都不能少');
+  assert.deepEqual(back.slides[1].body, ['第一點\n第二點'], '項目還是項目');
+  assert.deepEqual(back.slides[2].body, ['左一\n左二', '右一\n右二'], '雙欄還是雙欄');
+  assert.equal(back.slides[1].notes, '講者備忘');
+  assert.deepEqual(back.slides[1].objects, deck.slides[1].objects, '物件一個欄位都不能變');
+  assert.equal(back.slides[3].objects[0].src, png, '圖片從媒體部件接回來，還是同一張');
+  assert.deepEqual(back.slides[3].objects[1].chart, deck.slides[3].objects[1].chart);
+
+  /* And the picture is in the package once: the embedded model points at the
+     media part rather than carrying a second copy. */
+  const files = zip.read(out.buffer);
+  const own = JSON.parse(files.get('docProps/aios-deck.json').toString('utf8'));
+  assert.match(own.slides[3].objects[0].src, /^aios-media:image1\.png$/, '嵌進去的模型指向媒體部件');
+  assert.match(files.get('[Content_Types].xml').toString('utf8'), /aios-deck\.json/, '自訂部件要有內容型別，不然 PowerPoint 會說檔案要修復');
+  assert.match(files.get('_rels/.rels').toString('utf8'), /aios-deck\.json/, '而且要有關聯，PowerPoint 才會留著它');
+});
+
+test('a .pptx of ours that something else edited is imported, not restored', () => {
+  /* The model is a memory of a deck that no longer exists once PowerPoint has
+     moved a box. The fingerprint is over the slide parts, so any such edit
+     sends the file down the import path -- with a sentence saying why the
+     layout is about to be rearranged, rather than a silent restore of the
+     wrong deck or a silent import of the right one. */
+  const deck = { title: 'x', slides: [{ layout: 'bullets', title: 'T', body: ['a\nb'], objects: [] }] };
+  const out = office.writePptx(deck);
+  const files = zip.read(out.buffer);
+  const entries = {};
+  files.forEach((buf, name) => { entries[name] = buf; });
+  entries['ppt/slides/slide1.xml'] = files.get('ppt/slides/slide1.xml').toString('utf8').replace('<a:t>T</a:t>', '<a:t>T2</a:t>');
+  const touched = zip.write(entries);
+  const back = office.readPptx(touched);
+  assert.ok(!back.native, '改過的檔不能原樣還原');
+  assert.equal(back.slides[0].layout, 'blank', '走的是匯入');
+  assert.ok(back.warnings.some((w) => /被別的程式改過/.test(w)), '要說為什麼：' + back.warnings.join(' / '));
+  assert.ok(back.slides[0].objects.some((o) => o.text === 'T2'), '而且讀的是檔案裡真正的內容');
+
+  /* A file with no model at all -- somebody else's -- says nothing about it. */
+  delete entries['docProps/aios-deck.json'];
+  const foreign = office.readPptx(zip.write(entries));
+  assert.ok(!foreign.native);
+  assert.ok(!foreign.warnings.some((w) => /被別的程式改過/.test(w)), '別人的檔沒有「被改過」可言');
+});
+
+test('the type scale is not baked into an object’s own size', () => {
+  /* The editor scales the text a layout places and leaves an object's size as
+     the number the person typed; the writer used to scale both, so PowerPoint
+     showed every text box a fifth larger than the editor did at 120% -- and a
+     deck saved and reopened through .pptx grew on every round. */
+  const deck = {
+    title: 'x', scale: 150,
+    slides: [{ layout: 'bullets', title: 'T', body: ['b'], objects: [
+      { id: 'o', kind: 'text', text: 'obj', x: 10, y: 10, w: 30, h: 10, size: 20, align: 'left', valign: 'top' }
+    ] }]
+  };
+  const xml = zip.read(office.writePptx(deck).buffer).get('ppt/slides/slide1.xml').toString('utf8');
+  assert.match(xml, /sz="2000"/, '物件字級照人打的 20pt 寫');
+  assert.match(xml, /sz="4200"/, '版面標題 28pt 才吃比例，變成 42pt');
+});

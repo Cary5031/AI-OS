@@ -37,6 +37,23 @@
     if (fn) fn(msg.event, msg.payload);
   });
 
+  /* The unit is the page in the visible tab: its address and title, which is
+     what the tab strip already shows. Never the page's text -- an extension
+     that wants that has os.page.read, with its own capability and its own
+     consent. */
+  AIOS.slots.declare('browser:page-note', {
+    desc: '狀態列底下多一行關於目前這一頁的字',
+    gives: '{rows:[{url, host, title}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('browser:page-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把目前這一頁（網址與標題）交給擴充程式',
+    gives: '{slot, unit:{url, host, title}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'browser',
     /* Pages are tabs in one window. A native view per window was cheap
@@ -419,6 +436,19 @@
         /* One page is not a set of tabs. The strip stays out of the way until
            there is a choice to make. */
         tabbar.hidden = sheets.length < 2;
+        paintContributions();
+      }
+
+      /* Repainted with the tab strip, which is redrawn whenever a tab's title
+         or address changes -- the same moments the unit changes. */
+      function paintContributions() {
+        if (!AIOS.slots) return;
+        var s = sheets[at];
+        if (!s || !s.url || s.url === 'about:blank') { ctx.body.__slotUnit = null; return; }
+        var unit = { url: String(s.url), host: hostOf(s.url), title: String(s.title || '') };
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('browser:page-note', [unit], function () { return bar; });
       }
 
       function hostOf(url) {

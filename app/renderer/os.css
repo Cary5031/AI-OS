@@ -2720,6 +2720,18 @@ select optgroup {
   font-size: 12px; color: var(--fg-dim); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 擴充程式寫進來的那一行（slots.js 畫的，每個宿主長一樣）。前面帶著那個擴充程式
+   的圖示、左邊一條線：一眼看得出是別人加的，跟宿主自己的欄位分得開——
+   不然沒有人知道畫面上那句話是誰說的。 */
+.slot-ext {
+  font-size: 10px; line-height: 1.4; color: var(--fg-faint); margin-top: 3px;
+  padding-left: 6px; border-left: 2px solid var(--hair-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.slot-ext-icon { margin-right: 4px; opacity: .8; }
+/* 單一文件型的視窗（Markdown、PDF、編輯器…）把貢獻的行放在狀態列底下的這條帶子裡。 */
+.slot-bar:empty { display: none; }
+.slot-bar { padding: 0 10px 4px; }
 /* 收件者與副本。兩行為止：一封發給二十個人的信如果整串攤開，
    下一封就被推出畫面了；完整的標頭在 title，也在開信畫面。 */
 .ml-rcpt {

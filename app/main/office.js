@@ -24,6 +24,7 @@
    =========================================================================== */
 
 const zip = require('./zip');
+const crypto = require('node:crypto');
 const chartxml = require('./chartxml');
 /* The chart model is the renderer's, loaded here for the pure half (a chart's
    data as a table and back) so the .md bridge reads a chart the way the editors
@@ -1953,6 +1954,28 @@ function decodeDataUri(src) {
  * they are shown, not swallowed, because a presentation that quietly lost a
  * picture is worse than one that says it did.
  */
+/* Where a deck this writer made keeps its own model, and how it is related in.
+   A custom relationship type is how a package carries data of its own without
+   PowerPoint objecting: unknown parts with a content type and a relationship
+   are kept and ignored, which is exactly what is wanted. */
+const OWN_DECK_PART = 'docProps/aios-deck.json';
+const OWN_DECK_REL = 'http://aios.local/relationships/deck';
+const OWN_MEDIA_PREFIX = 'aios-media:';
+
+/**
+ * What the slides looked like when the embedded model was written.
+ *
+ * Over the slide parts in order, so any edit PowerPoint makes to any slide --
+ * a moved box, a retyped word -- changes it, and the reader falls back to
+ * importing what is actually in the file rather than restoring a model that
+ * no longer matches it. The master, layout and theme are left out on purpose:
+ * they are this writer's own boilerplate and a reader that refused a deck over
+ * a re-saved theme would refuse every deck PowerPoint had merely opened.
+ */
+function slideFingerprint(slideXmls) {
+  return crypto.createHash('sha1').update(slideXmls.join('|')).digest('hex');
+}
+
 function writePptx(deck = {}) {
   const warnings = [];
   const slides = Array.isArray(deck.slides) && deck.slides.length
@@ -2077,8 +2100,15 @@ function writePptx(deck = {}) {
         shapes.push(chartFrameXml(nextId++, o, rid));
         return;
       }
+      /* Not `at(o.size)`. The type scale is the editor's dial for the text a
+         layout places -- titles and bullets, whose sizes nobody types -- and the
+         editor applies it only there (`cqh(o.size)` has no scale in it). An
+         object's size is a number the person chose, in points, and the editor
+         shows exactly that. Scaling it here made PowerPoint show every text box
+         a fifth larger than the editor did at 120%, and made a reopened deck
+         grow on every save. */
       const opts = {
-        size: at(o.size), font, bold: o.bold, italic: o.italic,
+        size: o.size, font, bold: o.bold, italic: o.italic,
         colour: o.colour || (o.kind === 'shape' && o.fill ? 'FFFFFF' : ''),
         align: o.align, bullet: false
       };
@@ -2258,6 +2288,7 @@ function writePptx(deck = {}) {
       : '') +
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
     '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+    `<Override PartName="/${OWN_DECK_PART}" ContentType="application/json"/>` +
     '</Types>';
 
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -2278,13 +2309,44 @@ function writePptx(deck = {}) {
     `<Slides>${slides.length}</Slides><Words>0</Words>` +
     '</Properties>';
 
+  /* The deck itself, riding along in the package.
+
+     A .pptx this writer makes is self-describing for PowerPoint but not for
+     this editor: coordinates and run properties survive, the *layout* does
+     not -- a bulleted slide comes back as a blank one with two text boxes on
+     it, the bullets gone, the layout selector saying 空白. Somebody who saved
+     as .pptx (the format they know) and reopened it saw their deck rearranged
+     and called it broken, which it was. So the model goes in beside the
+     slides, and the reader restores it when the slides are the ones this
+     model produced -- the fingerprint is how it knows nothing else has edited
+     them since. Pictures are not duplicated: the embedded copy points at the
+     media part the slide already carries. */
+  const embeddedSlides = slides.map((raw) => {
+    const s = raw || {};
+    return Object.assign({}, s, {
+      objects: (Array.isArray(s.objects) ? s.objects : []).map((o) => {
+        if (!o || o.kind !== 'image' || !o.src || !/^data:/i.test(o.src)) return o;
+        const name = addImage(o.src);
+        return name ? Object.assign({}, o, { src: OWN_MEDIA_PREFIX + name }) : o;
+      })
+    });
+  });
+  const ownDeck = JSON.stringify({
+    kind: 'aiosdeck', version: 5, title: deck.title || '', font: font || '',
+    scale: Number(deck.scale) || 100,
+    fingerprint: slideFingerprint(slideParts),
+    slides: embeddedSlides
+  });
+
   const parts = {
+    [OWN_DECK_PART]: ownDeck,
     '[Content_Types].xml': contentTypes,
     '_rels/.rels': XML_DECL +
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
       '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>' +
       '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
       '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+      `<Relationship Id="rId4" Type="${OWN_DECK_REL}" Target="${OWN_DECK_PART}"/>` +
       '</Relationships>',
     'docProps/core.xml': core,
     'docProps/app.xml': app,
@@ -2934,6 +2996,49 @@ function readTableFrame(frameXml, ctx) {
  * expected to treat it as a new, untitled document: see the header above for
  * why writing back is not offered.
  */
+/**
+ * The model this writer embedded, if the slides are still the ones it wrote.
+ *
+ * Returns null when the part is absent (somebody else's file), `{ stale }`
+ * when it is there but a slide changed since (PowerPoint edited it: the model
+ * is a memory of a deck that no longer exists), and `{ deck, warnings }` when
+ * it can be trusted. Pictures come back as the data URIs the editor expects,
+ * read from the media parts the embedded copy points at.
+ */
+function ownDeckIn(files) {
+  const part = files.get(OWN_DECK_PART);
+  if (!part) return null;
+  let own;
+  try { own = JSON.parse(part.toString('utf8')); } catch { return { stale: true }; }
+  if (!own || own.kind !== 'aiosdeck' || !Array.isArray(own.slides)) return { stale: true };
+
+  const xmls = [];
+  for (let i = 1; ; i++) {
+    const b = files.get(`ppt/slides/slide${i}.xml`);
+    if (!b) break;
+    xmls.push(b.toString('utf8'));
+  }
+  if (!xmls.length || slideFingerprint(xmls) !== own.fingerprint) return { stale: true };
+
+  const warnings = [];
+  const slides = own.slides.slice(0, MAX_SLIDES).map((raw) => {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    const objects = (Array.isArray(s.objects) ? s.objects : []).slice(0, MAX_OBJECTS).map((o) => {
+      if (!o || o.kind !== 'image' || typeof o.src !== 'string' || o.src.indexOf(OWN_MEDIA_PREFIX) !== 0) return o;
+      const name = o.src.slice(OWN_MEDIA_PREFIX.length);
+      const bytes = files.get('ppt/media/' + name);
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      if (!bytes || !PIC_MIME[ext]) {
+        warnings.push('有一張圖片在檔案裡找不到');
+        return Object.assign({}, o, { src: '' });
+      }
+      return Object.assign({}, o, { src: 'data:' + PIC_MIME[ext] + ';base64,' + bytes.toString('base64') });
+    });
+    return Object.assign({}, s, { objects });
+  });
+  return { deck: Object.assign({}, own, { slides }), warnings };
+}
+
 function readPptx(buffer, opts = {}) {
   const files = zip.read(buffer);
   const presPart = files.get('ppt/presentation.xml');
@@ -2956,6 +3061,31 @@ function readPptx(buffer, opts = {}) {
   if (Math.abs(W / H - 16 / 9) > 0.02) {
     warn(0, '這份簡報不是 16:9（原本是 ' + (W / H).toFixed(2) +
       ':1），版面已依比例換算到 16:9 的投影片上');
+  }
+
+  /* A deck this application wrote, untouched since: hand its own model back
+     rather than reading the slides as if a stranger had made them. Import is
+     what the rest of this function does, and import is lossy by design --
+     layouts become blank, bullets become lines -- which is right for a file
+     PowerPoint wrote and wrong for one this editor wrote ten minutes ago. */
+  /* `restore: false` asks for the import reading even of our own file -- what
+     the round-trip tests want, since a restored model proves nothing about
+     the slides, and what a 「重新匯入」 would use. */
+  const own = opts.restore === false ? null : ownDeckIn(files);
+  if (own && own.deck) {
+    return {
+      title: String(own.deck.title || '').slice(0, 120),
+      font: String(own.deck.font || ''),
+      scale: Number(own.deck.scale) || 100,
+      slides: own.deck.slides,
+      native: true,
+      warnings: own.warnings,
+      size: { cx: W, cy: H }
+    };
+  }
+  if (own && own.stale) {
+    warn(0, '這份原本是 AI-OS 存的簡報，但之後被別的程式改過，所以只能用匯入的方式讀：' +
+      '版面會照匯入的規則重排，每一頁都變成「空白」版面');
   }
 
   const presRels = relsFor(files, 'ppt/presentation.xml');

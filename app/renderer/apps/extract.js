@@ -99,6 +99,22 @@
 
   var AUTO = '自動判別';
 
+  AIOS.slots.declare('extract:doc-row', {
+    desc: '萃取清單裡每一份文件底下多一行字',
+    gives: '{rows:[{path, name, status, bytes, vendor, rows, pages, filed, error}]}',
+    wants: '{items:["每一份文件要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('extract:doc-actions', {
+    kind: 'act',
+    desc: '萃取清單裡文件的右鍵選單多一項，按下去把那份文件交給擴充程式',
+    gives: '{slot, unit:{path, name, status, bytes, vendor, rows, pages, filed, error}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev) {
+      var row = ev && ev.target && ev.target.closest ? ev.target.closest('.ext-doc') : null;
+      return row && row.__slotUnit ? row.__slotUnit : null;
+    }
+  });
+
   AIOS.apps.register({
     id: 'extract',
     name: '文件萃取',
@@ -1388,6 +1404,7 @@
         var list = el('ul', 'ext-docs');
         docs.forEach(function (d) {
           var li = el('li', 'ext-doc ext-st-' + d.status);
+          li.__slotUnit = unitOf(d);
           var top = el('div', 'ext-doc-top');
           top.appendChild(el('span', 'ext-dot', glyphFor(d.status)));
           var nm = el('span', 'ext-doc-name', d.name);
@@ -1421,6 +1438,21 @@
           list.appendChild(li);
         });
         side.appendChild(list);
+        paintContributions();
+      }
+
+      function unitOf(d) {
+        return {
+          path: String(d.path || ''), name: String(d.name || ''), status: String(d.status || ''),
+          bytes: Number(d.bytes) || 0, vendor: String(d.vendor || ''), rows: Number(d.rows) || 0,
+          pages: Number(d.pages) || 0, filed: String(d.filed || ''), error: String(d.error || '')
+        };
+      }
+
+      function paintContributions() {
+        if (!AIOS.slots || !docs.length) return;
+        var rows = side.querySelectorAll('li.ext-doc');
+        AIOS.slots.annotate('extract:doc-row', docs.map(unitOf), function (i) { return rows[i] || null; });
       }
 
       function glyphFor(s) {

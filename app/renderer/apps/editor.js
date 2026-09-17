@@ -33,6 +33,19 @@
     return m ? m[1].toLowerCase() : '';
   }
 
+  AIOS.slots.declare('editor:doc-note', {
+    desc: '狀態列底下多一行關於目前這個檔案的字',
+    gives: '{rows:[{path, name, chars, lines, saved}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('editor:doc-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把目前這個檔案交給擴充程式',
+    gives: '{slot, unit:{path, name, chars, lines, saved}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'editor',
     contentApp: true,   // its chat panel gets the intent-enrichment guide
@@ -212,6 +225,24 @@
           (sel ? '　·　已選 ' + sel + ' 字' : '') +
           (t.saved ? '' : '　·　未儲存');
         info.textContent = (ext(t.path) || 'txt').toUpperCase();
+        paintContributions(t);
+      }
+
+      function unitOf(t) {
+        return {
+          path: String(t.path || ''), name: String(t.path || '').split('/').pop(),
+          chars: area.value.length, lines: area.value.split('\n').length, saved: !!t.saved
+        };
+      }
+
+      /* The status repaints on every keystroke; annotate() throws away answers
+         that arrive after a newer call, so typing does not stack lines. */
+      function paintContributions(t) {
+        if (!AIOS.slots || !t) return;
+        var unit = unitOf(t);
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('editor:doc-note', [unit], function () { return bar; });
       }
 
       function activate(i) {

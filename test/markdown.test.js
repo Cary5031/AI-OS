@@ -21,7 +21,10 @@ const vm = require('node:vm');
 const SRC = path.join(__dirname, '..', 'app', 'renderer', 'apps', 'markdown.js');
 
 function load() {
-  const AIOS = { apps: { register() {} } };
+  /* `slots` because the viewer declares its contribution points at load, the
+     way it registers itself; a stub without it would make this test fail on
+     a line that has nothing to do with Markdown. */
+  const AIOS = { apps: { register() {} }, slots: { declare() {} } };
   vm.runInNewContext(fs.readFileSync(SRC, 'utf8'), {
     window: { aios: {}, AIOS },
     AIOS,

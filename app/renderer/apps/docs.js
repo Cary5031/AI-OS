@@ -79,6 +79,19 @@
     series: [{ name: '收入', values: [120, 95, 140] }, { name: '支出', values: [80, 110, 90] }]
   };
 
+  AIOS.slots.declare('docs:doc-note', {
+    desc: '狀態列底下多一行關於這份文件的字',
+    gives: '{rows:[{path, name, blocks, words, breaks, dirty}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('docs:doc-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把這份文件交給擴充程式',
+    gives: '{slot, unit:{path, name, blocks, words, breaks, dirty}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'docs',
     name: '文件',
@@ -1555,6 +1568,18 @@
           (undoStack.length ? '　·　可復原 ' + undoStack.length + ' 步' : '');
         syncMarks();
         publish();
+        paintContributions(words, breaks);
+      }
+
+      function paintContributions(words, breaks) {
+        if (!AIOS.slots) return;
+        var unit = {
+          path: String(path || ''), name: path ? String(path).split('/').pop() : '',
+          blocks: blocks.length, words: words, breaks: breaks, dirty: !!dirty
+        };
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('docs:doc-note', [unit], function () { return bar; });
       }
 
       /** Pull the DOM back into the block model, preserving every run key. */

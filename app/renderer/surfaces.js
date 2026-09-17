@@ -3597,6 +3597,12 @@
     }
   };
 
+  /* How much `data` one action may hand back. 256 KB is about two thousand
+     mail rows -- past the point where a program is showing them to anybody, and
+     well past the point where the result is still a useful context page. See
+     the action contract in apps/registry.js. */
+  var MAX_ACTION_DATA = 256 * 1024;
+
   AIOS.exec = {
 
     /* ------------------------------------------------------ applications */
@@ -3674,6 +3680,50 @@
         });
       }
       var out = await AIOS.apps.invoke(def.id, action, args);
+      var spec = (def.actions || {})[action] || {};
+
+      if (out && out.data !== undefined) {
+        /* The hard ceiling. An action bounds its own `data` -- it is the only
+           thing that knows its shape -- but "bounded" has to stay true when an
+           action forgets, and the bill for forgetting lands on a generated
+           program's frame and on the context page this becomes. Refusing and
+           naming the size beats truncating: a silently short answer looks
+           exactly like a short mailbox, and nobody can tell from the outside. */
+        var size = 0;
+        try {
+          size = JSON.stringify(out.data).length;
+        } catch (e) {
+          throw new Error(def.name + '：' + action + ' 回的 data 不是可以序列化的東西（' +
+            e.message + '）。動作要回純資料，不是物件參照。');
+        }
+        if (size > MAX_ACTION_DATA) {
+          throw new Error(def.name + '：' + action + ' 回了 ' + Math.round(size / 1024) +
+            ' KB 的 data，上限是 ' + Math.round(MAX_ACTION_DATA / 1024) +
+            ' KB。用 limit 之類的參數要少一點，不要讓它靜靜地被截掉。');
+        }
+
+        /* Somebody else's writing, leaving the window it belongs to.
+
+           This is the boundary, and the reason it is here rather than in the
+           action: inside the window the chat panel already sees this content
+           through ctx.describe and ctx.publish, both of which fence it as
+           untrusted. Crossing into the planner, or into a generated program that
+           can loop over it, is the new thing. Leaving it to each action to
+           remember would mean one of them eventually does not. */
+        if (spec.taints) {
+          try {
+            await window.aios.taint.add('app:' + def.id + ':' + action,
+              '「' + def.name + '」的 ' + action + ' 交出來的資料（別人寫的字）');
+            await AIOS.kernel.refreshTaint();
+          } catch (e) {
+            /* Arming taint only ever reduces this machine's own authority, so a
+               failure here must not fail the action -- but it must be visible,
+               because the quiet version is a downgrade that did not happen. */
+            if (AIOS.ui) AIOS.ui.trace('taint: 武裝失敗（' + def.id + '.' + action + '）：' + e.message, 't-warn');
+          }
+        }
+      }
+
       return {
         note: def.name + '：' + action + ((out && out.note) ? ' — ' + out.note : ''),
         data: out

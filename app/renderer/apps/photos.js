@@ -53,6 +53,19 @@
       .sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true }); });
   }
 
+  AIOS.slots.declare('photos:photo-note', {
+    desc: '狀態列底下多一行關於這張圖片的字',
+    gives: '{rows:[{path, name, width, height, bytes, index, count}]}',
+    wants: '{items:["要多寫的那行字，沒有就給空字串"]}'
+  });
+  AIOS.slots.declare('photos:photo-actions', {
+    kind: 'act',
+    desc: '右鍵選單多一項，按下去把這張圖片交給擴充程式',
+    gives: '{slot, unit:{path, name, width, height, bytes, index, count}}',
+    wants: 'slotAct 自己決定；它跑在擴充程式自己的視窗與能力裡',
+    unitAt: function (ev, inst) { return AIOS.slots.bodyUnit(ev, inst); }
+  });
+
   AIOS.apps.register({
     id: 'photos',
     name: '圖片檢視器',
@@ -279,6 +292,24 @@
         counter.textContent = list.length > 1 && i >= 0 ? (i + 1) + '/' + list.length : '';
         btnPrev.disabled = !(list.length > 1);
         btnNext.disabled = !(list.length > 1);
+        paintContributions();
+      }
+
+      function unitOf() {
+        var i = index();
+        return {
+          path: String(path || ''), name: baseName(path),
+          width: Number(natural.w) || 0, height: Number(natural.h) || 0, bytes: Number(bytes) || 0,
+          index: i >= 0 ? i + 1 : 0, count: list.length
+        };
+      }
+
+      function paintContributions() {
+        if (!AIOS.slots || !path) return;
+        var unit = unitOf();
+        ctx.body.__slotUnit = unit;
+        var bar = AIOS.slots.barAfter(status);
+        AIOS.slots.annotate('photos:photo-note', [unit], function () { return bar; });
       }
 
       function info() {
