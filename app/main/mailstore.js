@@ -67,6 +67,7 @@ const bodyCache = new Map();
 
 let root = null;          // <sandbox>/.mail
 let account = null;       // the account key this store belongs to
+let owner = '';           // the address this mailbox belongs to, lower-cased
 let index = null;         // messageId -> summary
 let local = null;         // messageId -> local-only state
 let cursors = null;       // folder -> { uidValidity, highestUid }
@@ -123,6 +124,7 @@ function bare(o) {
 async function init(email) {
   root = path.join(sandbox.root(), sandbox.MAIL_DIR);
   account = accountKey(email);
+  owner = String(email || '').trim().toLowerCase();
   const p = paths();
   await fs.mkdir(p.bodies, { recursive: true });
   index = await readJson(p.index, {});
@@ -189,6 +191,13 @@ function put(msg) {
     fromName: msg.fromName || before.fromName || '',
     to: msg.to || before.to || '',
     cc: msg.cc || before.cc || '',
+    /* Whether the source says this message was addressed to, or copied to,
+       the mailbox's owner. Only the web source knows (MessageToMe and
+       MessageCcMe); an IMAP row leaves both undefined and the address in `to`
+       speaks for it. Merged like the other server facts: a re-sync that does
+       not carry them must not erase what one that did had said. */
+    toMe: msg.toMe !== undefined ? !!msg.toMe : before.toMe,
+    ccMe: msg.ccMe !== undefined ? !!msg.ccMe : before.ccMe,
     subject: msg.subject || before.subject || '(無主旨)',
     date: msg.date || before.date || 0,
     seen: msg.seen !== undefined ? !!msg.seen : !!before.seen,
@@ -442,6 +451,26 @@ function partyMatches(header, who) {
   return text.includes(want);
 }
 
+/**
+ * Was this message sent to the party -- where the party may be 「我」.
+ *
+ * Anybody else is matched against the To and Cc headers by partyMatches. The
+ * owner is different, because the headers may not name them: a row from the
+ * web source's list carries display names only, and a message that came
+ * through a distribution list names the list. The source's own flags answer
+ * that (see owa.partiesOf); the header is the fallback for a source that has
+ * no flags, which is what an IMAP row is.
+ */
+function sentTo(v, who) {
+  const want = norm(who).trim();
+  if (!want) return true;
+  const header = v.to + ' ' + v.cc;
+  const self = want === '我' || want === 'me' || (owner && want === owner);
+  if (!self) return partyMatches(header, who);
+  if (v.toMe === true || v.ccMe === true) return true;
+  return owner ? partyMatches(header, owner) : false;
+}
+
 /** A window of text around the first hit, for a list that shows why it matched. */
 function snippetOf(text, needle, span) {
   const t = String(text || '');
@@ -487,7 +516,7 @@ async function search(opts = {}) {
     if (since && (v.date || 0) < since) continue;
     if (until && (v.date || 0) > until) continue;
     if (o.from && !partyMatches(v.from + ' ' + v.fromName, o.from)) continue;
-    if (o.to && !partyMatches(v.to + ' ' + v.cc, o.to)) continue;
+    if (o.to && !sentTo(v, o.to)) continue;
     if (o.hasAttachment && !v.hasAttachments) continue;
     if (o.unread && v.seen) continue;
     candidates.push(v);
@@ -787,7 +816,7 @@ module.exports = {
   init, ready, flush, stats,
   put, putBody, body, putHtml, html, get, list, unknown,
   putAttachments, attachment,
-  search, partyMatches, addressesIn, snippetOf,
+  search, partyMatches, sentTo, addressesIn, snippetOf,
   setLocal, localOf,
   cursor, setCursor, bySource, dir, coverage, inFolder, shortOf, resolve, HANDLE_LEN,
   trim, trimAttachments, purge,

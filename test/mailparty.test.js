@@ -99,3 +99,16 @@ test('名字有空白就用引號框起來，兩個條件可以一起下', () =>
   assert.deepEqual(P.query('寄件人:abc.com 收件:王小明 尾款'),
     { text: '尾款', from: 'abc.com', to: '王小明' });
 });
+
+test('只有名字、沒有位址的收件者，也是一個人一個人的，而引號不會印出來', () => {
+  /* The web source's list rows carry names only (Outlook's FindItem never
+     returns the addresses), and a name with a comma in it is stored quoted so
+     the split above keeps it whole. The quotes are for the split, not for the
+     reader. */
+  assert.deepEqual(P.split('Irene Wu(吳雅婷), "Peng, Jeremy", TW_ALL'),
+    ['Irene Wu(吳雅婷)', '"Peng, Jeremy"', 'TW_ALL']);
+  assert.equal(P.name('"Peng, Jeremy"'), 'Peng, Jeremy', '引號脫掉，逗號留著');
+  assert.equal(P.name('TW_ALL'), 'TW_ALL');
+  assert.equal(P.line({ to: 'Irene Wu(吳雅婷), "Peng, Jeremy"', cc: '我' }),
+    '收件：Irene Wu(吳雅婷)、Peng, Jeremy　副本：我');
+});

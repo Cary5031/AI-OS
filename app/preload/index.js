@@ -197,6 +197,8 @@ contextBridge.exposeInMainWorld('aios', {
     find: (query, opts) => invoke('fs:find', { query, dir: (opts||{}).dir, content: (opts||{}).content }),
     usage: () => invoke('fs:usage'),
     list: (dir) => invoke('fs:list', { dir }),
+    /* Whether a path exists, and whether it is a directory -- without reading it. */
+    exists: (path) => invoke('fs:exists', { path }),
     read: (path) => invoke('fs:read', { path }),
     /* expectMtime is optional and means "replace exactly the version I read".
        Left out, the write is unconditional, which is right for creating a file

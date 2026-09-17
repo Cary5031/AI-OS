@@ -32,7 +32,14 @@ function item(over = {}) {
     Subject: '九月份報價單',
     DateTimeReceived: '2026-09-08T02:10:00Z',
     From: { Mailbox: { Name: '王小明', EmailAddress: 'ming@abc.com' } },
-    ToRecipients: [{ Mailbox: { Name: '我', EmailAddress: ACCOUNT } }],
+    /* What a list row really carries: the names, and whether it was to or cc
+       this mailbox. The recipient collections with the addresses in them are
+       a GetItem thing -- this fixture used to have a ToRecipients array here,
+       which the server never sends on a list, and the tests were green over a
+       column that was empty on every real row. */
+    DisplayTo: '我',
+    MessageToMe: true,
+    MessageCcMe: false,
     IsRead: false,
     HasAttachments: false,
     ...over
@@ -681,4 +688,74 @@ test('收件者很多的一封信，切在人跟人中間，而且說有幾個�
   }), {});
   assert.equal(few.to, '王小明 <ming@abc.com>', '人不多就原封不動');
   assert.equal(few.cc, '李大華 <lee@abc.com>', '副本也一樣');
+});
+
+test('清單回應沒有收件者的位址，只有名字跟「是不是寄給我」，兩樣都要存下來', () => {
+  /* Measured on the first real tenant: a FindItem response carries DisplayTo
+     and DisplayCc (names joined with semicolons) and the two MessageToMe /
+     MessageCcMe flags, and never the recipient collections. The normaliser
+     read only the collections, so every row of the mirror had an empty To,
+     「收件者含 me@company.com」 found nothing, and the fixture above -- which
+     used to give list items a ToRecipients array -- kept the tests green over
+     the empty column. */
+  const row = owa.normaliseItem(item({
+    DisplayTo: 'Irene Wu(吳雅婷); Chi Huang(黃祺雅); TW_ALL',
+    DisplayCc: 'JC Lee(李志清); "Peng, Jeremy"',
+    MessageToMe: false,
+    MessageCcMe: true
+  }), { folder: 'INBOX' });
+
+  assert.equal(row.to, 'Irene Wu(吳雅婷), Chi Huang(黃祺雅), TW_ALL', '名字一個一個存，用鏡像自己的逗號接');
+  assert.equal(row.cc, 'JC Lee(李志清), "Peng, Jeremy"', '名字裡的逗號要加引號，不然拆人的時候會變成兩個');
+  assert.equal(row.toMe, false, 'To 裡沒有我');
+  assert.equal(row.ccMe, true, '副本裡有我——這是任何標頭都說不出來的事');
+
+  /* The string form of the flags, which one JSON mapping of the same server
+     produces, means the same thing. */
+  const stringy = owa.normaliseItem(item({ MessageToMe: 'true', MessageCcMe: 'false' }), {});
+  assert.equal(stringy.toMe, true);
+  assert.equal(stringy.ccMe, false);
+
+  /* A response with neither says nothing, and the row must not claim it did. */
+  const mute = owa.normaliseItem(item({ DisplayTo: undefined, MessageToMe: undefined, MessageCcMe: undefined }), {});
+  assert.equal(mute.to, '');
+  assert.equal(mute.toMe, undefined, '沒有旗標就是不知道，不是 false');
+
+  /* The collections, when a response does carry them, win over the names:
+     an address is more than a name, and an opened message has both. */
+  const full = owa.normaliseItem(item({
+    ToRecipients: [{ Name: '我', EmailAddress: ACCOUNT, RoutingType: 'SMTP' }]
+  }), {});
+  assert.equal(full.to, '我 <' + ACCOUNT + '>', 'GetItem 的收件者是平的 Name/EmailAddress，沒有 Mailbox 包著');
+
+  /* And the page the sync stores carries the flags, not only the names. */
+  const page = owa.adoptPage([item({ MessageToMe: false, MessageCcMe: true })], { folder: 'INBOX' });
+  assert.equal(page.rows.length, 1);
+  assert.equal(page.rows[0].to, '我');
+  assert.equal(page.rows[0].ccMe, true, '同步寫進鏡像的那一列要帶旗標');
+});
+
+test('開信的回應帶著完整位址，而 syncBody 會把它寫回那一列', () => {
+  /* The list gave names; the opened item has the addresses. syncBody used to
+     store the body, the markup and the attachments and nothing else, so even
+     a message somebody had read still had an empty To. The source assertion is
+     the only unit-level check possible -- the call needs a signed-in session --
+     and e2e/specs/owa.mjs drives the real thing against a fake Outlook. */
+  const opened = owa.partiesOf({
+    ToRecipients: [{ Name: '王小明', EmailAddress: 'ming@abc.com' }],
+    CcRecipients: [{ Name: '我', EmailAddress: ACCOUNT }],
+    DisplayTo: '王小明',
+    DisplayCc: '我',
+    MessageToMe: false,
+    MessageCcMe: true
+  });
+  assert.deepEqual(opened, { to: '王小明 <ming@abc.com>', cc: '我 <' + ACCOUNT + '>', toMe: false, ccMe: true });
+
+  const src = require('node:fs').readFileSync(require.resolve('../app/main/owa'), 'utf8');
+  const fn = src.slice(src.indexOf('async function syncBody('), src.indexOf('module.exports'));
+  assert.ok(/partiesOf\(item\)/.test(fn), 'syncBody 要讀開信回應裡的收件者');
+  assert.ok(/store\.put\(\{ messageId, folder: held\.folder, \.\.\.parties \}\)/.test(fn),
+    '……並且寫回鏡像的那一列，不是只寫內文');
+  assert.ok(fn.indexOf('store.put(') < fn.indexOf('store.putBody('),
+    '先寫標頭再寫內文，因為 put 是從舊的那一列重建的');
 });

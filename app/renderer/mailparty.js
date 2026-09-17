@@ -97,7 +97,10 @@
   function name(one) {
     var s = oneLine(one, MAX_ONE);
     var m = s.match(/^(.*?)<([^>]*)>$/);
-    if (!m) return s;
+    /* A name with no address is what the web source's list rows carry, and one
+       with a comma in it arrives quoted so `split` keeps it whole. The quotes
+       did their job there; nobody wants to read them. */
+    if (!m) return s.replace(/^"(.*)"$/, '$1').trim() || s;
     var display = m[1].trim().replace(/^"(.*)"$/, '$1').trim();
     return display || m[2].trim();
   }

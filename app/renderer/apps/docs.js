@@ -223,13 +223,14 @@
         run: async function (a, ctx) { return { note: ctx.api.tableToChart(a) }; }
       },
       chartToTable: {
-        args: '{index}',
-        desc: '把第 index 個圖表區塊換回它的資料表格',
+        args: '{index, keep:true|false}',
+        desc: '把第 index 個圖表區塊換回它的資料表格；keep:true 保留圖表，把表格插在它下面',
         run: async function (a, ctx) { return { note: ctx.api.chartToTable(a) }; }
       },
       chartToApp: {
-        args: '{index, app:"slides"|"sheets"}',
-        desc: '把第 index 個圖表區塊插到簡報或試算表（用開著的視窗，沒有就開一個）',
+        args: '{index, app:"slides"|"sheets", page}',
+        desc: '把第 index 個圖表區塊插到簡報或試算表（用開著的視窗，沒有就開一個）。' +
+              '送到簡報時 page 指定放在第幾頁，省略就新開一頁放',
         run: async function (a, ctx) { return { note: await ctx.api.chartToApp(a) }; }
       },
       exportAs: {
@@ -841,7 +842,7 @@
       }
 
       /** A chart block replaced by the table of its data. Returns the note. */
-      function chartToTable(i) {
+      function chartToTable(i, keep) {
         var b = blocks[i];
         if (!b || b.type !== 'chart') throw new Error('第 ' + (i + 1) + ' 個區塊不是圖表');
         normChart(b);
@@ -852,17 +853,29 @@
         var nb = { type: 'table', rows: rows, merges: [] };
         CARRY_KEYS.forEach(function (k) { if (b[k]) nb[k] = b[k]; });
         normTable(nb);
+        var size = rows[0].length + ' 欄 × ' + rows.length + ' 列';
+        if (keep) {
+          /* 「圖下面放原始資料」 is one request, and it was not answerable: the
+             only conversion replaced the chart, so the panel, asked for both,
+             said it could not and stopped. The chart stays; its table goes
+             right under it, the mirror of tableToChart's keep. */
+          blocks.splice(i + 1, 0, nb);
+          focusIndex = i + 1;
+          markDirty();
+          render();
+          return '已在第 ' + (i + 1) + ' 個圖表下面插入它的資料表格（第 ' + (i + 2) + ' 個區塊，' + size + '）';
+        }
         blocks[i] = nb;
         focusIndex = i;
         markDirty();
         render();
-        return '已把第 ' + (i + 1) + ' 個圖表換成 ' + rows[0].length + ' 欄 × ' + rows.length + ' 列的表格';
+        return '已把第 ' + (i + 1) + ' 個圖表換成 ' + size + '的表格';
       }
 
       /** 轉成表格 from a menu: the same conversion, reported as a toast. */
-      function chartToTableMenu(i) {
+      function chartToTableMenu(i, keep) {
         try {
-          ctx.toast(chartToTable(i), 't-ok');
+          ctx.toast(chartToTable(i, keep), 't-ok');
         } catch (e) {
           ctx.toast(e.message, 't-warn');
         }
@@ -965,6 +978,7 @@
           { label: '編輯圖表…', hint: 'Enter', run: function () { chartPopover(b, i); } },
           { label: '檢視資料', run: function () { dataPopover(b, i); } },
           { label: '轉成表格', run: function () { chartToTableMenu(i); } },
+          { label: '在下面插入資料表格', run: function () { chartToTableMenu(i, true); } },
           { sep: true },
           { label: '複製圖表', hint: 'Ctrl+C', run: function () { copyChart(b); } }
         ].concat(
@@ -2090,8 +2104,32 @@
         throw new Error('不支援的格式：' + format);
       }
 
+      /**
+       * A path nobody has written yet is where this document is going, not an
+       * error. A plan says 「開一份文件，存成 /demo/報告.docx」 and opens the app on
+       * that path; every such open used to toast 「開啟失敗：找不到」 and leave the
+       * window with no path, so the save that followed went to /notes under a
+       * default name -- or stopped on a consent window for a path nobody named.
+       */
+      async function startAt(vpath) {
+        /* A path, not a word: a plan that opens the app with 「new」 means a new
+           document, not a file called new at the root. */
+        if (!/^\/.*\.[a-z0-9]+$/i.test(String(vpath))) return false;
+        var probe = await A.fs.exists(vpath);
+        if (!probe || !probe.ok || probe.data.exists) return false;
+        path = vpath;
+        pathMtime = 0;
+        title = vpath.split('/').pop().replace(/\.[^.]+$/, '') || title;
+        dirty = false;
+        render();
+        ctx.setTitle('文件 — ' + title);
+        ctx.toast('找不到 ' + vpath + '，當成新文件：儲存時會存到這裡', 't-warn');
+        return true;
+      }
+
       async function open(vpath) {
         if (!vpath) return;
+        if (await startAt(vpath)) return;
         /* Whichever branch loads it, remember which version was loaded: that is
            what a later save claims to be replacing. Every reader reports it, so
            no format is left without the guard. */
@@ -2783,10 +2821,33 @@
 
       /* ------------------------------------------------------------ wiring */
 
+      /**
+       * What a chart block says to the model: its summary, and its numbers.
+       *
+       * The summary alone -- 「折線圖：3 個數列 × 6 個類別」 -- left the panel
+       * unable to put the same figures in a table under the chart; it said the
+       * chart 「只提供數列名稱與月份，沒有原始數值」 and stopped without saving.
+       * The rows are what the chart was drawn from, so they are the truth about
+       * it. Bounded, because a panel prompt has a budget and a chart of forty
+       * categories is a picture, not a paragraph.
+       */
+      function chartText(b) {
+        normChart(b);
+        var head = AIOS.charts.describe(b.chart);
+        var rows = [];
+        try { rows = AIOS.charts.toRows(b.chart) || []; } catch (e) { rows = []; }
+        if (!rows.length) return head;
+        var shown = rows.slice(0, 13).map(function (r) {
+          return r.slice(0, 9).map(function (c) { return c === null || c === undefined ? '' : String(c); }).join(' | ');
+        });
+        return head + '；資料（第一列是數列名稱、第一欄是類別）：' + shown.join('； ') +
+               (rows.length > 13 ? '（另有 ' + (rows.length - 13) + ' 列）' : '');
+      }
+
       function publish() {
         var text = blocks.map(function (b, i) {
-          // A chart has no text; what the model should know about it is its summary.
-          var body = b.type === 'chart' ? AIOS.charts.describe(b.chart) : textOf(b);
+          // A chart has no text; what the model should know about it is its summary and its numbers.
+          var body = b.type === 'chart' ? chartText(b) : textOf(b);
           return (i + 1) + '. [' + (BLOCK_LABELS[b.type] || b.type) + '] ' + body;
         }).join('\n');
         ctx.publish('文件 ' + (path || title) + '：\n' + text.slice(0, 5000), 'app/docs');
@@ -2810,7 +2871,7 @@
             var kind = BLOCK_LABELS[b.type] || b.type;
             if (b.type === 'heading') kind += ' H' + (b.level || 1);
             if (b.type === 'break') return '  ' + (i + 1) + '. [分頁] （這裡開始新的一頁）';
-            if (b.type === 'chart') return '  ' + (i + 1) + '. [圖表] ' + AIOS.charts.describe(b.chart);
+            if (b.type === 'chart') return '  ' + (i + 1) + '. [圖表] ' + chartText(b);
             var para = paraSummary(b);
             if (para) kind += '，' + para;
             var runs = runSummary(b);
@@ -3114,7 +3175,7 @@
 
       function chartToTableApi(spec) {
         var s = spec || {};
-        return chartToTable(chartAt(s.index));
+        return chartToTable(chartAt(s.index), s.keep === true || s.keep === 'true');
       }
 
       async function chartToApp(spec) {
@@ -3124,7 +3185,7 @@
         var i = chartAt(s.index);
         var b = blocks[i];
         normChart(b);
-        var out = await AIOS.charts.sendTo(app, b.chart, { aspect: b.aspect });
+        var out = await AIOS.charts.sendTo(app, b.chart, { aspect: b.aspect, page: s.page });
         return '第 ' + (i + 1) + ' 個區塊的圖表已插入到' + AIOS.charts.APP_NAMES[app] +
           (out && out.note ? '：' + out.note : '');
       }
@@ -3141,7 +3202,8 @@
         fontState: function () { return { font: docFont, size: docSize }; }
       };
 
-      (async function boot() {
+      /* Exposed so `app.open` can wait for the file: see registry.launch. */
+      ctx.ready = (async function boot() {
         var st = ctx.state;
         if (st && st.blocks) {
           blocks = st.blocks;

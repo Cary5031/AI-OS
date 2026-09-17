@@ -424,8 +424,11 @@ const MAX_PARTY_CHARS = 2000;
  * out is the version a reader can trust -- an elided list says so.
  */
 function manyParties(list) {
-  const all = (Array.isArray(list) ? list : (list ? [list] : []))
-    .map((b) => clean(oneAddress(b).text, 200)).filter(Boolean);
+  const arr = Array.isArray(list) ? list : (list ? [list] : []);
+  return capParties(arr.map((b) => clean(oneAddress(b).text, 200)).filter(Boolean));
+}
+
+function capParties(all) {
   const kept = [];
   let len = 0;
   for (const one of all) {
@@ -435,6 +438,57 @@ function manyParties(list) {
   }
   if (kept.length < all.length) kept.push(`（另有 ${all.length - kept.length} 人未列出）`);
   return kept.join(', ');
+}
+
+/**
+ * The recipients a list row actually carries: display names, no addresses.
+ *
+ * A FindItem response never has ToRecipients or CcRecipients in it, whatever
+ * the request asked for -- Exchange hands the recipient collections out of
+ * GetItem only. What the list carries is DisplayTo and DisplayCc: the names,
+ * joined with semicolons, exactly as Outlook's own list column shows them.
+ * Measured on the first real tenant, where every row of the mirror had an
+ * empty To for as long as this read only the collections -- and the unit
+ * fixture had been giving list items a ToRecipients array the server never
+ * sends, which is how the tests stayed green over an empty column.
+ *
+ * Stored in the mirror's own header form, one name per entry, so 「收件:王小明」
+ * and free text find them. A name with a comma in it is quoted, because the
+ * mirror splits on commas outside quotes (see renderer/mailparty.js).
+ */
+function displayParties(display) {
+  const names = String(display == null ? '' : display).split(';')
+    .map((n) => clean(n, 200)).filter(Boolean)
+    .map((n) => (/,/.test(n) ? '"' + n.replace(/"/g, '') + '"' : n));
+  return capParties(names);
+}
+
+/** A server boolean, which may arrive as the string 'true'. Undefined when absent. */
+function flagOf(v) {
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false') return false;
+  return undefined;
+}
+
+/**
+ * Who a message was sent to, from whichever response shape this is.
+ *
+ * The collections when the item has them (GetItem), the display strings when
+ * it does not (FindItem). MessageToMe and MessageCcMe come with both, and they
+ * are the answer to 「寄給我的」 that no header can give: a message that reached
+ * this mailbox through a distribution list has the list's address in To, not
+ * the owner's, and the flag is still true.
+ */
+function partiesOf(raw) {
+  const toList = pick(raw, ['ToRecipients', 'toRecipients']);
+  const ccList = pick(raw, ['CcRecipients', 'ccRecipients']);
+  const has = (l) => (Array.isArray(l) ? l.length > 0 : !!l);
+  return {
+    to: has(toList) ? manyParties(toList) : displayParties(pick(raw, ['DisplayTo', 'displayTo'])),
+    cc: has(ccList) ? manyParties(ccList) : displayParties(pick(raw, ['DisplayCc', 'displayCc'])),
+    toMe: flagOf(pick(raw, ['MessageToMe', 'messageToMe'])),
+    ccMe: flagOf(pick(raw, ['MessageCcMe', 'messageCcMe']))
+  };
 }
 
 function timeOf(v) {
@@ -568,8 +622,7 @@ function normaliseItem(raw, opts = {}) {
     folder,
     from: clean(from.text, 200),
     fromName: clean(from.name, 120),
-    to: manyParties(pick(raw, ['ToRecipients', 'toRecipients'])),
-    cc: manyParties(pick(raw, ['CcRecipients', 'ccRecipients'])),
+    ...partiesOf(raw),
     subject: clean(subject, 200) || '(無主旨)',
     date,
     seen: read === undefined ? false : !!(read === true || read === 'true'),
@@ -719,6 +772,8 @@ function adoptPage(items, { folder = 'INBOX', floor = 0, lookup, has, sorted = t
       fromName: row.fromName,
       to: row.to,
       cc: row.cc,
+      toMe: row.toMe,
+      ccMe: row.ccMe,
       subject: row.subject,
       date: row.date,
       seen: row.seen,
@@ -2271,6 +2326,15 @@ async function syncBody({ messageId } = {}) {
   const item = walkItems(json, [], 0)[0];
   if (!item) throw fail('ESHAPE', 'Outlook 回了東西，但裡面找不到這封信');
 
+  /* The list row got names only (see displayParties); the opened item is where
+     the addresses are. Written back here so an opened message answers
+     「收件:ming@abc.com」 -- and so a row from a mirror written before the flags
+     existed gets them the first time somebody reads it. */
+  const parties = partiesOf(item);
+  if (parties.to || parties.cc || parties.toMe !== undefined || parties.ccMe !== undefined) {
+    store.put({ messageId, folder: held.folder, ...parties });
+  }
+
   const text = bodyTextOf(item);
   await store.putBody(messageId, text);
   /* Kept beside the text, not instead of it: see mailstore.putHtml. */
@@ -2302,6 +2366,6 @@ module.exports = {
   walkItems, lastPage, attachmentsOf, attachmentContentOf, bodyTextOf, rawHtmlOf, htmlToText,
   syncPlan, adoptPage, NO_ANSWER,
   needsLogin, classify, atLoginHost, findItemBody, getItemBody, getAttachmentBody, deepLink, sanitiseBase,
-  pick, extendedValue, oneAddress, manyAddresses, manyParties,
+  pick, extendedValue, oneAddress, manyAddresses, manyParties, displayParties, partiesOf,
   PARTITION, DEFAULT_BASE, FIRST_DAYS, OVERLAP_MS, PAGE, MAX_PER_SYNC, LIST_PROPERTIES
 };

@@ -70,15 +70,34 @@ export async function spec(t, app) {
       var inst2 = AIOS.apps.instances().filter(function (i) { return i.def.id === 'sheets'; })[0];
       out.push(inst2.describe ? inst2.describe() : '');
       out.push(document.querySelectorAll('.sh-chart svg').length);
+      /* A plan that hands over rows instead of a range. The numbers it names
+         are already on the sheet, so the chart binds to them; numbers that are
+         not go to empty cells. Either way A1 is still 月份 afterwards -- the
+         first version wrote the rows at the cursor, over the table. */
+      var bound = await AIOS.apps.invoke('sheets', 'insertChart', { type: 'line', title: '重畫', rows: [
+        ['月份', '收入'], ['1月', 120000], ['2月', 95000], ['3月', 130000], ['4月', 110000], ['5月', 140000], ['6月', 150000]
+      ] });
+      var fresh = await AIOS.apps.invoke('sheets', 'insertChart', { type: 'pie', title: '別的數字', rows: [['部門', '人數'], ['業務', 12], ['工程', 30]] });
+      out.push(bound); out.push(fresh);
+      out.push((document.querySelector('td[data-ref="A1"]') || {}).textContent);
+      out.push((document.querySelector('td[data-ref="F1"]') || {}).textContent);
+      for (const n of [bound, fresh]) {
+        var id = ((n && n.note || '').match(/圖表 (c[a-z0-9]+)/) || [])[1];
+        if (id) await AIOS.apps.invoke('sheets', 'deleteChart', { id: id });
+      }
     `), { timeout: 60000 });
     assert.equal(r.error, undefined, r.error);
-    const [, inserted, listed, described, drawn] = r.out;
+    const [, inserted, listed, described, drawn, bound, fresh, a1, f1] = r.out;
     assert.ok(inserted && inserted.note, JSON.stringify(inserted));
     assert.match(inserted.note, /3 個數列/, '收入、支出、淨利 are the series: ' + inserted.note);
     assert.match(inserted.note, /6 個類別/, 'six months, the 合計 row left out: ' + inserted.note);
     assert.match(listed.note, /直條圖「上半年收支」/);
     assert.match(described, /圖表 c[a-z0-9]+：直條圖「上半年收支」/, 'the model is told about the chart');
     assert.equal(drawn, 1, 'the chart is on the grid');
+    assert.match(bound.note, /資料已經在 A1:B7，圖表直接綁著它/, 'rows already on the sheet bind to those cells: ' + bound.note);
+    assert.match(fresh.note, /資料寫在 F1:G3/, 'rows the sheet lacks go beyond the used block: ' + fresh.note);
+    assert.equal(a1, '月份', 'nothing was written over the table');
+    assert.equal(f1, '部門', 'the new rows are where the receipt says');
   });
 
   await t.test('試算表 → 文件：圖表帶著資料過去，文件存成 .docx 就有圖表部件', async () => {
@@ -161,6 +180,11 @@ export async function spec(t, app) {
         return row.querySelector('.dc-chart') ? Number(row.dataset.bi) + 1 : 0;
       }).filter(Boolean)[0];
       out.push(at);
+      /* Both ways: the table under the chart (「圖下面放原始資料」), then the
+         table instead of the chart. */
+      out.push(await AIOS.apps.invoke('docs', 'chartToTable', { index: at, keep: true }));
+      out.push(document.querySelectorAll('.dc-chart').length);
+      out.push(document.querySelectorAll('.dc-table').length);
       out.push(await AIOS.apps.invoke('docs', 'chartToTable', { index: at }));
       out.push(document.querySelectorAll('.dc-chart').length);
       out.push(document.querySelectorAll('.dc-table').length);
@@ -169,7 +193,10 @@ export async function spec(t, app) {
     assert.equal(r.out[1], '%PDF-', 'a PDF was written: ' + r.out[1]);
     assert.ok(r.out[2] > 0, 'the reopened document still holds the chart');
     assert.ok(r.out[3] && r.out[3].note, JSON.stringify(r.out[3]));
-    assert.equal(r.out[4], 0, 'the chart block is gone');
-    assert.ok(r.out[5] >= 1, 'and a table took its place');
+    assert.equal(r.out[4], 1, 'keep:true leaves the chart where it was');
+    assert.ok(r.out[5] >= 1, 'and puts its table under it');
+    assert.ok(r.out[6] && r.out[6].note, JSON.stringify(r.out[6]));
+    assert.equal(r.out[7], 0, 'without keep the chart block is gone');
+    assert.ok(r.out[8] >= 2, 'and a table took its place');
   });
 }

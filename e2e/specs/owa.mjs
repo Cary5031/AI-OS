@@ -97,7 +97,13 @@ function itemFor(m, { withBody = false } = {}) {
     Subject: m.subject,
     DateTimeReceived: m.received,
     From: { Mailbox: { Name: m.from.name, EmailAddress: m.from.address } },
-    ToRecipients: [{ Mailbox: { Name: '我', EmailAddress: ACCOUNT } }],
+    /* What a list row really carries: the names and the two flags, never the
+       recipient collections -- Exchange returns those from GetItem only. This
+       fixture used to put ToRecipients here, and the mirror's To column was
+       empty on every real row for as long as this spec stayed green. */
+    DisplayTo: '我',
+    MessageToMe: true,
+    MessageCcMe: false,
     IsRead: false,
     HasAttachments: m.attachments.length > 0
   };
@@ -110,6 +116,9 @@ function itemFor(m, { withBody = false } = {}) {
     }];
   }
   if (withBody) {
+    /* The opened item is where the addresses are, and they come flat -- Name
+       and EmailAddress on the recipient itself, no Mailbox wrapper. */
+    out.ToRecipients = [{ Name: '我', EmailAddress: ACCOUNT, RoutingType: 'SMTP' }];
     out.Body = { BodyType: 'HTML', Value: m.body };
     out.Attachments = m.attachments.map((a) => ({
       FileAttachment: {
@@ -304,7 +313,8 @@ export async function spec(t, app) {
           n: list.ok ? list.data.length : -1,
           rows: list.ok ? list.data.map(function (m) {
             return { id: m.messageId, from: m.from, subject: m.subject, folder: m.folder,
-                     sourceId: m.sourceId, web: m.webLink, att: m.hasAttachments };
+                     sourceId: m.sourceId, web: m.webLink, att: m.hasAttachments,
+                     to: m.to, toMe: m.toMe };
           }) : [],
           cov: cov.data
         };
@@ -321,6 +331,8 @@ export async function spec(t, app) {
       assert.equal(quote.sourceId, 'AAMkOWA001');
       assert.ok(quote.web.includes('/mail/deeplink/read/'), '要有回得去 Outlook 的連結');
       assert.equal(quote.att, true);
+      assert.equal(quote.to, '我', '清單只給名字，名字就要存進去（以前這一格在真實信箱上是空的）');
+      assert.equal(quote.toMe, true, '「是不是寄給我」是信箱自己說的，要一起存');
 
       const nox = r.rows.find((m) => m.subject === '交期確認');
       assert.match(nox.id, /^<owa-[0-9a-f]{32}@aios\.local>$/, '沒有 Message-ID 的才退成雜湊');
@@ -351,14 +363,18 @@ export async function spec(t, app) {
       const r = await run(cdp, `
         var m = await window.aios.mail.mirrorRead('<quote-0908@abc.com>');
         if (!m.ok) return { err: m.error };
+        var row = await window.aios.mail.search({ messageId: '<quote-0908@abc.com>' });
         return {
           text: m.data.text,
           atts: (m.data.attachments || []).map(function (a) {
             return { name: a.name, stored: a.stored, bytes: a.bytes, reason: a.reason || '' };
-          })
+          }),
+          to: row.ok && row.data.hits[0] ? row.data.hits[0].to : ''
         };
       `);
       assert.equal(r.err, undefined, r.err);
+      assert.equal(r.to, '我 <' + ACCOUNT + '>',
+        '開信的回應帶著完整位址，要寫回那一列，不是只寫內文：' + JSON.stringify(r.to));
       assert.ok(r.text.includes('螺絲') && r.text.includes('1,200'),
         '內文沒有讀出來：' + JSON.stringify(r.text));
       assert.ok(!/<p>|<\/p>|<table/i.test(r.text),
@@ -477,16 +493,25 @@ export async function spec(t, app) {
         var byBody = await window.aios.mail.search({ text: '1,200' });
         var byDomain = await window.aios.mail.search({ from: 'abc.com' });
         var notThem = await window.aios.mail.search({ from: 'other.example' });
+        var toMe = await window.aios.mail.search({ to: '我' });
+        var toAddr = await window.aios.mail.search({ to: '${ACCOUNT}' });
+        var toName = await window.aios.mail.search({ to: '王小明' });
         return {
           body: byBody.data.hits.map(function (h) { return h.subject; }),
           domain: byDomain.data.hits.map(function (h) { return h.subject; }),
-          notThem: notThem.data.hits.map(function (h) { return h.subject; })
+          notThem: notThem.data.hits.map(function (h) { return h.subject; }),
+          toMe: toMe.data.hits.length, toAddr: toAddr.data.hits.length, toName: toName.data.hits.length
         };
       `);
       assert.deepEqual(r.body, ['九月份報價單'], '內文搜尋沒找到：' + JSON.stringify(r.body));
       assert.equal(r.domain.length, 2,
         'abc.com 要同時對上 ming@abc.com 與 ta@mail.abc.com：' + JSON.stringify(r.domain));
       assert.deepEqual(r.notThem, ['每週電子報']);
+      /* Two of the three rows still carry names only; the flags are what say
+         they were sent here. The one that was opened has the address as well. */
+      assert.equal(r.toMe, 3, '「收件:我」是三封，清單列沒有地址也一樣');
+      assert.equal(r.toAddr, 3, '帳號自己的地址也走旗標，不然只有開過的那封對得上');
+      assert.equal(r.toName, 0, '王小明是寄件人，不是收件者');
     });
 
     await t.test('登入過期：同步說「要重新登入」，不是說「壞掉了」', async () => {

@@ -106,7 +106,7 @@
     actions: {
       listFolder: {
         args: '{folder, limit}',
-        returns: '{folder, rows:[{handle, messageId, from, fromName, to, cc, subject, date, seen, starred, hasAttachments}], truncated}',
+        returns: '{folder, rows:[{handle, messageId, from, fromName, to, cc, toMe, ccMe, subject, date, seen, starred, hasAttachments}], truncated}',
         taints: true,
         desc: '列出某個資料夾的信。rows 帶得出收件者與副本；內文不在裡面',
         run: async function (args, ctx) {
@@ -146,10 +146,11 @@
       },
       search: {
         args: '{text, from, to, since, until}',
-        returns: '{rows:[{handle, messageId, from, fromName, to, cc, subject, date, seen, where, snippet}], truncated}',
+        returns: '{rows:[{handle, messageId, from, fromName, to, cc, toMe, ccMe, subject, date, seen, where, snippet}], truncated}',
         taints: true,
         desc: '搜尋本機已同步的信：text 會找主旨、寄件人、收件者（含副本）與內文；'
           + 'from 限定寄件人、to 限定收件者或副本，兩者都可以是網域。'
+          + 'to 填「我」（或帳號自己的地址）就是寄給我或副本給我的信，經由群組寄來的也算。'
           + 'rows 的 where 說這一列為什麼命中；內文不在裡面',
         run: async function (args, ctx) {
           var note = await ctx.api.search(args);
@@ -168,9 +169,11 @@
         }
       },
       saveAttachment: {
-        args: '{attachment, to}', desc: '把打開的那封信的第 attachment 個附件（從 1 開始）另存到沙箱路徑 to',
+        args: '{attachment, to}',
+        desc: '把打開的那封信的第 attachment 個附件（從 1 開始，也可以給檔名）另存到沙箱：' +
+              'to 是檔案路徑，或是一個目錄（就用附件原本的檔名）',
         run: async function (args, ctx) {
-          return { note: await ctx.api.saveAttachment(Number(args.attachment), args.to) };
+          return { note: await ctx.api.saveAttachment(args.attachment, args.to) };
         }
       },
       trashMessage: {
@@ -240,7 +243,8 @@
       searchBox.type = 'search';
       searchBox.placeholder = '搜尋主旨、寄件人、收件者、內文…';
       searchBox.title = '直接打字會找主旨、寄件人、收件者（含副本）與內文。'
-        + '只想找收件者就打「收件:王小明」，只想找寄件人就打「寄件:abc.com」。';
+        + '只想找收件者就打「收件:王小明」，只想找寄件人就打「寄件:abc.com」；'
+        + '「收件:我」是寄給你或副本給你的信，經由群組寄來的也算。';
       searchBox.setAttribute('aria-label', '搜尋信件');
       bar.appendChild(folderSel);
       bar.appendChild(btnRefresh);
@@ -1474,10 +1478,44 @@
        * gate treats it as untrusted from then on. Saved, not opened: what to do
        * with a spreadsheet from a stranger is the person's decision.
        */
+      /** 「附件 2 個：1. 報價單.xlsx、2. 圖.png」 on an open receipt, so a plan can name one without a second look. */
+      function attachmentsNote(m) {
+        var list = (m && m.attachments) || [];
+        if (!list.length) return '';
+        return '（附件 ' + list.length + ' 個：' +
+          list.slice(0, 8).map(function (a, i) { return (i + 1) + '. ' + a.name; }).join('、') +
+          (list.length > 8 ? '…' : '') + '）';
+      }
+
+      /**
+       * Which attachment 「第 n 個」 or 「叫這個名字的」 means, with the list said
+       * back when it means none. Measured: a plan asked for attachment 0, was
+       * told there was no 0th, then guessed 1 -- the receipt that opened the
+       * message had not named the attachments, and the error had not either.
+       */
+      function attachmentMeant(n) {
+        var list = current.attachments || [];
+        var have = list.length
+          ? '（這封信有 ' + list.length + ' 個附件：' + list.map(function (x) { return x.name; }).join('、') + '）'
+          : '（這封信沒有附件）';
+        var s = String(n == null ? '' : n).trim();
+        if (s && !/^\d+$/.test(s)) {
+          var byName = list.filter(function (x) { return x.name === s; })[0] ||
+            list.filter(function (x) { return String(x.name || '').indexOf(s) >= 0; })[0];
+          if (!byName) throw new Error('這封信沒有叫「' + s + '」的附件' + have);
+          return { a: byName, i: list.indexOf(byName) };
+        }
+        /* 0 was never a valid number here, so it can only mean the first one. */
+        var k = Math.max(1, Number(s) || 1);
+        var a = list[k - 1];
+        if (!a) throw new Error('這封信沒有第 ' + s + ' 個附件' + have);
+        return { a: a, i: k - 1 };
+      }
+
       async function saveAttachment(n, target) {
         if (!current) throw new Error('沒有打開的信');
-        var a = (current.attachments || [])[n - 1];
-        if (!a) throw new Error('這封信沒有第 ' + n + ' 個附件');
+        var pick = attachmentMeant(n);
+        var a = pick.a;
         var to = target;
         if (!to) {
           to = await AIOS.saveAsPath({
@@ -1489,11 +1527,13 @@
           });
           if (!to) return '取消了';
         }
-        var r = await A.mail.saveAttachment(current.messageId, a.i !== undefined ? a.i : n - 1, to);
+        var r = await A.mail.saveAttachment(current.messageId, a.i !== undefined ? a.i : pick.i, to);
         if (!r || !r.ok) throw new Error((r && r.error) || '存檔失敗');
+        /* Where it actually landed: a directory target takes the attachment's name. */
+        var where = (r.data && r.data.vpath) || to;
         await AIOS.afterFsChange();
-        ctx.toast('已存到 ' + to, 't-ok');
-        return '「' + a.name + '」已存到 ' + to;
+        ctx.toast('已存到 ' + where, 't-ok');
+        return '「' + a.name + '」已存到 ' + where;
       }
 
       /* What the reader is showing of the current message. Remote images stay
@@ -1623,7 +1663,7 @@
           id = hit.messageId;
         }
         await openMessage(id);
-        return current ? '已打開：' + current.subject : '打不開這封信';
+        return current ? '已打開：' + current.subject + attachmentsNote(current) : '打不開這封信';
       }
 
       /* -------------------------------------------------- 給程式看的那一面 --
@@ -1663,6 +1703,11 @@
           fromName: P.oneLine(m.fromName, 120),
           to: P.oneLine(m.to, 2000),
           cc: P.oneLine(m.cc, 2000),
+          /* What the source said about whether this was sent to, or copied to,
+             this mailbox. Absent on an IMAP row, which is the honest answer
+             there -- not false. */
+          toMe: m.toMe,
+          ccMe: m.ccMe,
           subject: P.oneLine(m.subject, 200),
           date: m.date || 0,
           seen: !!m.seen,
@@ -1715,7 +1760,7 @@
         openByIndex: async function (index) {
           var m = nth(index);
           await openMessage(m.messageId);
-          return '已打開：' + m.subject;
+          return '已打開：' + m.subject + attachmentsNote(current);
         },
         trashByIndex: async function (index) {
           var m = nth(index);

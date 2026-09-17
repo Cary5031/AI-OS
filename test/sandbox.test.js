@@ -329,3 +329,25 @@ test('find reports when it stopped early instead of reporting nothing found', as
   assert.equal(r.hits.length, 0);
   assert.equal(typeof r.truncated, 'boolean');
 });
+
+test('exists() tells a missing path from a file and from a directory, without reading anything', async () => {
+  /* What an office program asks before it opens a path: 「new file, save it
+     here」 or 「this file is gone」. It must not read the file to find out --
+     reading arms the taint, and this file was never read. */
+  await sandbox.write('/notes/有.txt', 'x');
+  await sandbox.mkdir('/notes/目錄');
+
+  const file = await sandbox.exists('/notes/有.txt');
+  assert.equal(file.exists, true);
+  assert.equal(file.dir, false);
+  assert.ok(file.bytes > 0, '檔案要回報大小');
+
+  const dir = await sandbox.exists('/notes/目錄');
+  assert.deepEqual([dir.exists, dir.dir], [true, true]);
+
+  const gone = await sandbox.exists('/notes/沒有.docx');
+  assert.deepEqual([gone.exists, gone.dir], [false, false], '不存在不是錯誤，是一個答案');
+
+  const through = await sandbox.exists('/notes/有.txt/裡面');
+  assert.equal(through.exists, false, '穿過一個檔案的路徑也只是不存在');
+});

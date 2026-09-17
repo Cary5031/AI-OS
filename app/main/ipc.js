@@ -531,6 +531,12 @@ function register(getWindow) {
     async ({ dir }) => sandbox.list(dir || '/'),
     (args) => { if (args.dir && args.dir !== '/') sandbox.resolve(args.dir); }));
 
+  /* Existence without contents: a program opened on a path nobody has written
+     yet needs to know that, and must not read a file to find out -- reading is
+     what arms the taint. */
+  ipcMain.handle('fs:exists', guarded('fs.read', async ({ path: p }) => sandbox.exists(p),
+    okPath('path'), '看一個沙箱路徑存不存在、是不是目錄'));
+
   ipcMain.handle('fs:read', guarded('fs.read', async ({ path: p }) => {
     const out = await sandbox.read(p);
     // Reading hostile content is what arms the gate for the rest of the
@@ -1054,7 +1060,19 @@ function register(getWindow) {
         new Error('這個附件的內容拿不到' + (a && a.reason ? '（' + a.reason + '）' : '')),
         { code: 'ENODATA' });
     }
-    const out = await sandbox.writeBytes(to, a.data.toString('base64'), {
+    /* 「存到 /demo/inbox」 names a place, not a file. A directory, or a path
+       written with a trailing slash, takes the attachment's own name. Asked for
+       as a directory this used to fail with 「/demo/inbox 是目錄」 -- true, and
+       the plan that got it had nowhere to go. */
+    let dest = String(to || '').trim();
+    const named = String(a.name || 'attachment').replace(/[\\/]+/g, '_');
+    if (/\/$/.test(dest)) {
+      dest = dest.replace(/\/+$/, '') + '/' + named;
+    } else {
+      const here = await sandbox.exists(dest);
+      if (here.exists && here.dir) dest = dest.replace(/\/+$/, '') + '/' + named;
+    }
+    const out = await sandbox.writeBytes(dest, a.data.toString('base64'), {
       origin: 'mail', source: 'mail:' + String(messageId)
     });
     return Object.assign({ name: a.name, type: a.type, bytes: a.bytes }, out);

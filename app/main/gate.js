@@ -478,7 +478,7 @@ const TARGET_ARG = {
 function namedByUser(op, args) {
   const spec = TARGET_ARG[op];
   if (!spec || !intent) return null;
-  const raw = args && args[spec.key];
+  const raw = targetArg(args, spec.key);
   if (typeof raw !== 'string' || !raw.trim()) return null;
   const target = raw.trim();
 
@@ -514,6 +514,26 @@ function namedByUser(op, args) {
 
 function escapeForSearch(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The argument that names where an operation is going.
+ *
+ * The capability's usual key first. Several handlers write through the same
+ * capability with their destination under another name -- an attachment is
+ * saved through fs.write with its path in `to` -- and for those the usual key
+ * is simply absent, which read as 「the user named nothing」. Measured: 「把附件
+ * 存到 /demo/inbox」 was asked about, with the reason that /demo/inbox was not
+ * in the instruction it had just been read out of.
+ */
+const TARGET_KEYS = ['path', 'to', 'target', 'vpath', 'dest', 'dir'];
+function targetArg(args, key) {
+  if (!args || typeof args !== 'object') return null;
+  if (typeof args[key] === 'string') return args[key];
+  for (const k of TARGET_KEYS) {
+    if (k !== key && typeof args[k] === 'string' && args[k].trim()) return args[k];
+  }
+  return null;
 }
 
 /* --------------------------------------------------------------- decision */
@@ -803,6 +823,25 @@ function settleFor(win, granted, why) {
   return true;
 }
 
+/**
+ * The arguments as the consent window may render them: JSON-clean.
+ *
+ * An IPC call carries `undefined` fields -- fs:write's expectMtime when nobody
+ * passed one -- and structured clone keeps them. JSON.stringify(undefined) is
+ * undefined, so the window's row renderer threw on `.length`, and its catch,
+ * written for a payload that never arrived, answered "refuse" on the user's
+ * behalf. Every tainted write from a program that left a field blank was
+ * refused in a hundred milliseconds with no window ever shown, and the journal
+ * said the user did it. Measured on a spreadsheet save after a mail was read.
+ */
+function plainArgs(args) {
+  try {
+    return JSON.parse(JSON.stringify(args === undefined ? {} : args)) || {};
+  } catch {
+    return {};
+  }
+}
+
 function registerConsentChannels() {
   ipcMain.handle('consent:payload', (event) => {
     // A window only ever gets its own question. Without this a dialog that was
@@ -811,7 +850,7 @@ function registerConsentChannels() {
     if (event.sender !== pending.win.webContents) return null;
     return {
       op: pending.action.op,
-      args: pending.action.args || {},
+      args: plainArgs(pending.action.args),
       why: pending.action.why || '',
       /* What the caller says it is doing, falling back to the capability's own
          description. The fallback is why an uninstall used to announce itself as
@@ -915,7 +954,7 @@ module.exports = {
   setIntent,
   setUnattended,
   isUnattended,
-  namedByUser,
+  namedByUser, targetArg, plainArgs,
   TARGET_ARG,
   askBatch,
   grantBatch,

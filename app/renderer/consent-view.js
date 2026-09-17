@@ -120,7 +120,10 @@
     Object.keys(p.args || {}).forEach((k) => {
       if (k.startsWith('__')) return;
       const v = p.args[k];
-      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      /* Anything, drawn as text. JSON.stringify(undefined) is undefined, and a
+         throw here used to land in the catch below, which refused the request
+         as if the person had. */
+      const s = typeof v === 'string' ? v : (v === undefined ? '（空）' : String(JSON.stringify(v)));
       row(k.toUpperCase(), s.length > 260 ? s.slice(0, 260) + '…' : s);
     });
     body.appendChild(dl);
@@ -135,7 +138,15 @@
     }
 
     deny.focus();
-  }).catch(() => answer(false));
+  }).catch((e) => {
+    /* A request this window cannot draw is still a request, and the person is
+       still the one to answer it. Refusing here on their behalf is how a
+       rendering bug became months of silent refusals that the journal blamed
+       on the user; say what happened and leave both buttons where they are. */
+    body.appendChild(el('p', 'dlg-alert',
+      '⚠ 這個視窗畫不出請求的內容（' + ((e && e.message) || e) + '）。看不清楚就按拒絕。'));
+    deny.focus();
+  });
 
   window.addEventListener('beforeunload', () => {
     if (!answered) consent.respond(false);

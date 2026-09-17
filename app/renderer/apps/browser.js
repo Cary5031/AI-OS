@@ -92,10 +92,11 @@
         }
       },
       savePage: {
-        args: '{format}',
-        desc: '把目前這一頁存成檔案（format: md / docx / pdf；page 是整頁原樣，含版面與圖片）',
+        args: '{format, path}',
+        desc: '把目前這一頁存成檔案（format: md / docx / pdf；page 是整頁原樣，含版面與圖片）。' +
+              '給 path 就直接存到那裡；省略就開另存視窗問',
         run: async function (args, ctx) {
-          return { note: await ctx.api.exportPage(String(args.format || 'md').toLowerCase()) };
+          return { note: await ctx.api.exportPage(String(args.format || 'md').toLowerCase(), args.path) };
         }
       },
       bookmark: {
@@ -726,13 +727,30 @@
         return head.join('\n') + art.markdown;
       }
 
-      async function exportPage(kind) {
+      /**
+       * Where an export goes when the caller named it.
+       *
+       * A plan's 「把這一頁轉存成 Word 到 /notes/規格.docx」 used to stop on the
+       * save dialog, which nobody is there to press when the sentence came from
+       * the intent bar or a schedule. A named path is the answer to that dialog,
+       * so the dialog is not shown. Bare names land in /notes, where the dialog
+       * would have put them; the format's own extension goes on the end.
+       */
+      function namedTarget(spec, given) {
+        var p = String(given == null ? '' : given).trim();
+        if (!p) return '';
+        if (p.charAt(0) !== '/') p = '/notes/' + p;
+        if (p.slice(-spec.ext.length).toLowerCase() !== spec.ext) p += spec.ext;
+        return p;
+      }
+
+      async function exportPage(kind, given) {
         var spec = SAVE_AS[kind];
         if (!spec) return '不支援的格式';
 
         /* The whole page, not the article: nothing is extracted, so none of the
            machinery below applies and this leaves early. */
-        if (kind === 'page') return exportWholePage(spec);
+        if (kind === 'page') return exportWholePage(spec, given);
 
         var art = await currentArticle();
         if (!art) { ctx.toast('還沒有可以轉存的頁面', 't-warn'); return '沒有頁面'; }
@@ -751,7 +769,7 @@
                  '想要圖片請切回一般檢視再轉存。';
         }
 
-        var target = await AIOS.saveAsPath({
+        var target = namedTarget(spec, given) || await AIOS.saveAsPath({
           host: ctx.win.el,
           fresh: true,
           dir: '/notes',
@@ -856,10 +874,10 @@
        * a receipt, a ticket, a timetable or a chart is the layout, and there is
        * no extraction that keeps it.
        */
-      async function exportWholePage(spec) {
+      async function exportWholePage(spec, given) {
         if (!tabId) { ctx.toast('還沒有開啟的分頁', 't-warn'); return '沒有頁面'; }
 
-        var target = await AIOS.saveAsPath({
+        var target = namedTarget(spec, given) || await AIOS.saveAsPath({
           host: ctx.win.el,
           fresh: true,
           dir: '/notes',

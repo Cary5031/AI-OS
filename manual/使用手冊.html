@@ -522,8 +522,9 @@ html { scroll-behavior: smooth; }
     <li><a href="#ch15"><span class="n">15</span><span>請它寫一個小工具</span></a></li>
     <li><a href="#ch16"><span class="n">16</span><span>安全：三件要看懂的事</span></a></li>
     <li><a href="#ch17"><span class="n">17</span><span>十一個上班場景</span></a></li>
-    <li><a href="#ch18"><span class="n">18</span><span>快速鍵</span></a></li>
-    <li><a href="#ch19"><span class="n">19</span><span>卡住的時候</span></a></li>
+    <li><a href="#ch18"><span class="n">18</span><span>五條連續技</span></a></li>
+    <li><a href="#ch19"><span class="n">19</span><span>快速鍵</span></a></li>
+    <li><a href="#ch20"><span class="n">20</span><span>卡住的時候</span></a></li>
   </ol>
 </nav>
 
@@ -549,8 +550,9 @@ html { scroll-behavior: smooth; }
     <li><a href="#ch15">15　請它寫一個小工具</a></li>
     <li><a href="#ch16">16　安全：三件要看懂的事</a></li>
     <li><a href="#ch17">17　十一個上班場景</a></li>
-    <li><a href="#ch18">18　快速鍵</a></li>
-    <li><a href="#ch19">19　卡住的時候</a></li>
+    <li><a href="#ch18">18　五條連續技</a></li>
+    <li><a href="#ch19">19　快速鍵</a></li>
+    <li><a href="#ch20">20　卡住的時候</a></li>
   </ol>
 </div>
 
@@ -1180,7 +1182,7 @@ html { scroll-behavior: smooth; }
   <h3>四件讓郵件變得有用的事</h3>
   <ul>
     <li><strong>看得到這封還寄給了誰。</strong>清單每一列在主旨底下寫收件者與副本（名字，滑過去看完整的），開信畫面則是<strong>一個位址一行、標明人數</strong>，不截斷。</li>
-    <li><strong>搜尋看內文，也看收件者。</strong>工具列的搜尋框主旨、寄件人、收件者（含副本）、內文一起找，命中內文會帶一段片段告訴你為什麼出現。寄件人給網域就是「這家公司寄來的」：<code>abc.com</code> 對得上 <code>ming@abc.com</code> 也對得上 <code>ops@mail.abc.com</code>。只想找收件者就打 <code>收件:王小明</code>，只想找寄件人就打 <code>寄件:abc.com</code>；名字裡有空白就用引號框起來（<code>收件:"Chen, Cary"</code>）。</li>
+    <li><strong>搜尋看內文，也看收件者。</strong>工具列的搜尋框主旨、寄件人、收件者（含副本）、內文一起找，命中內文會帶一段片段告訴你為什麼出現。寄件人給網域就是「這家公司寄來的」：<code>abc.com</code> 對得上 <code>ming@abc.com</code> 也對得上 <code>ops@mail.abc.com</code>。只想找收件者就打 <code>收件:王小明</code>，只想找寄件人就打 <code>寄件:abc.com</code>；名字裡有空白就用引號框起來（<code>收件:"Chen, Cary"</code>）。打 <code>收件:我</code> 就是寄給你或副本給你的信——網頁信箱的清單只給得出收件者的名字，「是不是寄給我」是信箱自己另外說的，所以經由群組寄來的也算得到。</li>
     <li><strong>附件留在本機。</strong>讀信時附件跟內文一起存下來，每個附件旁邊有「另存到沙箱」。存下來的檔案<strong>記得自己來自信件</strong>，之後放到哪個資料夾都還是被當成不可信內容。</li>
     <li><strong>每封信有一個十個字的編號</strong>，可以貼進筆記當連結用，點下去就打開那封信。少抄一兩個字還救得回來。</li>
   </ul>
@@ -1250,7 +1252,7 @@ html { scroll-behavior: smooth; }
     <li><strong>它承認自己沒讀過的信。</strong>
       一條規則最多列 50 封，但<strong>一次只抓得到 12 封的內文</strong>（郵件搜尋的上限）。
       剩下的它只看得到主旨跟寄件人，那幾列會標上一個「<strong>只看主旨</strong>」的小標籤：
-      摘要是空的，「提到你」也只比對主旨與收件人——名字寫在內文裡的話，這一列不會被標起來。<br>
+      摘要是空的，「提到你」也只比對主旨與收件人（以及信箱自己說的「寄給你或副本給你」）——名字寫在內文裡的話，這一列不會被標起來。<br>
       關鍵是：<strong>標了「只看主旨」的信，永遠不會被收進「先放一邊」。</strong>
       判斷標準只作用在真的讀過的那幾封上；一封沒有人讀過的信，不該因為一個判斷而被收起來。<br>
       <em>想讓每一封都被完整讀到</em>：在「進階」把「一次最多列幾封」降到 12 以內，
@@ -1732,7 +1734,153 @@ html { scroll-behavior: smooth; }
 
 <!-- ═══════════════════════════════════════ 18 -->
 <section class="ch" id="ch18">
-  <div class="ch-head"><span class="num">18</span><h2>快速鍵</h2></div>
+  <div class="ch-head"><span class="num">18</span><h2>五條連續技：從一句話到交得出去的檔案</h2></div>
+
+  <p>
+    第 17 章是一則一則的招式。這一章是把招式串起來：一句話做完一步，視窗留在桌面上，
+    下一句接著用上一句的結果——試算表、文件、簡報、郵件、PDF、網頁輪流上場，中間不用自己複製貼上。
+    五條都在真的機器上跑過：灰底區塊就是畫面上打的那一句，打在哪個框裡也照實寫；
+    截圖是接著假的信箱與本機網頁跑出來的，句子與畫面都是真的。
+  </p>
+
+  <div class="note">
+    <span class="lbl">串起來的三個原則</span>
+    <p>
+      <strong>要跨程式，打在意圖列；只改眼前這份檔案，打在那個視窗的面板。</strong>
+      意圖列看得到所有視窗跟沙箱，一句話可以開程式、傳東西、存檔；面板只認得自己那個程式的動作，
+      但它記得前幾輪說過什麼。把「順便做一份簡報」打進試算表的面板，它會很誠實地告訴你它做不到。<br>
+      <strong>檔案要存到哪裡，寫在句子裡。</strong>寫了就不會停下來問；讀過信件、PDF、網頁之後尤其如此（第 16 章）。<br>
+      <strong>圖表是同一個東西。</strong>試算表畫的圖送進文件或簡報，帶著資料一起走；存成 .docx / .pptx 之後，
+      在 Word 與 PowerPoint 裡按「編輯資料」還改得動。
+    </p>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 1　一張表，三個目的地</h4>
+    <p>手上只有六個月的收入與支出，要交出一張試算表、一份有圖有表的報告，還有一份簡報。</p>
+    <ol class="steps">
+      <li><span class="chip">意圖列</span>
+        <div class="said">開一張新試算表，從 A1 填上半年每月的收入與支出（單位萬元）：一月 120、80；二月 135、90；三月 128、95；四月 150、100；五月 160、105；六月 172、110。第四欄用公式算結餘，最後加一列合計，存成 /demo/上半年收支.xlsx</div>
+        <p>它建目錄、開試算表、填 32 格（結餘與合計是公式，不是算好的數字）、存成 .xlsx。十幾秒。</p></li>
+      <li><span class="chip">試算表面板</span>
+        <div class="said">把 A1:D7 畫成折線圖，標題「上半年收支」，然後把這張圖插到文件</div>
+        <p>圖浮在格線上；文件程式自己開起來，圖已經在裡面，資料一起帶過去了。</p></li>
+      <li><span class="chip">文件面板</span>
+        <div class="said">圖上面加一個標題「上半年收支報告」和一段三句話的摘要，圖下面放原始資料的表格，存成 /demo/上半年收支報告.docx，再匯出 PDF</div>
+        <p>五個動作一輪做完：改標題、寫摘要、插表格、存 Word、匯 PDF。摘要裡的數字是從圖表的資料讀出來的，不是編的。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">把試算表那張圖也放進一份新簡報：封面「上半年收支」，第二頁放圖，第三頁列三個重點，存成 /demo/上半年收支.pptx</div>
+        <p>它先問試算表「有哪些圖表」拿到編號，說「這只是一步」，再建三頁簡報、把圖放到第 2 頁、存成 .pptx。三頁，不多不少。</p></li>
+    </ol>
+    <figure>
+      <img src="img/22-combo-report.png" alt="文件視窗：標題「上半年收支報告」、三句摘要、折線圖與資料表格；右側面板列出五筆動作收據，核心軌跡寫著已匯出 .docx 與 .pdf">
+      <figcaption><span class="fignum">圖 22</span>第 3 句之後的文件視窗。面板一輪執行了五個動作，右邊的收據一筆一筆對得上；圖下面那張表的數字是它從圖表資料讀來的。</figcaption>
+    </figure>
+    <div class="gain">Excel → Word → PowerPoint 的貼圖來回一次都沒有。<b>四句話，四個檔案，圖是同一張。</b></div>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 2　一封報價信，到一份可以拿去開會的簡報</h4>
+    <p>供應商把報價單用 .xlsx 夾在信裡寄來。要算小計、做圖、做簡報，還要回信。</p>
+    <ol class="steps">
+      <li><span class="chip">意圖列</span>
+        <div class="said">找這禮拜 abc.com 寄來、有附件的報價信，把附件存到 /demo/inbox</div>
+        <p>搜信、開信、把附件用它原本的檔名存進那個目錄。讀信之後保護升級了，但 /demo/inbox 是你指名的，所以不會問。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">打開 /demo/inbox/報價單-九月.xlsx，加一欄「小計」＝數量×單價，底下加一列合計，再做一張各品項小計的長條圖</div>
+        <p>公式是真的公式（=C2*D2），合計是 SUM。圖表的數字它自己交了一份，寫在右邊空著的欄位，原本的格子一個都不會被蓋掉。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">把試算表那張小計長條圖放進一份新簡報：封面「九月採購報價」，第二頁放圖，第三頁列出小計最高的三個品項，存成 /demo/outbox/九月採購報價.pptx</div>
+        <p>跨程式，所以打在意圖列。三個最貴的品項是它從試算表的數字排出來的。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">把三個最貴的品項與合計金額寫成一封回信草稿給王小明，存到 /demo/outbox/回信給王小明.md</div>
+        <p>網頁信箱是唯讀的，所以回信寫成草稿檔；換成 IMAP 帳號，最後那句可以直接說「開一封回信草稿給王小明」。</p></li>
+    </ol>
+    <figure>
+      <img src="img/23-combo-quote.png" alt="試算表視窗：從信件存下來的報價單多了小計欄與合計列，旁邊一張各品項小計的長條圖；右側核心軌跡列出開檔、填格、插圖、存檔四步">
+      <figcaption><span class="fignum">圖 23</span>第 2 句之後：E 欄的小計與合計是公式，長條圖的資料寫在右邊空著的 G、H 欄，存回同一個 .xlsx。右邊的軌跡就是它做的四步。</figcaption>
+    </figure>
+    <div class="gain">從收件匣到簡報，附件一次都沒有經過你的下載資料夾。<b>讀過信之後它還是照做，因為每個目的地都是你說的。</b></div>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 3　三份對帳單 PDF，變成一份週報</h4>
+    <p>三家供應商的對帳單是 PDF。要一張應付帳款表、一份給主管的 Word 週報，而且下週還要再做一次。</p>
+    <ol class="steps">
+      <li><span class="chip">意圖列</span>
+        <div class="said">把 /demo/inbox 裡三份對帳單 PDF 的廠商、本期應付總額、付款到期日讀出來，整理成一張試算表：廠商、金額、到期日，最後一列合計，金額用千分位，存成 /demo/應付帳款.xlsx</div>
+        <p>它一份一份用 PDF 檢視器讀進 context（每一份都標成不可信），再開試算表填表、套千分位、存檔。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">用 /demo/應付帳款.xlsx 這張表寫一份「九月應付帳款週報」文件：標題、一段說明（總額、最早到期的是哪一家）、資料表格、一張各廠商金額的圓餅圖，存成 /demo/outbox/應付週報.docx，再匯出 PDF</div>
+        <p>說明裡的總額與最早到期廠商，是它從表裡算的。圓餅圖寫進 .docx 是真的圖表部件。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">每天早上八點，把 /demo/inbox 裡新的對帳單 PDF 讀出來，更新 /demo/應付帳款.xlsx</div>
+        <p>變成一個排程。句子裡指名了 /demo/inbox 與 /demo/應付帳款.xlsx，所以無人值守的時候讀完 PDF 還寫得進去（第 13 章的規則）。</p></li>
+    </ol>
+    <figure>
+      <img src="img/24-combo-weekly.png" alt="文件視窗：九月應付帳款週報，標題、說明段、三家廠商的表格與圓餅圖；旁邊是應付帳款的試算表">
+      <figcaption><span class="fignum">圖 24</span>第 2 句之後的週報。表格與圓餅圖都是從那張試算表來的，存成 .docx 之後在 Word 裡還是活的圖表。</figcaption>
+    </figure>
+    <div class="gain">三份 PDF 沒有人打開過。<b>下週的那一次，是排程做的。</b></div>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 4　一頁網頁上的規格表，變成試算表與簡報</h4>
+    <p>產品規格在供應商的網頁上。要一份存檔用的 Word、一張可以換算幣別的試算表、一頁比較表的簡報。</p>
+    <ol class="steps">
+      <li><span class="chip">意圖列</span>
+        <div class="said">用瀏覽器打開 http://…/spec.html，把正文轉存成 Word，存到 /demo/notes/機型規格.docx</div>
+        <p>只有正文：導覽列、廣告、側欄都不會進去。存到哪裡寫在句子裡，所以讀完網頁之後也不會停下來問。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">把那一頁的規格表整理成試算表：型號、記憶體、電池、建議售價（USD），再加一欄台幣價格（匯率 32），存成 /demo/機型比較.xlsx</div>
+        <p>「那一頁」它記得——網頁的正文已經在 context 裡，不用再開一次。</p></li>
+      <li><span class="chip">意圖列</span>
+        <div class="said">用試算表裡的比較表做一頁簡報：標題「三款機型比較」，放一個表格列出型號、美金與台幣價格，存成 /demo/outbox/機型比較.pptx</div>
+        <p>簡報上的表格是可以直接在投影片上改字的物件。</p></li>
+    </ol>
+    <figure>
+      <img src="img/25-combo-web.png" alt="簡報視窗：一頁「三款機型比較」，投影片上一個三欄表格列出型號、美金與台幣價格；右側核心軌跡寫著建立 1 頁、加了一個表格、已匯出 .pptx">
+      <figcaption><span class="fignum">圖 25</span>第 3 句之後的簡報。表格是投影片上的物件，字可以直接在上面改；軌跡裡那句「給的大小不是百分比，用了預設」是它替你擋掉的一個小錯。</figcaption>
+    </figure>
+    <div class="gain">複製貼上規格表最容易貼歪一欄。<b>這條路上沒有人貼過任何東西。</b></div>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 5　兩張表，字不一樣的同一個東西</h4>
+    <p>客戶的訂單明細（PO 號碼、item 描述、數量）要跟公司的資料（PO 號碼、貨號、描述、庫存）對起來，把貨號回填到訂單上。描述兩邊寫法完全不同：「不鏽鋼六角螺栓 M6x20 A2」對「SS HEX BOLT M6*20 A2-70」，XLOOKUP 一筆都對不上。你不用設定任何欄位對應，兩句話。</p>
+    <ol class="steps">
+      <li><span class="chip">試算表面板</span>
+        <div class="said">這份訂單的描述跟 /demo/公司資料.xlsx 對照，同一個 PO 底下找對得上的品項，把貨號寫到 D 欄，沒把握的另外列給我看</div>
+        <p>欄位對應是它從這句話和兩張表的欄名讀出來的，收據把讀法講回去：「用『PO號碼』對『PO No.』，比對『item描述』與『item描述』，『item貨號』→D 欄」。它讀不到另一個檔案的欄名時不猜——先退到同名的欄，再退到那種角色常見的欄名，退了什麼也寫在收據上（「對方沒有『品名』，用了同名的『item描述』」）。七列訂單：六列填了貨號，旁邊多了「信心」與「依據」（「六角螺栓，M10x40、8.8級鍍鋅相符」——同一個 PO 底下有 M10x40 和 M10x30 兩個候選，它挑對了）；PO 1003 對方沒有，那一列寫「待確認」、洗成淺黃，並列進「待確認」工作表。</p></li>
+      <li><span class="chip">試算表面板</span>
+        <div class="said">待確認那一列的貨號直接填 NL-M8，套用回去，然後存檔</div>
+        <p>「選擇」可以是候選 1、候選 2，或你直接說的貨號。套用之後那一列的信心寫「人工」、依據寫「人工選擇」，從待確認清單移掉，檔案存回同一個 .xlsx。要看自己填也可以：切到「待確認」工作表，在「選擇」欄填 1、2 或貨號，再說一句「套用」。</p></li>
+    </ol>
+    <figure>
+      <img src="img/26-combo-match.png" alt="試算表視窗：客戶訂單多了 item貨號、信心、依據三欄，PO 1003 那一列寫著待確認並洗成淺黃，底下多了「待確認」工作表；右側面板的收據寫著對上 6 筆、待確認 1 筆、對方沒有的鍵值 1003，以及它讀到的欄位對應">
+      <figcaption><span class="fignum">圖 26</span>第 1 句之後。D 欄是貨號，E 欄信心，F 欄依據；待確認的那一列洗成淺黃，另有一張「待確認」工作表。面板的收據把它讀到的欄位對應、以及它退到哪一欄，都講出來了。</figcaption>
+    </figure>
+    <div class="note caution" style="margin:0">
+      <span class="lbl">它守的規則</span>
+      <p>只在同一個 PO 底下比對；貨號只能是候選裡有的，模型編出來的一律退回待確認；已經有值的格子不動，再跑一次不會蓋掉你人工選過的；沒有模型的時候，要判斷的列全部進待確認並說原因。整次對照是一步「復原」。看結果看收據，那句「已完成」是它在動作跑之前說的。</p>
+    </div>
+    <div class="gain">XLOOKUP 一筆都對不上的兩張表，一句話對完。<b>它猜不準的那一列會告訴你，不會替你填。</b></div>
+  </div>
+
+  <div class="note">
+    <span class="lbl">卡住了怎麼看</span>
+    <p>
+      右邊的<strong>核心軌跡</strong>寫著它怎麼理解你那句話、計畫了哪幾步、每一步的結果；<strong>動作日誌</strong>是可以按「復原」的那份。
+      一句話沒做完，它會說「停在第幾回合」跟原因，改句子再送一次就好——通常是把要存到哪裡寫清楚。
+      面板做不到的事它會直說（例如試算表的面板不會寫文件），那就換到意圖列講同一句。
+    </p>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════ 19 -->
+<section class="ch" id="ch19">
+  <div class="ch-head"><span class="num">19</span><h2>快速鍵</h2></div>
 
   <div class="tablewrap">
   <table>
@@ -1766,9 +1914,9 @@ html { scroll-behavior: smooth; }
 </section>
 
 
-<!-- ═══════════════════════════════════════ 19 -->
-<section class="ch" id="ch19">
-  <div class="ch-head"><span class="num">19</span><h2>卡住的時候</h2></div>
+<!-- ═══════════════════════════════════════ 20 -->
+<section class="ch" id="ch20">
+  <div class="ch-head"><span class="num">20</span><h2>卡住的時候</h2></div>
 
   <dl class="defs">
     <dt>右上角寫著 OFFLINE，問什麼都說沒連上核心</dt>

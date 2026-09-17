@@ -374,3 +374,36 @@ test('收件者跟副本也是搜尋看得到的地方', async () => {
   assert.equal(store.list({ search: 'lee@abc.com' }).length, 1,
     '資料夾裡的過濾也要看收件者，不然同一個字在兩個地方答案不一樣');
 });
+
+test('「寄給我的」看的是信箱自己的旗標，不是標頭裡有沒有我的地址', async () => {
+  /* A list row from the web source names its recipients without addresses,
+     and a message that came through a distribution list names the list. So
+     「收件者含 someone@example.com」 over a real mirror was 0 of 350 for a
+     week in which several messages were sent straight to that address. The
+     source knows (MessageToMe / MessageCcMe) and the mirror keeps what it
+     said; an IMAP row has no flags and its header still speaks. */
+  await freshStore();
+  store.put(msg(1, { to: 'Irene Wu(吳雅婷), 我', toMe: true, ccMe: false }));
+  store.put(msg(2, { to: '王小明', cc: '我', toMe: false, ccMe: true }));
+  store.put(msg(3, { to: '王小明', cc: '', toMe: false, ccMe: false }));
+  store.put(msg(4, { to: 'someone@example.com' }));                        // IMAP: no flags
+  store.put(msg(5, { to: 'TW_ALL', toMe: true }));                         // through a list
+  await store.flush();
+
+  const ids = (r) => r.hits.map((h) => h.messageId).sort();
+  const mine = ['<m1@example.com>', '<m2@example.com>', '<m4@example.com>', '<m5@example.com>'];
+  assert.deepEqual(ids(await store.search({ to: '我' })), mine, '「我」就是這個信箱的主人');
+  assert.deepEqual(ids(await store.search({ to: 'someone@example.com' })), mine,
+    '帳號自己的地址也一樣——清單列裡沒有地址，旗標才是答案');
+  assert.deepEqual(ids(await store.search({ to: 'SOMEONE@example.com' })), mine, '大小寫不算');
+  assert.deepEqual(ids(await store.search({ to: '王小明' })), ['<m2@example.com>', '<m3@example.com>'],
+    '別人還是照名字找');
+
+  /* A re-sync that does not carry the flags must not erase them, and one that
+     brings the addresses (an opened message) replaces the names. */
+  store.put(msg(2));
+  assert.equal(store.get('<m2@example.com>').ccMe, true, '沒帶旗標的再同步不能把旗標洗掉');
+  store.put(msg(2, { to: '王小明 <ming@abc.com>', cc: '我 <someone@example.com>', toMe: false, ccMe: true }));
+  assert.equal(store.get('<m2@example.com>').cc, '我 <someone@example.com>', '開信帶回的位址蓋掉名字');
+  assert.equal(store.get('<m4@example.com>').toMe, undefined, 'IMAP 的列不會被硬塞一個 false');
+});

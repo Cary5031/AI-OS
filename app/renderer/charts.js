@@ -2037,6 +2037,17 @@
        「插入到簡報」. The sending program does not have to know this; it is a
        fact about decks, so it lives on this side of the road. */
     var args = Object.assign({ chart: s }, opts || {});
+    /* 「放在第 2 頁」: a page the caller named is that page, not a new one after
+       it. A plan that builds the deck first reserves a page for the chart, and
+       without this the chart landed on a fresh page while the reserved one
+       stayed empty -- measured as a three-page plan saved as four pages. */
+    if (args.page !== undefined && args.page !== null && args.page !== '') {
+      if (appId === 'slides') {
+        args.index = Number(args.page);
+        args.newSlide = false;
+      }
+      delete args.page;
+    }
     if (appId === 'slides' && args.newSlide === undefined) args.newSlide = true;
     var out = await apps.invoke(appId, action, args, win);
     if (AIOS.wm && AIOS.wm.focus && win) { try { AIOS.wm.focus(win); } catch (e) { /* not fatal */ } }

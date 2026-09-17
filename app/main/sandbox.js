@@ -609,6 +609,24 @@ async function find(query, opts = {}) {
   };
 }
 
+/**
+ * Whether a path exists, and whether it is a directory.
+ *
+ * What an office program asks before it opens a path: 「new file, save it
+ * here」 or 「this file is gone」. Answered without reading the file, because
+ * reading is what arms the taint and this file was never read.
+ */
+async function exists(vpath) {
+  const r = resolve(vpath);
+  try {
+    const st = await fs.stat(r.abs);
+    return { vpath: r.vpath, exists: true, dir: st.isDirectory(), bytes: st.isFile() ? st.size : 0 };
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return { vpath: r.vpath, exists: false, dir: false, bytes: 0 };
+    throw e;
+  }
+}
+
 async function read(vpath, opts = {}) {
   const r = await safe(vpath, { kind: 'file' });
   const max = opts.maxBytes || QUOTA.fileBytes;
@@ -942,6 +960,7 @@ module.exports = {
   tree,
   find,
   read,
+  exists,
   write,
   readBytes,
   writeBytes,

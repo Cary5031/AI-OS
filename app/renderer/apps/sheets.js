@@ -257,7 +257,8 @@
               'legend:"bottom"|"right"|"none", labels:true|false（資料標籤）, numFmt, xTitle, yTitle, rows:[[…]]}',
         desc: '插入一張圖表，資料來自 range（省略就是目前選取的範圍；只選一格會自動抓整塊資料）。' +
               'categories 是另外一段類別範圍，留空就用第一欄或第一列；at 是圖表左上角要貼在哪一格，省略就放在範圍右邊。' +
-              '數字還不在表上時可以直接給 rows（二維陣列，第一列是數列名稱、第一欄是類別），會先寫進儲存格再畫',
+              '表上已經有的數字用 range。數字還不在表上時可以直接給 rows（二維陣列，第一列是數列名稱、第一欄是類別），' +
+              '會寫進表上空著的地方再畫；給 rows 而表上已有同樣一塊時會直接綁那一塊，原本的格子都不會被蓋掉',
         run: async function (a, ctx) { return { note: ctx.api.insertChart(a) }; }
       },
       setChart: {
@@ -271,8 +272,9 @@
         run: async function (a, ctx) { return { note: ctx.api.deleteChart(a) }; }
       },
       chartToApp: {
-        args: '{id:"c1", app:"docs"|"slides"}',
-        desc: '把圖表插到文件或簡報（用開著的視窗，沒有就開一個）。' +
+        args: '{id, app:"docs"|"slides", page}',
+        desc: '把圖表插到文件或簡報（用開著的視窗，沒有就開一個）。id 是圖表編號（charts 動作列得出來；只有一張時可以省略）。' +
+              '送到簡報時 page 指定放在第幾頁，省略就新開一頁放。' +
               '也可以不先插圖表，直接給 range（與可選的 type、title）把一段範圍畫成圖送過去',
         run: async function (a, ctx) { return { note: await ctx.api.chartToApp(a) }; }
       },
@@ -289,6 +291,24 @@
           };
         }
       },
+      match: {
+        args: '{source:{file:"/inbox/公司資料.xlsx", sheet:"工作表1"}, key:{mine:"PO號碼", theirs:"PO No."}, ' +
+              'compare:{mine:"item描述", theirs:"品名"}, take:[{theirs:"item貨號", into:"E"}], confidence:true, ' +
+              'review:"both"|"sheet"|"mark"|"none", onlyEmpty:true, redo:"all"|["1005"], hints:"忽略顏色", headerRow:1, model:true}',
+        desc: '語意對照：以鍵欄（例如 PO）分組，在同一組裡用描述比對另一張表，把對方的欄帶到這張表。' +
+              'source 是沙箱裡的檔案路徑（.xlsx/.csv/.aiossheet）或這本活頁簿的工作表名；欄用欄名或字母都可以，' +
+              'key 與 compare 只給一個字串就是兩邊同名；take 的 into 給字母、既有欄名，或一個新欄名（會加在最右邊）。' +
+              '對得上的填進 into 並加「信心」「依據」欄；沒把握的填「待確認」、洗黃、列到「待確認」工作表。' +
+              '已有值的格子不動（onlyEmpty），redo 指定要重做的鍵值。欄名讀不出來時會回一個問題：把它問使用者，不要猜',
+        run: async function (a, ctx) { return { note: await ctx.api.match(a) }; }
+      },
+      applyChoices: {
+        args: '{choices:[{item:1, pick:1}, {row:5, pick:"NY-WASHER"}]}',
+        desc: '把「待確認」的選擇寫回原表。choices 直接給：item 是待確認清單的第幾列（或用 row 給原表的列號），' +
+              'pick 是 1、2（那一列的候選 1／候選 2）或直接給貨號；不給 choices 就讀「待確認」工作表 I 欄「選擇」裡填好的。' +
+              '寫回後依據改成「人工選擇」，那幾列從清單移掉',
+        run: async function (a, ctx) { return { note: ctx.api.applyChoices(a) }; }
+      },
       exportAs: {
         args: '{format:"csv"|"xlsx"|"pdf"}', desc: '匯出成 CSV、xlsx 或 PDF',
         run: async function (args, ctx) { return { note: await ctx.api.exportAs(args.format) }; }
@@ -303,6 +323,10 @@
       // ref -> { v } | { f } plus any of font, size, bold, italic
       var cells = {};
       var computed = { values: {}, errors: {} };
+      /* The last 語意對照: which sheet, which columns it wrote, and the
+         candidates behind every 待確認 row, so 「套用選擇」 knows what 1 and 2
+         mean. Goes into the session snapshot with the rest. */
+      var lastMatch = null;
       /* The last recalculation's values for *every* sheet, keyed by sheet name.
          `computed` is only the active sheet, and a chart may be bound to a range
          on one the user is not looking at. Kept rather than recomputed, because
@@ -2806,11 +2830,28 @@
       }
 
       /** The chart a command means: by id, else the selected one, else the newest. */
+      /** Every chart in the book, on whichever sheet, in sheet order. */
+      function allCharts() {
+        stash();
+        var out = [];
+        book.forEach(function (s, i) {
+          (s.charts || []).forEach(function (rec) { out.push({ rec: rec, sheet: i }); });
+        });
+        return out;
+      }
+
       function chartMeant(id) {
         if (id !== undefined && id !== null && id !== '') {
           var hit = findChart(String(id));
-          if (!hit) throw new Error('沒有這張圖表：' + id);
-          return hit;
+          if (hit) return hit;
+          /* An id that matches nothing, in a book with one chart, means that
+             chart: the model copies the example id out of an action's own
+             signature (id:"c1") more often than it reads the receipt. With
+             more than one, the list is the answer. */
+          var all = allCharts();
+          if (all.length === 1) return all[0];
+          throw new Error('沒有這張圖表：' + id +
+            (all.length ? '（有：' + all.map(function (h) { return h.rec.id; }).join('、') + '）' : '（這本活頁簿裡還沒有圖表）'));
         }
         if (selChart) {
           var here = findChart(selChart);
@@ -2880,7 +2921,23 @@
         }
 
         var rows = AIOS.charts.toRows(s, { raw: true });
-        var at = F.parseRef(sel) || { col: 0, row: 0 };
+        var found = null;
+        var at;
+        if (pl.fromPlan) {
+          /* A plan's insertChart {rows} has no cursor. It said which numbers, and
+             those numbers are usually already on the sheet -- 「各品項小計的長條圖」
+             right after it had written the 小計 column. Writing them at the
+             selection put the chart's two columns over A1:B7 of the very quote it
+             was drawing: 規格 became 小計, the formulas beside it went with it, and
+             the receipt was cheerful about it. So a block that already holds these
+             rows is bound to, and rows the sheet does not have go to empty cells
+             beyond everything on it -- never over anything. A person pasting a
+             chart put the cursor where they want it; that path is unchanged. */
+          found = findRows(rows);
+          at = found ? { col: found.c0, row: found.r0 } : freeCorner(rows[0].length, rows.length);
+        } else {
+          at = F.parseRef(sel) || { col: 0, row: 0 };
+        }
         var area = {
           c0: at.col, r0: at.row,
           c1: Math.min(199, at.col + rows[0].length - 1),
@@ -2894,28 +2951,99 @@
         }, fields, { range: range })])[0];
 
         mutate(label, function () {
-          // The incoming block owns the cells it fills, merges included.
-          merges = merges.filter(function (m) { return !overlaps(m, area); });
-          rows.forEach(function (row, ri) {
-            row.forEach(function (val, ci) {
-              writeCell(F.makeRef(area.c0 + ci, area.r0 + ri), val);
+          if (!found) {
+            // The incoming block owns the cells it fills, merges included.
+            merges = merges.filter(function (m) { return !overlaps(m, area); });
+            rows.forEach(function (row, ri) {
+              row.forEach(function (val, ci) {
+                writeCell(F.makeRef(area.c0 + ci, area.r0 + ri), val);
+              });
             });
-          });
-          /* The chart's own number format onto the values it wrote, so the cells
-             read the way the picture does. A table that says 120000 beside an
-             axis that says NT$120,000 is two answers to one question. */
-          if (s.numFmt) {
-            var vals = [];
-            for (var r = area.r0 + 1; r <= area.r1; r++) {
-              for (var c = area.c0 + 1; c <= area.c1; c++) vals.push(F.makeRef(c, r));
+            /* The chart's own number format onto the values it wrote, so the cells
+               read the way the picture does. A table that says 120000 beside an
+               axis that says NT$120,000 is two answers to one question. */
+            if (s.numFmt) {
+              var vals = [];
+              for (var r = area.r0 + 1; r <= area.r1; r++) {
+                for (var c = area.c0 + 1; c <= area.c1; c++) vals.push(F.makeRef(c, r));
+              }
+              applyFormat(vals, { numFmt: s.numFmt });
             }
-            applyFormat(vals, { numFmt: s.numFmt });
           }
           charts.push(rec);
         });
         selChart = rec.id;
         syncChartSel();
-        return '已貼上圖表 ' + rec.id + '：資料寫在 ' + range + '，圖表綁著它';
+        if (found) return '已插入圖表 ' + rec.id + '：資料已經在 ' + range + '，圖表直接綁著它';
+        return (pl.fromPlan ? '已插入圖表 ' : '已貼上圖表 ') + rec.id + '：資料寫在 ' + range +
+          (pl.fromPlan ? '（表上空著的地方，原本的格子都沒動）' : '') + '，圖表綁著它';
+      }
+
+      /** The furthest column and row that hold anything, or null for an empty sheet. */
+      function usedExtent() {
+        var c1 = -1;
+        var r1 = -1;
+        Object.keys(cells).forEach(function (ref) {
+          var cell = cells[ref];
+          if (!cell || ((cell.v === undefined || cell.v === '') && !cell.f)) return;
+          var p = F.parseRef(ref);
+          if (!p) return;
+          if (p.col > c1) c1 = p.col;
+          if (p.row > r1) r1 = p.row;
+        });
+        return c1 < 0 ? null : { c1: c1, r1: r1 };
+      }
+
+      /** The top-left of an empty block clear of everything on the sheet: a blank column to the right, else below. */
+      function freeCorner(w, h) {
+        var ext = usedExtent();
+        if (!ext) return { col: 0, row: 0 };
+        var col = ext.c1 + 2;
+        if (col + w - 1 <= 199) return { col: col, row: 0 };
+        return { col: 0, row: Math.min(1999 - (h - 1), ext.r1 + 2) };
+      }
+
+      /** What a cell says for the purpose of matching: its computed value, else what was typed. */
+      function valueFor(ref) {
+        var v = computed.values[ref];
+        if (v !== undefined && v !== null) return v;
+        var cell = cells[ref];
+        return cell && cell.v !== undefined ? cell.v : '';
+      }
+
+      /** Does this cell hold `want`? Numbers within rounding, text case-blind; an empty want matches anything (the corner). */
+      function sameCell(want, have) {
+        if (want === null || want === undefined || String(want).trim() === '') return true;
+        var ws = String(want).trim();
+        var hs = String(have === null || have === undefined ? '' : have).trim();
+        if (!hs) return false;
+        var a = typeof want === 'number' ? want : Number(ws.replace(/[,\s]/g, ''));
+        var b = typeof have === 'number' ? have : Number(hs.replace(/[,\s]/g, ''));
+        if (isFinite(a) && isFinite(b) && !isNaN(a) && !isNaN(b)) {
+          return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a));
+        }
+        return ws.toLowerCase() === hs.toLowerCase();
+      }
+
+      /** A block of cells on this sheet that already holds these rows, or null. */
+      function findRows(rows) {
+        var h = rows.length;
+        var w = h ? rows[0].length : 0;
+        if (!h || !w) return null;
+        var ext = usedExtent();
+        if (!ext) return null;
+        for (var r = 0; r + h - 1 <= ext.r1; r++) {
+          for (var c = 0; c + w - 1 <= ext.c1; c++) {
+            var ok = true;
+            for (var i = 0; ok && i < h; i++) {
+              for (var j = 0; ok && j < w; j++) {
+                if (!sameCell(rows[i][j], valueFor(F.makeRef(c + j, r + i)))) ok = false;
+              }
+            }
+            if (ok) return { c0: c, r0: r, c1: c + w - 1, r1: r + h - 1 };
+          }
+        }
+        return null;
       }
 
       /** The copied chart, adopted here, with the outcome as a toast. */
@@ -4041,8 +4169,30 @@
         throw new Error('不支援的格式：' + format);
       }
 
+      /**
+       * A path nobody has written yet is where this workbook is going, not an
+       * error. A plan says 「開一張新試算表，存成 /demo/x.xlsx」 and opens the app
+       * on that path; every such open used to toast 「開啟失敗：找不到」 and leave
+       * the window with no path, so the save that followed went to /notes under
+       * a default name -- or stopped on a consent window for a path nobody named.
+       */
+      async function startAt(vpath) {
+        /* A path, not a word: a plan that opens the app with 「new」 means a new
+           workbook, not a file called new at the root. */
+        if (!/^\/.*\.[a-z0-9]+$/i.test(String(vpath))) return false;
+        var probe = await A.fs.exists(vpath);
+        if (!probe || !probe.ok || probe.data.exists) return false;
+        path = vpath;
+        pathMtime = 0;
+        dirty = false;
+        ctx.setTitle('試算表 — ' + vpath.split('/').pop());
+        ctx.toast('找不到 ' + vpath + '，當成新試算表：儲存時會存到這裡', 't-warn');
+        return true;
+      }
+
       async function open(vpath) {
         if (!vpath) return;
+        if (await startAt(vpath)) return;
         /* Whichever branch loads it, remember which version was loaded: that is
            what a later save claims to be replacing. Every reader reports it, so
            no format is left without the guard. */
@@ -4516,7 +4666,7 @@
            private copy of the figures is the word processor's model, not this
            one's, and two copies of a number is one of them going stale. */
         if (s.chart && typeof s.chart === 'object') {
-          return adoptSpec(Object.assign({}, s.chart, fields), '插入圖表', fields);
+          return adoptSpec(Object.assign({}, s.chart, fields), '插入圖表', Object.assign({ fromPlan: true }, fields));
         }
         if (Array.isArray(s.rows)) {
           var got = AIOS.charts.fromRows(s.rows, {
@@ -4533,7 +4683,7 @@
             xTitle: fields.xTitle || got.corner || '',
             numFmt: fields.numFmt || got.numFmtHint || ''
           })), fields.colours);
-          return adoptSpec(made, '插入圖表', fields);
+          return adoptSpec(made, '插入圖表', Object.assign({ fromPlan: true }, fields));
         }
         if (!fields.range) fields.range = AIOS.charts.rangeText(selectedBlock());
         return insertRecord(fields);
@@ -4574,7 +4724,7 @@
           where = '圖表 ' + rec.id;
         }
         var read = checkRead(chartRead(rec, home));
-        var out = await AIOS.charts.sendTo(app, read.spec, { aspect: rec.w / rec.h });
+        var out = await AIOS.charts.sendTo(app, read.spec, { aspect: rec.w / rec.h, page: s.page });
         return where + ' 已插入到' + AIOS.charts.APP_NAMES[app] +
           (out && out.note ? '：' + out.note : '');
       }
@@ -4599,6 +4749,405 @@
         return out;
       }
 
+      /* ------------------------------------------------------ 語意對照 --- */
+
+      /* The fill 待確認 rows get. Stored the way setStyle stores a fill: hex,
+         no hash. AIOS.palette's 淺黃, so a person clearing it by hand sees the
+         same swatch name. */
+      var REVIEW_BG = 'FFF2CC';
+
+      /** A cells map as rows of display text, formulas resolved from `vals`. */
+      function gridOf(map, vals) {
+        var maxC = 0;
+        var maxR = 0;
+        Object.keys(map).forEach(function (ref) {
+          var p = F.parseRef(ref);
+          if (!p) return;
+          if (p.col > maxC) maxC = p.col;
+          if (p.row > maxR) maxR = p.row;
+        });
+        var rows = [];
+        for (var r = 0; r <= maxR; r++) {
+          var row = [];
+          for (var c = 0; c <= maxC; c++) {
+            var ref = F.makeRef(c, r);
+            var cell = map[ref];
+            var v = vals[ref];
+            if (v === undefined) v = cell ? (cell.f ? '' : cell.v) : '';
+            row.push(v === undefined || v === null ? '' : fmt(v));
+          }
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      /**
+       * The other table, as rows of display text.
+       *
+       * A file in the sandbox (.xlsx, .csv, .aiossheet), read the way open()
+       * reads it but without a window, or another sheet of this book. Nothing
+       * here is written to; the values come from one recalculation pass.
+       */
+      async function loadTable(source) {
+        var src = source && typeof source === 'object' ? source
+          : (typeof source === 'string' && source
+            ? (/[\/.]/.test(source) ? { file: source } : { sheet: source })
+            : {});
+        var names = book.map(function (s) { return s.name; }).join('、');
+        if (src.file) {
+          var vpath = String(src.file);
+          var sheetsIn;
+          if (/\.csv$/i.test(vpath)) {
+            var rc = await A.fs.read(vpath);
+            if (!rc.ok) throw new Error('讀不到 ' + vpath + '：' + rc.error);
+            var conv = await A.office.convert('csv->rows', rc.data.content);
+            if (!conv.ok) throw new Error('CSV 解析失敗：' + conv.error);
+            return {
+              name: vpath.split('/').pop(),
+              rows: conv.data.map(function (r) { return r.map(function (v) { return v === null || v === undefined ? '' : String(v); }); })
+            };
+          }
+          if (/\.aiossheet$/i.test(vpath)) {
+            var ra = await A.fs.read(vpath);
+            if (!ra.ok) throw new Error('讀不到 ' + vpath + '：' + ra.error);
+            var d;
+            try { d = JSON.parse(ra.data.content); } catch (e) { throw new Error('檔案格式不對：' + e.message); }
+            sheetsIn = Array.isArray(d.sheets) && d.sheets.length ? d.sheets : [{ name: d.sheetName || '工作表1', cells: d.cells || {} }];
+          } else if (/\.xlsx$/i.test(vpath)) {
+            var rx = await A.office.readXlsx(vpath);
+            if (!rx.ok) throw new Error('讀不到 ' + vpath + '：' + rx.error);
+            sheetsIn = rx.data.sheets || [];
+          } else {
+            throw new Error('對照的檔案要是 .xlsx、.csv 或 .aiossheet：' + vpath);
+          }
+          var pick = src.sheet ? sheetsIn.filter(function (s) { return s.name === src.sheet; })[0] : sheetsIn[0];
+          if (!pick) {
+            throw new Error(vpath + ' 裡沒有工作表「' + src.sheet + '」，有：' + sheetsIn.map(function (s) { return s.name; }).join('、'));
+          }
+          var one = {};
+          one[pick.name] = pick.cells || {};
+          var vals = (F.recalcBook(one).values || {})[pick.name] || {};
+          return {
+            name: vpath.split('/').pop() + (sheetsIn.length > 1 ? '／' + pick.name : ''),
+            rows: gridOf(pick.cells || {}, vals)
+          };
+        }
+        if (src.sheet) {
+          var idx = sheetIndexOf(String(src.sheet));
+          if (idx < 0) throw new Error('這本活頁簿沒有工作表「' + src.sheet + '」，有：' + names);
+          if (idx === active) throw new Error('對照的對象不能是目前這張表（「' + sheetName + '」）；這本活頁簿有：' + names);
+          stash();
+          return { name: book[idx].name, rows: gridOf(book[idx].cells, (bookValues || {})[book[idx].name] || {}) };
+        }
+        throw new Error('要說對照的對象：source 給檔案路徑（file）或這本活頁簿裡的工作表名（sheet）。這本活頁簿有：' + names);
+      }
+
+      /** One side of a key/compare spec: {mine, theirs} or a name that means both. */
+      function sideOf(spec, side) {
+        if (spec && typeof spec === 'object') return spec[side];
+        return spec;
+      }
+
+      /** Text into a cell as text: a part number 00123 stays 00123, and no formula sneaks in. */
+      function putText(ref, value) {
+        var s = value === null || value === undefined ? '' : String(value);
+        var c = Object.assign({}, cells[ref] || {});
+        delete c.f;
+        if (s === '') {
+          delete c.v;
+          if (Object.keys(c).length) cells[ref] = c; else delete cells[ref];
+          return;
+        }
+        c.v = /^-?\d+(?:\.\d+)?$/.test(s) && !/^-?0\d/.test(s) ? Number(s) : s;
+        cells[ref] = c;
+      }
+
+      /**
+       * 語意對照. The sentence became the arguments; this turns them into
+       * columns, asks AIOS.sheetmatch which rows need a judgement, gets that
+       * judgement from the model a batch at a time, and writes it all down as
+       * one undo step -- part numbers, a confidence, a reason, and a 待確認
+       * sheet for what nobody should guess at.
+       */
+      async function matchApi(spec) {
+        var s = spec || {};
+        var M = AIOS.sheetmatch;
+        if (!M) throw new Error('對照模組沒有載入');
+        if (sheetName === M.REVIEW) throw new Error('請先切到要對照的那張表，「' + M.REVIEW + '」是結果');
+        stash();
+        var mineRows = grid();
+        if (!mineRows.length) throw new Error('這張表是空的，沒有東西可以對照');
+        var hdr = s.headerRow !== undefined && s.headerRow !== null && s.headerRow !== ''
+          ? Math.max(0, Number(s.headerRow) - 1) : M.headerRowOf(mineRows);
+        var theirs = await loadTable(s.source);
+        var thdr = M.headerRowOf(theirs.rows);
+
+        /* This sheet's names the model has read; the other table's it has not,
+           so those are resolved by role when the name it gave is nobody's. */
+        var notes = [];
+        var noted = function (c) { if (c.note) notes.push(c.note); return c; };
+        var keyMine = noted(M.resolveByRole(mineRows, hdr, sideOf(s.key, 'mine'), '鍵欄（我方）', 'key'));
+        var keyTheirs = noted(M.resolveByRole(theirs.rows, thdr, sideOf(s.key, 'theirs') || keyMine.name, '鍵欄（對方）', 'key', keyMine.name));
+        var cmpMine = noted(M.resolveByRole(mineRows, hdr, sideOf(s.compare, 'mine'), '比對欄（我方）', 'compare'));
+        var cmpTheirs = noted(M.resolveByRole(theirs.rows, thdr, sideOf(s.compare, 'theirs') || cmpMine.name, '比對欄（對方）', 'compare', cmpMine.name));
+
+        var takeSpecs = Array.isArray(s.take) ? s.take : (s.take ? [s.take] : []);
+        if (!takeSpecs.length) throw new Error('要說從對方帶哪些欄過來：take 給 [{theirs:"貨號", into:"E"}]');
+        var header = (mineRows[hdr] || []).map(M.text);
+        var width = Math.max.apply(null, mineRows.map(function (r) { return r.length; }).concat([header.length]));
+        /* Columns this run has spoken for, so 「信心」 does not land on the D the
+           part number was just given -- measured: it did, and D read 高／低. */
+        var used = {};
+        header.forEach(function (h, i) { if (h) used[i] = true; });
+        function nextFree() {
+          var c = width;
+          while (used[c]) c++;
+          return c;
+        }
+        /* Where a taken column lands: a letter, an existing header, or a new
+           column at the right edge with that name on it. */
+        function landing(ref, fallback) {
+          var name = M.text(ref);
+          if (/^[A-Z]{1,3}$/i.test(name) && M.letterCol(name) >= 0) {
+            var col = M.letterCol(name);
+            var fresh = !header[col];
+            if (fresh) header[col] = fallback;
+            used[col] = true;
+            return { col: col, name: header[col], fresh: fresh };
+          }
+          var i = header.findIndex(function (h) { return h && h.toLowerCase() === name.toLowerCase(); });
+          if (i >= 0) { used[i] = true; return { col: i, name: header[i], fresh: false }; }
+          var made = nextFree();
+          used[made] = true;
+          header[made] = name || fallback;
+          return { col: made, name: header[made], fresh: true };
+        }
+        var takes = takeSpecs.map(function (t) {
+          var tt = t && typeof t === 'object' ? t : { theirs: t };
+          var from = noted(M.resolveByRole(theirs.rows, thdr, tt.theirs, '要帶過來的欄', 'take'));
+          return { from: from, into: landing(tt.into, from.name) };
+        });
+        var wantConf = s.confidence !== false;
+        var confCol = wantConf ? landing('信心', '信心') : null;
+        var whyCol = wantConf ? landing('依據', '依據') : null;
+        var review = String(s.review || 'both');
+        var onlyEmpty = s.onlyEmpty !== false;
+        var redo = s.redo === 'all' ? 'all'
+          : (Array.isArray(s.redo) ? s.redo.map(M.normKey) : (s.redo ? [M.normKey(s.redo)] : []));
+        var useModel = s.model !== false;
+
+        var planned = M.plan(
+          { rows: mineRows, headerRow: hdr, key: keyMine.col, compare: cmpMine.col },
+          { rows: theirs.rows, headerRow: thdr, key: keyTheirs.col, compare: cmpTheirs.col,
+            take: takes.map(function (t) { return t.from.col; }) });
+
+        /* A row that already has an answer keeps it, unless asked again. */
+        var skipped = 0;
+        var firstInto = takes[0].into.col;
+        planned.items.forEach(function (it) {
+          var have = M.text((mineRows[it.row] || [])[firstInto]);
+          var again = redo === 'all' || redo.indexOf(it.key) >= 0;
+          if (onlyEmpty && have && have !== M.REVIEW && !again) { it.status = 'skipped'; skipped++; }
+        });
+        planned.items.forEach(M.autoDecide);
+
+        var pending = planned.items.filter(function (i) { return !i.status; });
+        if (pending.length && !useModel) {
+          pending.forEach(function (i) { M.withoutModel(i); });
+        } else if (pending.length && !(AIOS.state && AIOS.state.connected)) {
+          pending.forEach(function (i) { M.withoutModel(i, '沒有連上模型，語意判斷要有核心'); });
+        } else if (pending.length) {
+          var batchList = M.batches(pending);
+          for (var b = 0; b < batchList.length; b++) {
+            var batch = batchList[b];
+            status.textContent = '對照中：第 ' + (b + 1) + ' / ' + batchList.length + ' 批（' +
+              batch.groups.map(function (g) { return g.key; }).slice(0, 3).join('、') + (batch.groups.length > 3 ? '…' : '') + '）';
+            var p = M.prompt(batch, { hints: s.hints });
+            var res = await AIOS.kernel.complete({
+              messages: [{ role: 'system', content: p.system }, { role: 'user', content: p.user }],
+              schema: M.schema(), schemaName: 'match', temperature: 0, maxTokens: 6000, owner: 'sheets'
+            });
+            var read = M.parse(batch, res && res.data, res && res.text);
+            batch.groups.forEach(function (g) {
+              g.items.forEach(function (it) { M.decide(it, read['r' + (it.row + 1)]); });
+            });
+          }
+          status.textContent = '';
+        }
+
+        var reviewRows = [];
+        var mainName = sheetName;
+        mutate('語意對照', function () {
+          takes.forEach(function (t) { if (t.into.fresh) putText(F.makeRef(t.into.col, hdr), t.into.name); });
+          if (confCol && confCol.fresh) putText(F.makeRef(confCol.col, hdr), confCol.name);
+          if (whyCol && whyCol.fresh) putText(F.makeRef(whyCol.col, hdr), whyCol.name);
+          planned.items.forEach(function (it) {
+            if (it.status === 'skipped') return;
+            var refs = takes.map(function (t) { return F.makeRef(t.into.col, it.row); });
+            if (it.status === 'matched') {
+              takes.forEach(function (t, k) { putText(refs[k], it.pick.values[k]); });
+              if (confCol) putText(F.makeRef(confCol.col, it.row), it.confidence === 'high' ? '高' : '中');
+              if (whyCol) putText(F.makeRef(whyCol.col, it.row), it.why);
+              applyFormat(refs, { bg: null });
+              return;
+            }
+            var top = it.suggested && it.suggested.length ? it.suggested : it.cands.slice(0, 2);
+            putText(refs[0], M.REVIEW);
+            if (confCol) putText(F.makeRef(confCol.col, it.row), '低');
+            if (whyCol) {
+              putText(F.makeRef(whyCol.col, it.row), it.reason + (top.length
+                ? '；候選：' + top.map(function (c) { return c.values.filter(Boolean).join(' ') + '（' + c.desc + '）'; }).join('；')
+                : ''));
+            }
+            if (review === 'both' || review === 'mark') applyFormat(refs, { bg: REVIEW_BG });
+            reviewRows.push({ row: it.row, key: it.key, desc: it.desc, reason: it.reason, cands: top });
+          });
+          if (review === 'both' || review === 'sheet') writeReviewSheet(reviewRows);
+        });
+
+        lastMatch = {
+          sheet: mainName, headerRow: hdr, review: M.REVIEW,
+          into: takes.map(function (t) { return t.into.col; }),
+          conf: confCol ? confCol.col : -1, why: whyCol ? whyCol.col : -1,
+          rows: {}
+        };
+        reviewRows.forEach(function (r) {
+          lastMatch.rows[r.row] = { cands: r.cands.map(function (c) { return { values: c.values, desc: c.desc }; }) };
+        });
+        ctx.save();
+
+        var mapping = '用「' + keyMine.name + '」對「' + keyTheirs.name + '」，比對「' + cmpMine.name + '」與「' + cmpTheirs.name + '」，' +
+          takes.map(function (t) { return '「' + t.from.name + '」→' + M.colLetter(t.into.col) + ' 欄'; }).join('、') +
+          '（對方：' + theirs.name + '，' + planned.theirKeys + ' 個鍵值）' +
+          (notes.length ? '。' + notes.join('；') : '');
+        return M.summary(planned.items, { skipped: skipped, missing: planned.missing, noKey: planned.noKey }) +
+          (reviewRows.length && (review === 'both' || review === 'sheet')
+            ? '；' + M.REVIEW + '的列在「' + M.REVIEW + '」工作表，在「選擇」欄填 1、2 或貨號，再叫我套用' : '') +
+          '。' + mapping;
+      }
+
+      /** The 待確認 sheet: one row per unmatched row, its two best candidates, and a 選擇 column for the person. */
+      function writeReviewSheet(rows) {
+        var M = AIOS.sheetmatch;
+        var idx = sheetIndexOf(M.REVIEW);
+        var sheet;
+        if (idx < 0) {
+          sheet = blankSheet(M.REVIEW);
+          book.push(sheet);
+        } else {
+          sheet = book[idx];
+          sheet.cells = {};
+          sheet.merges = [];
+          sheet.charts = [];
+        }
+        var put = function (c, r, v) {
+          if (v === '' || v === null || v === undefined) return;
+          sheet.cells[F.makeRef(c, r)] = { v: typeof v === 'number' ? v : String(v) };
+        };
+        ['列', '鍵值', '我方描述', '候選1', '候選1描述', '候選2', '候選2描述', '理由', '選擇'].forEach(function (h, c) { put(c, 0, h); });
+        rows.forEach(function (it, i) {
+          var r = i + 1;
+          var c1 = it.cands[0];
+          var c2 = it.cands[1];
+          put(0, r, it.row + 1);
+          put(1, r, it.key);
+          put(2, r, it.desc);
+          put(3, r, c1 ? c1.values.filter(Boolean).join(' | ') : '');
+          put(4, r, c1 ? c1.desc : '');
+          put(5, r, c2 ? c2.values.filter(Boolean).join(' | ') : '');
+          put(6, r, c2 ? c2.desc : '');
+          put(7, r, it.reason);
+        });
+      }
+
+      /**
+       * 套用選擇: the person's answers on the 待確認 sheet, written back to the
+       * sheet that was matched. 1 and 2 are the candidates that row was shown;
+       * anything else is the value itself.
+       */
+      function applyChoicesApi(spec) {
+        var s = spec || {};
+        var M = AIOS.sheetmatch;
+        var lm = lastMatch;
+        if (!lm) throw new Error('還沒有對照過，沒有「選擇」可以套用');
+        var ri = sheetIndexOf(lm.review);
+        if (ri < 0) throw new Error('沒有「' + lm.review + '」工作表');
+        var mi = sheetIndexOf(lm.sheet);
+        if (mi < 0) throw new Error('原本對照的工作表「' + lm.sheet + '」不在了');
+        stash();
+        var rv = book[ri].cells;
+        /* What was chosen: the 選擇 column, and on top of it whatever the
+           sentence said -- 「第 1 列選候選 1」 arrives as choices, so the model
+           does not have to find column I. Measured: asked to, it wrote the 1
+           into column F, and the receipt said the column was empty. */
+        var chosen = {};
+        for (var r = 1; rv[F.makeRef(0, r)]; r++) {
+          var typed = M.text((rv[F.makeRef(8, r)] || {}).v);
+          if (typed) chosen[r] = typed;
+        }
+        var given = Array.isArray(s.choices) ? s.choices : (s.choices ? [s.choices] : []);
+        given.forEach(function (ch) {
+          var c = ch && typeof ch === 'object' ? ch : {};
+          var pick = M.text(c.pick !== undefined ? c.pick : (c.choice !== undefined ? c.choice : c.value));
+          if (!pick) return;
+          var at = null;
+          if (c.item !== undefined && c.item !== null && c.item !== '') {
+            at = Number(c.item);
+          } else if (c.row !== undefined && c.row !== null && c.row !== '') {
+            for (var k = 1; rv[F.makeRef(0, k)]; k++) {
+              if (Number(rv[F.makeRef(0, k)].v) === Number(c.row)) { at = k; break; }
+            }
+          }
+          if (!at || !rv[F.makeRef(0, at)]) {
+            throw new Error('待確認清單沒有' + (c.item !== undefined ? '第 ' + c.item + ' 列' : '原表第 ' + c.row + ' 列的項目'));
+          }
+          chosen[at] = pick;
+        });
+        var applied = [];
+        var pending = 0;
+        for (var r2 = 1; rv[F.makeRef(0, r2)]; r2++) {
+          var target = Number(rv[F.makeRef(0, r2)].v) - 1;
+          var choice = chosen[r2];
+          var r = r2;
+          if (!choice) { pending++; continue; }
+          var rec = lm.rows[target] || { cands: [] };
+          var values;
+          if (/^[12]$/.test(choice)) {
+            var c = rec.cands[Number(choice) - 1];
+            if (!c) throw new Error('第 ' + (target + 1) + ' 列沒有候選 ' + choice + '，直接填貨號吧');
+            values = c.values;
+          } else {
+            values = [choice];
+          }
+          applied.push({ row: target, values: values, reviewRow: r });
+        }
+        if (!applied.length) throw new Error('「選擇」欄都還是空的：填 1、2，或直接填貨號，再叫我套用');
+        if (mi !== active) activate(mi);
+        mutate('套用選擇', function () {
+          applied.forEach(function (a) {
+            var refs = lm.into.map(function (col) { return F.makeRef(col, a.row); });
+            refs.forEach(function (ref, k) { if (a.values[k] !== undefined) putText(ref, a.values[k]); });
+            applyFormat(refs, { bg: null });
+            if (lm.conf >= 0) putText(F.makeRef(lm.conf, a.row), '人工');
+            if (lm.why >= 0) putText(F.makeRef(lm.why, a.row), '人工選擇');
+          });
+          /* The review sheet without the rows just applied, rows closed up. */
+          var fresh = {};
+          for (var c = 0; c < 9; c++) if (rv[F.makeRef(c, 0)]) fresh[F.makeRef(c, 0)] = rv[F.makeRef(c, 0)];
+          var out = 1;
+          for (var rr = 1; rv[F.makeRef(0, rr)]; rr++) {
+            if (applied.some(function (a) { return a.reviewRow === rr; })) continue;
+            for (var c2 = 0; c2 < 9; c2++) {
+              var cc = rv[F.makeRef(c2, rr)];
+              if (cc) fresh[F.makeRef(c2, out)] = cc;
+            }
+            out++;
+          }
+          book[ri].cells = fresh;
+        });
+        return '套用了 ' + applied.length + ' 筆' + (pending ? '，還有 ' + pending + ' 筆沒填選擇' : '，「' + lm.review + '」清空了');
+      }
+
       ctx.api = {
         setCell: setCell, setRange: setRange, clearRange: clearRange,
         setFormat: setFormat, setFont: setFont, setStyle: setStyle,
@@ -4609,6 +5158,7 @@
         undo: undo, redo: redo,
         copy: copySelection, paste: pasteAt,
         fillTo: fillTo,
+        match: matchApi, applyChoices: applyChoicesApi,
 
         /* The structural operations, taking the coordinates a person would say:
            row 1 is row 1, and a column may be named. */
@@ -4703,7 +5253,8 @@
         }
       };
 
-      (async function boot() {
+      /* Exposed so `app.open` can wait for the file: see registry.launch. */
+      ctx.ready = (async function boot() {
         var st = ctx.state;
         // One sheet to begin with, so `book` is never empty and nothing has to
         // handle the "no sheets yet" case.
@@ -4711,6 +5262,7 @@
         active = 0;
         stash();
 
+        if (st && st.match) lastMatch = st.match;
         if (st && (st.sheets || st.cells)) {
           path = st.path || null;
           // Not read this session, so no claim about the version on disk.
@@ -4765,6 +5317,7 @@
           return {
             sheets: book, active: active,
             path: path, dirty: dirty,
+            match: lastMatch,
             // The pre-workbook fields, so an older build restoring this session
             // shows the sheet that was in front of you instead of an empty grid.
             cells: cells, sheetName: sheetName,

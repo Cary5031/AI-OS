@@ -368,6 +368,18 @@
         if (win.barButtons && win.barButtons.chat) win.barButtons.chat.setAttribute('aria-pressed', 'true');
       }
       AIOS.apps.requestSave();
+      /* A document application loads its file after mount, asynchronously. A
+         plan's next action -- 「開 X，加一欄小計」 -- used to run against the blank
+         window while the file was still on its way, and the load then replaced
+         the workbook, taking the new column with it: written, receipted, and
+         gone from the saved file. An app that sets `ctx.ready` is waited for;
+         nothing waits more than a moment for one that never settles. */
+      if (instance.ctx && instance.ctx.ready && typeof instance.ctx.ready.then === 'function') {
+        await Promise.race([
+          instance.ctx.ready.catch(function () { /* the app said so on screen */ }),
+          new Promise(function (r) { setTimeout(r, 15000); })
+        ]);
+      }
       return win;
     },
 

@@ -289,6 +289,17 @@
     };
   }
 
+  /* A page number as the model writes it, as an index. 1-based, as every action
+     says -- and 0, which is never a page, means the first one: a plan that wrote
+     index 0 meant page 1 and was told 「沒有第 0 頁」 for it, then had to guess
+     again. Omitted is null, which the API reads as the current page. */
+  function pageIdx(v) {
+    if (v === undefined || v === null || v === '') return null;
+    var n = Number(v);
+    if (!isFinite(n)) return n;
+    return n <= 1 ? 0 : n - 1;
+  }
+
   /* One action under two names. The document and the spreadsheet call theirs
      insertChart, and another program's 插入到簡報 arrives as addChart; a model
      that learned either verb should not be told the deck has no such thing. */
@@ -298,7 +309,7 @@
           '第一欄是類別）或 categories + series；newSlide:true 會先在那頁後面插入一頁空白頁，把圖表放在新的一頁',
     run: async function (args, ctx) {
       ctx.api.snapshot();
-      return { note: ctx.api.addChart(args.index === undefined ? null : Number(args.index) - 1, args) };
+      return { note: ctx.api.addChart(pageIdx(args.index), args) };
     }
   };
 
@@ -340,7 +351,7 @@
         args: '{index, title, body, layout, notes}', desc: '改寫第 index 頁（從 1 開始），body 是字串陣列',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          ctx.api.setSlide(Number(args.index) - 1, args);
+          ctx.api.setSlide(pageIdx(args.index), args);
           return { note: '已改寫第 ' + args.index + ' 頁' };
         }
       },
@@ -348,7 +359,7 @@
         args: '{index, title, body, layout, notes, objects}', desc: '插入一頁，index 省略就加在最後',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          var at = args.index === undefined ? null : Number(args.index) - 1;
+          var at = pageIdx(args.index);
           ctx.api.addSlide(at, args);
           return { note: '已新增一頁' };
         }
@@ -357,7 +368,7 @@
         args: '{index}', desc: '刪掉第 index 頁',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          ctx.api.deleteSlide(Number(args.index) - 1);
+          ctx.api.deleteSlide(pageIdx(args.index));
           return { note: '已刪除第 ' + args.index + ' 頁' };
         }
       },
@@ -365,7 +376,7 @@
         args: '{index, to}', desc: '把第 index 頁搬到第 to 頁的位置（都從 1 開始）',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.moveSlide(Number(args.index) - 1, Number(args.to) - 1) };
+          return { note: ctx.api.moveSlide(pageIdx(args.index), Number(args.to) - 1) };
         }
       },
       buildDeck: {
@@ -382,15 +393,16 @@
               'chart 是圖表規格（畫圖表用 addChart 更方便）',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.addObject(args.index === undefined ? null : Number(args.index) - 1, args) };
+          return { note: ctx.api.addObject(pageIdx(args.index), args) };
         }
       },
       addTable: {
         args: '{index, rows, cols, data, header, x, y, w, h}',
-        desc: '在第 index 頁放一個表格。data 是二維陣列；沒給 data 就依 rows×cols 開空表',
+        desc: '在第 index 頁放一個表格。data 是二維陣列；沒給 data 就依 rows×cols 開空表。' +
+              'x/y/w/h 是投影片寬高的百分比（0–100），省略就置中用預設大小',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.addTable(args.index === undefined ? null : Number(args.index) - 1, args) };
+          return { note: ctx.api.addTable(pageIdx(args.index), args) };
         }
       },
       addChart: ADD_CHART,
@@ -401,14 +413,14 @@
               '圖表可以給 type、title、rows、categories、series、legend、labels、numFmt、xTitle、yTitle，或整個 chart',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.setObject(Number(args.index) - 1, Number(args.object) - 1, args) };
+          return { note: ctx.api.setObject(pageIdx(args.index), Number(args.object) - 1, args) };
         }
       },
       deleteObject: {
         args: '{index, object}', desc: '刪掉第 index 頁的第 object 個物件',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.deleteObject(Number(args.index) - 1, Number(args.object) - 1) };
+          return { note: ctx.api.deleteObject(pageIdx(args.index), Number(args.object) - 1) };
         }
       },
       setTableStyle: {
@@ -419,7 +431,7 @@
               'fill 與 borderColour 給顏色名或 hex',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.setTableStyle(Number(args.index) - 1, Number(args.object) - 1, args) };
+          return { note: ctx.api.setTableStyle(pageIdx(args.index), Number(args.object) - 1, args) };
         }
       },
       tableToChart: {
@@ -427,7 +439,7 @@
         desc: '把第 index 頁的第 object 個表格換成同樣位置的圖表（object 省略就是選到的表格，或那頁最後一個表格）',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.tableToChart(args.index === undefined ? null : Number(args.index) - 1,
+          return { note: ctx.api.tableToChart(pageIdx(args.index),
             args.object === undefined ? null : Number(args.object) - 1, args) };
         }
       },
@@ -436,7 +448,7 @@
         desc: '把第 index 頁的第 object 個圖表換成同樣位置的表格（object 省略就是選到的圖表，或那頁最後一個圖表）',
         run: async function (args, ctx) {
           ctx.api.snapshot();
-          return { note: ctx.api.chartToTable(args.index === undefined ? null : Number(args.index) - 1,
+          return { note: ctx.api.chartToTable(pageIdx(args.index),
             args.object === undefined ? null : Number(args.object) - 1) };
         }
       },
@@ -444,7 +456,7 @@
         args: '{index, object, app:"docs"|"sheets"}',
         desc: '把第 index 頁的第 object 個圖表插入到文件或試算表（這份簡報本身不會變）',
         run: async function (args, ctx) {
-          return { note: await ctx.api.chartToApp(args.index === undefined ? null : Number(args.index) - 1,
+          return { note: await ctx.api.chartToApp(pageIdx(args.index),
             args.object === undefined ? null : Number(args.object) - 1, args.app) };
         }
       },
@@ -1423,9 +1435,26 @@
 
       /* ---------------------------------------------------- object edits */
 
+      /* The smallest size that is a size in percent. A plan arrives with
+         PowerPoint's inches -- x:1, y:1.5, w:8, h:3.5 on a 13.33 × 7.5 page --
+         and as percentages those make a table 8% wide with three columns in it,
+         which is what one combo saved. Below this floor the numbers were not
+         percentages, whatever they were. */
+      var MIN_PCT = 12;
+
+      /** A given size no object can be read at, which means it was not given in percent. */
+      function sizeNotPercent(spec) {
+        return !!spec && spec.w !== undefined && spec.h !== undefined &&
+          Number(spec.w) < MIN_PCT && Number(spec.h) < MIN_PCT;
+      }
+
       /** Where a new object goes: centred, then stepped so a run of them fans out. */
       function placeFor(kind, spec) {
         var d = DEFAULTS[kind];
+        /* A size that was not in percent is dropped, and the position with it:
+           a corner meant in inches is not a corner either. The default is the
+           readable one, and the receipt says the numbers were not used. */
+        if (sizeNotPercent(spec)) spec = Object.assign({}, spec, { x: undefined, y: undefined, w: undefined, h: undefined });
         var w = span(spec && spec.w, d.w, 2, 150);
         var h = span(spec && spec.h, d.h, 2, 150);
         var step = (objects().length % 5) * 3;
@@ -1447,13 +1476,15 @@
         // ways of asking for one refuse the same bad names.
         if (kind === 'chart') spec = Object.assign({}, spec, { chart: chartFromArgs(spec).spec });
 
+        var dropped = sizeNotPercent(spec);
         var o = normObject(Object.assign({}, spec, { kind: kind }, placeFor(kind, spec)));
         objects().push(o);
         selId = o.id;
         markDirty();
         render();
         return '第 ' + (at + 1) + ' 頁加了一個' + KINDS[kind] +
-               '（第 ' + objects().length + ' 個物件）';
+               '（第 ' + objects().length + ' 個物件）' +
+               (dropped ? '；給的大小 ' + spec.w + '×' + spec.h + ' 不是百分比（0–100），用了預設的 ' + o.w + '×' + o.h + '%' : '');
       }
 
       function addTable(i, spec) {
@@ -3234,8 +3265,33 @@
         }
       }
 
+      /**
+       * A path nobody has written yet is where this deck is going, not an error.
+       *
+       * A plan says 「開一份新簡報，存成 /demo/x.pptx」 and opens the app on that
+       * path. Every such open used to toast 「讀不進來：找不到」 and leave the
+       * window with no path, so the save that followed went to /notes under a
+       * default name -- or stopped on a consent window for a path nobody named.
+       */
+      async function startAt(vpath) {
+        /* A path, not a word: a plan that opens the app with 「new」 means a new
+           deck, not a file called new at the root. Measured. */
+        if (!/^\/.*\.[a-z0-9]+$/i.test(String(vpath))) return false;
+        var probe = await A.fs.exists(vpath);
+        if (!probe || !probe.ok || probe.data.exists) return false;
+        path = vpath;
+        pathMtime = 0;
+        deck.title = vpath.split('/').pop().replace(/\.[^.]+$/, '') || deck.title;
+        dirty = false;
+        render();
+        ctx.setTitle('簡報 — ' + deck.title);
+        ctx.toast('找不到 ' + vpath + '，當成新簡報：儲存時會存到這裡', 't-warn');
+        return true;
+      }
+
       async function open(vpath) {
         if (!vpath) return;
+        if (await startAt(vpath)) return;
         if (/\.pptx$/i.test(vpath)) {
           var pr = await window.aios.office.readPptx(vpath);
           if (!pr.ok) { ctx.toast('讀不進來：' + pr.error, 't-err'); return; }
@@ -3501,7 +3557,8 @@
         open: open, snapshot: snapshot, undo: undo, redo: redo
       };
 
-      (async function boot() {
+      /* Exposed so `app.open` can wait for the file: see registry.launch. */
+      ctx.ready = (async function boot() {
         var st = ctx.state;
         if (st && st.deck) {
           // A restored session may hold a deck saved before objects existed.

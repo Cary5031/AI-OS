@@ -153,7 +153,13 @@
    * its @. Matched against the body, the subject and the recipient list --
    * being named in a To line is being talked about too.
    */
-  function mentionsMe(hit, words) {
+  function mentionsMe(hit, words, self) {
+    /* The mailbox's own answer first. A list row from the web source names its
+       recipients without addresses, so the account's address is not in `to`
+       even when the message was sent straight to it; the source says whether
+       it was. Only when the words are the account's own -- a rule about
+       「提到採購」 is not about you, whoever it was sent to. */
+    if (self && (hit.toMe === true || hit.ccMe === true)) return true;
     var hay = [hit.subject, hit.to, hit.cc, hit.text || hit.snippet || ''].join(' ').toLowerCase();
     for (var i = 0; i < words.length; i++) {
       var w = String(words[i] || '').trim().toLowerCase();
@@ -1139,7 +1145,7 @@
             from: h.from,
             date: h.date,
             hasAttachments: !!h.hasAttachments,
-            mentions: mentionsMe(h, words),
+            mentions: mentionsMe(h, words, !rule.mentions.length),
             thin: thin,
             summary: thin ? '' : firstLines(h.text || h.snippet || ''),
             why: why

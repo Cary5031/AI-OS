@@ -7966,3 +7966,195 @@ test('匯入的程式包，貢獻是關著進來的（主程序決定，不看�
   assert.match(exp, /contributes: sanitiseSlots\(meta\.contributes\)/, '程式包要帶貢獻點');
   assert.doesNotMatch(exp, /slotsOff/, '開關不是程式包的一部分');
 });
+
+/* ------------------------------------------------- office 連續技逼出來的三條 */
+
+test('a chart block tells the document panel its numbers, and can stay when it becomes a table', () => {
+  /* Measured: 「圖上面加標題和摘要，圖下面放原始資料的表格，存成 .docx」 in the
+     document panel. The panel answered that the chart 「只提供數列名稱與月份，
+     沒有原始數值」 and that no action could add a table while keeping the chart
+     -- and stopped without saving. describe() had the summary only, and
+     chartToTable only replaced. */
+  const src = read('renderer/apps/docs.js');
+  assert.match(src, /function chartText\(b\)/, 'a chart block has one wording for the model');
+  assert.match(src, /AIOS\.charts\.toRows\(b\.chart\)/, 'and that wording carries the rows the chart was drawn from');
+  assert.match(src, /\? chartText\(b\) : textOf\(b\)/, 'publish() uses it');
+  assert.match(src, /\[圖表\] ' \+ chartText\(b\)/, 'and so does describe()');
+
+  assert.match(src, /function chartToTable\(i, keep\)/, 'chartToTable takes keep');
+  assert.match(src, /blocks\.splice\(i \+ 1, 0, nb\)/, 'and with keep the table goes under the chart instead of over it');
+  assert.match(src, /args: '\{index, keep:true\|false\}'/, 'the action says so to the model');
+  assert.match(src, /label: '在下面插入資料表格'/, 'and the menu offers the same thing to a person');
+});
+
+test('a chart sent to a deck can name the page it lands on', () => {
+  /* Measured: the planner built a three-page deck with page 2 reserved for the
+     chart, then sent the chart over -- and the deck put it on a new page of its
+     own, leaving the reserved page empty and the file one page longer than the
+     plan. The default is right for a person's 「插入到簡報」; a plan that has a
+     page in mind needs to be able to say so. */
+  const charts = read('renderer/charts.js');
+  const send = funcBody(charts, 'sendTo');
+  assert.match(send, /args\.page/, 'sendTo reads a page');
+  assert.match(send, /args\.newSlide = false/, 'and a named page is that page, not a new one after it');
+  for (const app of ['sheets', 'docs']) {
+    const src = read('renderer/apps/' + app + '.js');
+    assert.match(src, /chartToApp: \{\s*\n\s*args: '\{[^']*page\}'/, app + ' 的 chartToApp 要公開 page');
+    assert.match(src, /AIOS\.charts\.sendTo\(app, [^,]+, \{[^}]*page: s\.page \}\)/, app + ' 要把 page 交給 sendTo');
+  }
+});
+
+test('the browser export can be told where to save, so a plan does not stop on a dialog', () => {
+  /* The intent bar's 「把這一頁轉存成 Word 到 /notes/規格.docx」 planned
+     `savePage {format:"docx"}` and the window opened a save dialog that no one
+     was there to press. A named path is the answer to that dialog. */
+  const src = read('renderer/apps/browser.js');
+  assert.match(src, /args: '\{format, path\}'/, 'savePage takes a path');
+  assert.match(src, /ctx\.api\.exportPage\(String\(args\.format \|\| 'md'\)\.toLowerCase\(\), args\.path\)/, 'and hands it on');
+  assert.match(src, /function namedTarget\(spec, given\)/, 'one rule for where a named export goes');
+  assert.match(src, /namedTarget\(spec, given\) \|\| await AIOS\.saveAsPath\(/, 'the dialog only when nothing was named');
+  assert.equal((src.match(/namedTarget\(spec, given\) \|\| await AIOS\.saveAsPath\(/g) || []).length, 2,
+    'both the article export and the whole-page export');
+});
+
+test('the consent window never refuses on the user\'s behalf because a field was undefined', () => {
+  /* Measured: after a mail was read, a spreadsheet save was refused in ~100 ms
+     with no window shown, three times in a row, and the journal said 「使用者拒絕
+     授權」. fs:write carries expectMtime undefined; JSON.stringify(undefined)
+     is undefined; the consent page threw on `.length`; its catch answered
+     "refuse". Every tainted write from a program that left a field blank. */
+  assert.deepEqual(gate.plainArgs({ path: '/a', content: 'x', expectMtime: undefined, n: 0, f: false, s: '' }),
+    { path: '/a', content: 'x', n: 0, f: false, s: '' }, 'undefined fields are dropped, falsy values kept');
+  assert.deepEqual(gate.plainArgs(undefined), {});
+  assert.deepEqual(gate.plainArgs({ nested: { a: undefined, b: 1 } }), { nested: { b: 1 } });
+
+  const main = read('main/gate.js');
+  assert.match(main, /args: plainArgs\(pending\.action\.args\)/, 'the payload the window gets is JSON-clean');
+
+  const view = read('renderer/consent-view.js');
+  assert.match(view, /v === undefined \? '（空）'/, 'and the window draws an undefined field rather than throwing on it');
+  assert.doesNotMatch(view, /\.catch\(\(\) => answer\(false\)\)/,
+    'a request the window cannot draw is shown as such, not refused for the person');
+});
+
+test('a write whose destination is not called `path` still counts as named by the user', () => {
+  /* 「把附件存到 /demo/inbox」: the attachment is saved through fs.write with its
+     destination in `to`, and the gate looked only at `path`, found nothing, and
+     asked about a place the user had just spelled out. */
+  gate.setIntent('找這禮拜 abc.com 寄來、有附件的報價信，把附件存到 /demo/inbox');
+  try {
+    assert.equal(gate.namedByUser('fs.write', { messageId: 'x', index: 0, to: '/demo/inbox' }), '/demo/inbox');
+    assert.equal(gate.namedByUser('fs.write', { messageId: 'x', index: 0, to: '/demo/inbox/報價單.xlsx' }), '/demo/inbox',
+      'a file under a named directory is inside the named place');
+    /* A look-alike under another root. (Under /demo it would count, because
+       naming /demo/inbox names /demo as a place too -- that rule predates this
+       and is not what this test is about.) */
+    assert.equal(gate.namedByUser('fs.write', { to: '/notes/inbox-2/x.txt' }), null, 'a look-alike directory is not the named one');
+    assert.equal(gate.namedByUser('fs.write', { path: '/notes/x.txt' }), null, 'and nothing else is');
+    assert.equal(gate.targetArg({ path: '/p', to: '/t' }, 'path'), '/p', 'the usual key wins when present');
+  } finally {
+    gate.setIntent('');
+  }
+});
+
+test('an attachment can be saved into a directory, named by name, and the open receipt lists the attachments', () => {
+  /* Measured, in order: attachment 0 (「沒有第 0 個附件」), then attachment 1 to
+     /demo/inbox (「/demo/inbox 是目錄」), and the plan gave up. The receipt that
+     opened the message had said only 「已打開：九月份報價單」. */
+  const ipc = read('main/ipc.js');
+  const save = ipc.slice(ipc.indexOf("ipcMain.handle('mail:saveAttachment'"), ipc.indexOf("'把一封信的附件另存到沙箱'"));
+  assert.match(save, /await sandbox\.exists\(dest\)/, 'a directory target is recognised');
+  assert.match(save, /dest = dest\.replace\(\/\\\/\+\$\/, ''\) \+ '\/' \+ named/, 'and takes the attachment\'s own name');
+
+  const app = read('renderer/apps/mail.js');
+  assert.match(app, /function attachmentMeant\(n\)/, 'one rule for which attachment is meant');
+  assert.match(app, /Math\.max\(1, Number\(s\) \|\| 1\)/, '0 means the first one');
+  assert.match(app, /這封信沒有叫「' \+ s \+ '」的附件/, 'a name that matches nothing says so');
+  assert.match(app, /function attachmentsNote\(m\)/, 'and an open receipt names the attachments');
+  assert.equal((app.match(/attachmentsNote\(current\)/g) || []).length, 2, 'on both ways of opening a message');
+  assert.match(app, /ctx\.api\.saveAttachment\(args\.attachment, args\.to\)/, 'the action passes the name through, not Number() of it');
+});
+
+test('an office program opened on a path nobody has written yet starts a new file there', () => {
+  /* Measured on every combo: the planner opens the app on the path it is about
+     to save to. Each app toasted 「找不到」 and kept no path, so the save went
+     to /notes under a default name, or stopped on a consent window. */
+  const ipc = read('main/ipc.js');
+  assert.match(ipc, /ipcMain\.handle\('fs:exists', guarded\('fs\.read'/, 'existence is a read-level question');
+  assert.match(read('preload/index.js'), /exists: \(path\) => invoke\('fs:exists', \{ path \}\)/, 'and the bridge exposes it');
+  assert.match(read('main/sandbox.js'), /^async function exists\(vpath\)/m, 'answered by the sandbox without reading the file');
+  for (const app of ['docs', 'sheets', 'slides']) {
+    const src = read('renderer/apps/' + app + '.js');
+    assert.match(src, /async function startAt\(vpath\)/, app + ' 有 startAt');
+    assert.match(src, /var probe = await A\.fs\.exists\(vpath\);/, app + ' 用 exists 問，不讀檔');
+    assert.match(src, /if \(await startAt\(vpath\)\) return;/, app + ' 的 open 先問');
+    assert.match(src, /當成新(文件|試算表|簡報)：儲存時會存到這裡/, app + ' 說清楚發生了什麼');
+  }
+});
+
+test('a chart id that matches nothing means the only chart, and page 0 means page 1', () => {
+  /* Two more ways a plan phrased what it meant and was told no: the example id
+     from the action signature (c1) for the book's one chart, and index 0 for
+     the first page of a deck. */
+  const sheets = read('renderer/apps/sheets.js');
+  const meant = funcBody(sheets, 'chartMeant');
+  assert.match(meant, /if \(all\.length === 1\) return all\[0\];/, 'one chart, whatever it was called');
+  assert.match(meant, /沒有這張圖表：' \+ id \+/, 'more than one: the error lists them');
+  assert.match(sheets, /function allCharts\(\)/);
+
+  const slides = read('renderer/apps/slides.js');
+  assert.match(slides, /function pageIdx\(v\)/);
+  assert.match(slides, /return n <= 1 \? 0 : n - 1;/, '0 is the first page');
+  assert.doesNotMatch(slides, /Number\(args\.index\) - 1/, 'every action goes through it');
+  assert.ok((slides.match(/pageIdx\(args\.index\)/g) || []).length >= 12, 'all of them');
+});
+
+test('a plan\'s chart rows never land on top of the sheet', () => {
+  /* Measured: 「加一欄小計…再做一張各品項小計的長條圖」 produced insertChart with
+     rows rather than a range, the rows were written at the cursor -- A1 -- and
+     the saved quote had 小計 where 規格 had been, no formulas in column E, and a
+     receipt that said 「資料寫在 A1:B7」 as if that were fine. */
+  const src = read('renderer/apps/sheets.js');
+  const adopt = funcBody(src, 'adoptSpec');
+  assert.match(adopt, /if \(pl\.fromPlan\)/, 'the plan path is told apart from a person\'s paste');
+  assert.match(adopt, /found = findRows\(rows\)/, 'rows already on the sheet are looked for first');
+  assert.match(adopt, /freeCorner\(rows\[0\]\.length, rows\.length\)/, 'and rows the sheet lacks go to empty cells');
+  assert.match(adopt, /if \(!found\) \{/, 'nothing is written when the block was found');
+  assert.match(src, /function findRows\(rows\)/);
+  assert.match(src, /function freeCorner\(w, h\)/);
+  assert.match(src, /function usedExtent\(\)/);
+  assert.equal((src.match(/Object\.assign\(\{ fromPlan: true \}, fields\)/g) || []).length, 2,
+    'both API branches (rows, and a chart from another program) say they are a plan');
+  assert.match(src, /'貼上圖表'\)/, 'the clipboard paste still goes where the cursor is');
+});
+
+test('app.open waits for a document application to load its file', () => {
+  /* Measured twice: 「開 /demo/inbox/報價單.xlsx，加一欄小計」 planned app.open then
+     setRange; launch returned as soon as the window existed, the column was
+     written into the blank sheet with a cheerful receipt, and the file's load
+     then replaced the workbook. The saved quote had no column E. */
+  const reg = read('renderer/apps/registry.js');
+  const launch = funcBody(reg, 'launch');
+  assert.match(launch, /instance\.ctx\.ready/, 'launch looks for the app\'s readiness');
+  assert.match(launch, /await Promise\.race\(/, 'and waits for it, bounded');
+  for (const app of ['docs', 'sheets', 'slides']) {
+    assert.match(read('renderer/apps/' + app + '.js'), /ctx\.ready = \(async function boot\(\)/, app + ' 的 boot 交出 ready');
+  }
+});
+
+test('the spreadsheet\'s 語意對照 is wired: the module is loaded, the actions exist, the model is only asked when allowed', () => {
+  assert.match(read('renderer/index.html'), /<script src="sheetmatch\.js"><\/script>/, 'the pure module is on the page');
+  const src = read('renderer/apps/sheets.js');
+  assert.match(src, /^\s+match: \{\s*\n\s+args: '\{source:/m, 'the match action, with its arguments spelled out for the model');
+  assert.match(src, /^\s+applyChoices: \{/m, 'and the one that applies the person\'s choices');
+  assert.match(src, /match: matchApi, applyChoices: applyChoicesApi/, 'both reach the api');
+  const fn = funcBody(src, 'matchApi');
+  assert.match(fn, /planned\.items\.forEach\(M\.autoDecide\)/, 'what needs no model is decided first');
+  assert.match(fn, /if \(pending\.length && !useModel\)/, 'model:false sends the rest to review');
+  assert.match(fn, /AIOS\.state && AIOS\.state\.connected/, 'and so does a core that is not there');
+  assert.match(fn, /AIOS\.kernel\.complete\(\{/, 'the judgement is one structured call per batch');
+  assert.match(fn, /schema: M\.schema\(\)/, 'held to a schema, so a pick is a candidate id and not prose');
+  assert.match(fn, /mutate\('語意對照'/, 'the whole write is one undo step');
+  assert.match(src, /var lastMatch = null;/, 'and the candidates behind 待確認 are kept for 套用選擇');
+  assert.match(src, /match: lastMatch,/, 'across a restart');
+});
