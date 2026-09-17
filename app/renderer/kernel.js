@@ -737,9 +737,13 @@ AIOS.kernel = (function () {
   async function stream(req, onToken, tolerant) {
     var id = 'r' + (++reqSeq);
     var text = '', timings = null, usageInfo = null, finish = null, refusal = '';
+    var ended = false;
+    var onEnded = null;
 
     sinks.set(id, function (j) {
       if (!j) return;
+      // Main's "that was all": every frame before it has been seen.
+      if (j.aiosDone) { ended = true; if (onEnded) onEnded(); return; }
       if (j.timings) timings = j.timings;
       if (j.usage) usageInfo = j.usage;
       var c0 = j.choices && j.choices[0];
@@ -770,6 +774,15 @@ AIOS.kernel = (function () {
     inflight.set(id, owner);
     try {
       unwrap(await bridge().chat(id, payload), '模型呼叫');
+      /* The invoke's reply can overtake the last frames (see main's model:chat
+         handler for the measurement). Wait for the end marker -- briefly, so a
+         main process that never sends one cannot hang every call. */
+      if (!ended) {
+        await new Promise(function (r) {
+          var t = window.setTimeout(r, 2000);
+          onEnded = function () { window.clearTimeout(t); r(); };
+        });
+      }
     } finally {
       sinks.delete(id);
       inflight.delete(id);

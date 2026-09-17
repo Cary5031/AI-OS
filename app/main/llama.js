@@ -384,6 +384,12 @@ const PROVIDERS = {
   deepseek: {
     id: 'deepseek',
     label: 'DeepSeek',
+    /* deepseek-chat and deepseek-reasoner are text-only; a request with an
+       image part is refused here with a sentence, not there with a 400. Every
+       other provider is tried: the OpenAI-shaped image_url part is what
+       OpenAI, Gemini's OpenAI endpoint and a llama-server with an mmproj all
+       read, and one without an mmproj says so in its own error. */
+    images: false,
     note: 'OpenAI 相容端點，需要 API 金鑰。送出的內容會離開這台機器。',
     remote: true,
     supervised: false,
@@ -637,6 +643,21 @@ async function initProviders(userDataDir) {
 /* --------------------------------------------------------------- reporting */
 
 /** What the renderer is allowed to know. No key material, not even a length. */
+/** Whether a message list carries a picture (an OpenAI-shaped image_url part). */
+function hasImages(messages) {
+  return Array.isArray(messages) && messages.some(function (m) {
+    return m && Array.isArray(m.content) && m.content.some(function (part) {
+      return part && part.type === 'image_url';
+    });
+  });
+}
+
+/** Whether this provider is worth sending a picture to. */
+function acceptsImages(id) {
+  var p = PROVIDERS[id];
+  return !!p && p.images !== false;
+}
+
 function providerState() {
   return {
     active: active,
@@ -656,6 +677,7 @@ function providerState() {
         hasKey: !!s.key,
         headerNames: (s.headers || []).map(function (r) { return r.name; }),
         tokenizer: hasTokenizer(id),
+        images: acceptsImages(id),
         json: jsonModeOf(id),
         reasoningKind: reasoningKindOf(id),
         efforts: effortsOf(id),
@@ -1195,6 +1217,13 @@ async function chatActive(requestId, req, onEvent) {
   var id = active;
   var base = baseOf(id);
   if (!base) throw new Error(PROVIDERS[id].label + ' 還沒有設定服務位址');
+  var pictures = hasImages(req.messages);
+  if (pictures && !acceptsImages(id)) {
+    var blind = new Error(PROVIDERS[id].label + ' 這個通道不接受圖片：模型沒有視覺能力。' +
+      '讀掃描頁要到「系統 → 核心模型」換一個看得懂圖片的模型。');
+    blind.code = 'ENOVISION';
+    throw blind;
+  }
 
   var ctl = new AbortController();
   inflight.set(requestId, ctl);
@@ -1220,6 +1249,16 @@ async function chatActive(requestId, req, onEvent) {
       });
       if (res.ok) break;
       var detail = await res.text().catch(function () { return ''; });
+      /* A picture the model cannot see is not a field to drop nor a moment to
+         wait out. llama-server without an mmproj answers 500 "image input is
+         not supported"; a text-only hosted model answers 400 naming image_url.
+         Both are the same fact, and retrying either is the same waste. */
+      if (pictures && /image|vision|multimodal|mmproj|visual/i.test(detail)) {
+        var cannot = new Error('這個模型讀不了圖片：' + detail.slice(0, 200) +
+          '。讀掃描頁要到「系統 → 核心模型」換一個看得懂圖片的模型。');
+        cannot.code = 'ENOVISION';
+        throw cannot;
+      }
       if (TRANSIENT.indexOf(res.status) >= 0) {
         /* Out of patience. Said in one sentence rather than as the provider's
            raw body, because "we waited four times and it kept saying 429" is a
@@ -1347,7 +1386,7 @@ module.exports = {
   ENDPOINT, start, stop, status, health, props, onLog,
   initProviders, providerState, selectProvider, configureProvider,
   setSecret, forgetSecret, probeActive, tokenizeActive, chatActive, abortActive,
-  listModels, localEndpoint, exportPreset,
+  listModels, localEndpoint, exportPreset, hasImages, acceptsImages,
   isLocalActive: function () { return active === 'local'; },
   PROVIDER_IDS, EFFORT_LADDER
 };

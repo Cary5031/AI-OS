@@ -29,7 +29,8 @@
    =========================================================================== */
 
 import * as pdfjs from './lib/pdf.mjs';
-import { convert } from './convert.js';
+import { convert, pageLines } from './convert.js';
+import * as reader from './layout.js';
 
 /* Everything pdf.js loads at runtime, resolved against this module's own URL so
    the token is carried along. The CMaps are not optional: a CJK document whose
@@ -146,6 +147,8 @@ window.addEventListener('message', (e) => {
     case 'sidebar': toggleSide(m.on); break;
     case 'state': state(); break;
     case 'convert': runConvert(m); break;
+    case 'raster': runRaster(m); break;
+    case 'layout': runLayout(m); break;
     case 'pick': setPick(!!m.on); break;
     case 'box': sendBox(Number(m.page), m.id); break;
     default: break;
@@ -275,6 +278,8 @@ async function runConvert(req) {
     const result = await convert(pdfjs, doc, {
       withImages,
       stem: String(req.stem || 'pdf'),
+      // Page number -> the model's transcription of a page with no text layer.
+      ocr: req.ocr && typeof req.ocr === 'object' ? req.ocr : {},
       onProgress: ({ phase, page, of }) => {
         if (quiet) return;
         $('veilText').textContent = (phase === 'images' ? '算繪並裁切圖片：' : '讀取文字：') +
@@ -296,6 +301,151 @@ async function runConvert(req) {
       requestId: req.requestId || null,
       error: describeError(err)
     });
+  }
+}
+
+/* ------------------------------------------------------------- pictures -- */
+
+/**
+ * Pages drawn as JPEG data URLs, for the model to read.
+ *
+ * Drawn here because the document is here: the shell holds a grant, never the
+ * bytes. `edge` is the long side in pixels. 1600 reads a receipt's small print
+ * and keeps a page under a megabyte, which is what one request can carry with
+ * room for the answer.
+ */
+async function runRaster(req) {
+  const id = req.requestId || null;
+  if (!doc) { toShell('rastered', { requestId: id, error: '還沒有載入文件' }); return; }
+  const want = (Array.isArray(req.pages) ? req.pages : []).map(Number)
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= count);
+  const edge = Math.min(3000, Math.max(600, Number(req.edge) || 1600));
+  const quality = Math.min(0.95, Math.max(0.5, Number(req.quality) || 0.85));
+  const pages = [];
+  try {
+    for (const n of want) {
+      const pg = await doc.getPage(n);
+      const at1 = pg.getViewport({ scale: 1, rotation: pg.rotate || 0 });
+      const scale = Math.min(4, edge / Math.max(at1.width, at1.height));
+      const vp = pg.getViewport({ scale, rotation: pg.rotate || 0 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(vp.width));
+      canvas.height = Math.max(1, Math.floor(vp.height));
+      const ctx = canvas.getContext('2d', { alpha: false });
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await pg.render({ canvasContext: ctx, viewport: vp, background: '#ffffff' }).promise;
+      pages.push({ number: n, dataUrl: canvas.toDataURL('image/jpeg', quality), w: canvas.width, h: canvas.height });
+      canvas.width = 0;
+      canvas.height = 0;
+      pg.cleanup();
+    }
+    toShell('rastered', { requestId: id, pages });
+  } catch (err) {
+    toShell('rastered', { requestId: id, error: describeError(err) });
+  }
+}
+
+/* --------------------------------------------------------------- layout -- */
+
+/* Pixels per point when the page is drawn to read its lines back. Two keeps a
+   half-point rule two pixels wide, which survives the threshold; one loses it. */
+const RULE_SCALE = 2;
+
+/**
+ * One page's geometry: its text runs in points, and the lines on it.
+ *
+ * The runs are the converter's own (pageLines), so this and the Markdown
+ * agree on what the text is. The lines are read off a drawing of the page,
+ * because that is the only place a table's border exists: in the content
+ * stream it is a path, and pdf.js does not hand paths out.
+ */
+async function pageGeometry(n) {
+  const page = await pageLines(pdfjs, doc, n);
+  const parts = [];
+  for (const line of page.lines) {
+    for (const p of line.parts) parts.push({ x: p.x, y: p.y, w: p.w, h: p.h, str: p.str });
+  }
+  const pg = page.page;
+  const vp = pg.getViewport({ scale: RULE_SCALE });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(vp.width));
+  canvas.height = Math.max(1, Math.floor(vp.height));
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await pg.render({ canvasContext: ctx, viewport: vp, background: '#ffffff' }).promise;
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const rules = reader.rulesFromPixels(img.data, canvas.width, canvas.height, RULE_SCALE, parts);
+  canvas.width = 0;
+  canvas.height = 0;
+  pg.cleanup();
+  return { n, parts, rules, width: page.width, height: page.height };
+}
+
+/**
+ * The document as a workbook (one sheet per page) or as document blocks.
+ *
+ * Pages with text are read from their geometry. Pages the shell has the
+ * model's OCR for -- scans -- go through the Markdown reader instead, and come
+ * out as a plain grid: order and tables, not positions, because there are no
+ * positions to keep.
+ */
+async function runLayout(req) {
+  const id = req.requestId || null;
+  if (!doc) { toShell('laidout', { requestId: id, error: '還沒有載入文件' }); return; }
+  const kind = req.kind === 'doc' ? 'doc' : 'sheet';
+  const ocr = req.ocr && typeof req.ocr === 'object' ? req.ocr : {};
+  const want = Array.isArray(req.pages) && req.pages.length
+    ? req.pages.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= count)
+    : Array.from({ length: count }, (_, i) => i + 1);
+  const quiet = !!req.quiet;
+  if (!quiet) veil('正在讀版面', '讀取文字與線條…', false);
+
+  const sheets = [];
+  const blocks = [];
+  const stats = { pages: 0, tables: 0, ocrPages: 0, cells: 0, merges: 0, bordered: 0 };
+  try {
+    for (const n of want) {
+      if (!quiet) $('veilText').textContent = '讀取版面：第 ' + n + ' / ' + count + ' 頁';
+      const name = '第 ' + n + ' 頁';
+      const read = typeof ocr[n] === 'string' && ocr[n].trim() ? ocr[n].trim() : '';
+      if (read) {
+        stats.ocrPages++;
+        const bl = reader.mdToBlocks(read);
+        stats.tables += bl.filter((b) => b.type === 'table').length;
+        if (kind === 'sheet') {
+          sheets.push(reader.sheetFromBlocks(bl, name));
+        } else {
+          if (blocks.length) blocks.push({ type: 'break' });
+          bl.forEach((b) => blocks.push(b));
+        }
+      } else {
+        // eslint-disable-next-line no-await-in-loop
+        const geometry = await pageGeometry(n);
+        if (kind === 'sheet') {
+          sheets.push(reader.sheetFrom(geometry, name));
+        } else {
+          const d = reader.docFrom(geometry);
+          if (blocks.length) blocks.push({ type: 'break' });
+          d.blocks.forEach((b) => blocks.push(b));
+          stats.tables += d.tables;
+        }
+      }
+      stats.pages++;
+    }
+    for (const s of sheets) {
+      const sum = reader.summarise(s);
+      stats.cells += sum.cells;
+      stats.merges += sum.merges;
+      stats.bordered += sum.bordered;
+    }
+    if (!quiet) unveil();
+    toShell('laidout', Object.assign({ requestId: id, kind, stats },
+      kind === 'sheet' ? { sheets } : { blocks }));
+  } catch (err) {
+    if (!quiet) unveil();
+    toShell('laidout', { requestId: id, error: describeError(err) });
   }
 }
 

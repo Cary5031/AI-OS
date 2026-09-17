@@ -411,7 +411,11 @@ contextBridge.exposeInMainWorld('aios', {
        file the source PDF's origin, so converting an untrusted document does not
        quietly produce trusted text. */
     saveConversion: (from, path, markdown, images) =>
-      invoke('pdf:saveConversion', { from, path, markdown, images })
+      invoke('pdf:saveConversion', { from, path, markdown, images }),
+    /* An .xlsx or .docx laid out from a PDF. Same provenance rule as the
+       Markdown: the file carries the PDF's origin, not this machine's. */
+    saveOffice: (from, path, kind, payload) =>
+      invoke('pdf:saveOffice', { from, path, kind, payload })
   },
 
   /* ------------------------------------------------------------ schedule */

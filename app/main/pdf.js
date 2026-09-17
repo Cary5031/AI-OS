@@ -1463,6 +1463,12 @@ function serveView(rawUrl) {
   if (p === '/convert.js') {
     return { file: path.join(__dirname, '..', 'renderer', 'pdfmd.js'), type: MIME['.js'] };
   }
+  /* The layout reader: the same origin, so it can share pdf.js's text runs and
+     canvases with the converter, and no bridge, so what it reads it can only
+     hand back through postMessage. */
+  if (p === '/layout.js') {
+    return { file: path.join(__dirname, '..', 'renderer', 'pdflayout.js'), type: MIME['.js'] };
+  }
 
   /* The rasteriser, which is the viewer's opposite number: same origin, same
      policy, no screen. Loaded by rasterize() below into a window nobody sees. */

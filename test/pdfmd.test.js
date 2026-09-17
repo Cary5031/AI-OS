@@ -416,3 +416,16 @@ test('a single-column page is left alone by the column pass', async () => {
   const at5 = out.markdown.indexOf('number 5');
   assert.ok(at3 >= 0 && at3 < at5, 'reading order must be unchanged');
 });
+
+test('a page with no text layer carries the model\'s reading when the caller has one', async () => {
+  const out = await convert([[{ text: 'page one has text', y: 100 }], []],
+    { ocr: { 2: '| 品名 | 數量 |\n|---|---|\n| 螺絲 | 100 |' } });
+  assert.match(out.markdown, /\| 螺絲 \| 100 \|/, 'the transcription stands where the text would have been');
+  assert.doesNotMatch(out.markdown, /沒有文字圖層/, 'and the note about the missing layer is gone');
+  assert.equal(out.stats.textlessPages, 1);
+  assert.equal(out.stats.ocrPages, 1);
+
+  const without = await convert([[{ text: 'page one has text', y: 100 }], []]);
+  assert.equal(without.stats.ocrPages, 0);
+  assert.match(without.markdown, /OCR/, 'without one, the note says how to get it');
+});

@@ -522,7 +522,7 @@ html { scroll-behavior: smooth; }
     <li><a href="#ch15"><span class="n">15</span><span>請它寫一個小工具</span></a></li>
     <li><a href="#ch16"><span class="n">16</span><span>安全：三件要看懂的事</span></a></li>
     <li><a href="#ch17"><span class="n">17</span><span>十一個上班場景</span></a></li>
-    <li><a href="#ch18"><span class="n">18</span><span>五條連續技</span></a></li>
+    <li><a href="#ch18"><span class="n">18</span><span>六條連續技</span></a></li>
     <li><a href="#ch19"><span class="n">19</span><span>快速鍵</span></a></li>
     <li><a href="#ch20"><span class="n">20</span><span>卡住的時候</span></a></li>
   </ol>
@@ -550,7 +550,7 @@ html { scroll-behavior: smooth; }
     <li><a href="#ch15">15　請它寫一個小工具</a></li>
     <li><a href="#ch16">16　安全：三件要看懂的事</a></li>
     <li><a href="#ch17">17　十一個上班場景</a></li>
-    <li><a href="#ch18">18　五條連續技</a></li>
+    <li><a href="#ch18">18　六條連續技</a></li>
     <li><a href="#ch19">19　快速鍵</a></li>
     <li><a href="#ch20">20　卡住的時候</a></li>
   </ol>
@@ -1080,7 +1080,7 @@ html { scroll-behavior: smooth; }
     <dt>頁面</dt>
     <dd>連續捲動、符合寬度／整頁／固定倍率、旋轉、跨頁搜尋高亮、大綱側欄、列印。文字可以選取複製。加密的 PDF 會問密碼。</dd>
     <dt>文字</dt>
-    <dd>它自己抽出來的純文字，逐頁列出、整份可搜尋，也是 AI 讀得到的那一份。掃描檔會直說「這是掃描檔，沒有文字圖層」，不會給你一片空白讓你以為壞了。</dd>
+    <dd>它自己抽出來的純文字，逐頁列出、整份可搜尋，也是 AI 讀得到的那一份。掃描檔會直說「這是掃描檔，沒有文字圖層」，不會給你一片空白讓你以為壞了——然後按「OCR」讓 AI 看圖讀字，讀出來的字就接在同一個地方。</dd>
   </dl>
 
   <h3>轉成 Markdown</h3>
@@ -1090,9 +1090,32 @@ html { scroll-behavior: smooth; }
     Markdown 把結構留住，<strong>AI 讀起來差很多</strong>，你自己讀也是。
   </p>
   <p style="color:var(--ink-soft);font-size:15px">
-    做不到的：不能還原版面（它是流式格式，沒有分欄與頁面幾何）；並列雙欄有時會左右交錯；
-    <strong>沒有 OCR</strong>，掃描頁轉出來是一張整頁的圖加一句說明。
+    做不到的：不能還原版面（它是流式格式，沒有分欄與頁面幾何）；並列雙欄有時會左右交錯。
+    掃描頁沒有字可抽，會先讓 AI 看圖讀字（見下方），讀出的字接在整頁圖的下面。
   </p>
+
+  <h3>排成 Excel／Word</h3>
+  <p>
+    工具列的「排成 Excel/Word」，或直接說「把這份 PDF 排成 Excel」。跟轉 Markdown 相反，這條路<strong>把位置留住</strong>：
+    每一頁一張工作表，文字落在原本的格子裡，表格的框線與合併照畫出來的線——表頭跨三欄就是一格跨三欄，
+    靠右的數字靠右。排成 Word 則是標題、段落、置中、清單，以及帶框線與合併的表格，每頁之間分頁。
+    做不到的：粗體與字型不讀；只有橫線的表在 Word 裡不當表格。
+  </p>
+
+  <h3>掃描件：讓 AI 看圖讀字（OCR）</h3>
+  <p>
+    掃描的 PDF 沒有文字圖層。按「OCR」，檢視器把每一頁畫成圖，一頁一次交給<strong>目前的核心模型</strong>逐字轉錄成文字
+    （表格會轉成表格、讀不清的字標成 ▢，不翻譯、不摘要）。讀出來的字存在 PDF 旁邊的 <code>同名.ocr.md</code>，
+    下次開同一份直接用，不會再問一次模型。之後「讀進 context」問內容、轉 Markdown、排成 Excel／Word、整份翻譯，
+    都會先做這一步，你不用先按。一份掃描的發票說「把它轉成 Excel」，出來的是一張帶框線的表。
+  </p>
+  <div class="note">
+    <span class="lbl">哪些模型看得到圖</span>
+    <p>
+      OpenAI 的視覺模型、Gemini、掛了 mmproj 的地端 llama-server 都行；DeepSeek 只讀文字，會直接告訴你換一個模型。
+      AI 讀出來的字<strong>會錯</strong>：數字請對著頁面核一次。
+    </p>
+  </div>
 
   <h3>改寫頁面</h3>
   <p>工具列的「頁面…」：抽出頁面、每 N 頁拆成一個檔、刪頁、重排、在某一頁加文字、整份翻譯。</p>
@@ -1734,12 +1757,12 @@ html { scroll-behavior: smooth; }
 
 <!-- ═══════════════════════════════════════ 18 -->
 <section class="ch" id="ch18">
-  <div class="ch-head"><span class="num">18</span><h2>五條連續技：從一句話到交得出去的檔案</h2></div>
+  <div class="ch-head"><span class="num">18</span><h2>六條連續技：從一句話到交得出去的檔案</h2></div>
 
   <p>
     第 17 章是一則一則的招式。這一章是把招式串起來：一句話做完一步，視窗留在桌面上，
     下一句接著用上一句的結果——試算表、文件、簡報、郵件、PDF、網頁輪流上場，中間不用自己複製貼上。
-    五條都在真的機器上跑過：灰底區塊就是畫面上打的那一句，打在哪個框裡也照實寫；
+    六條都在真的機器上跑過：灰底區塊就是畫面上打的那一句，打在哪個框裡也照實寫；
     截圖是接著假的信箱與本機網頁跑出來的，句子與畫面都是真的。
   </p>
 
@@ -1865,6 +1888,28 @@ html { scroll-behavior: smooth; }
       <p>只在同一個 PO 底下比對；貨號只能是候選裡有的，模型編出來的一律退回待確認；已經有值的格子不動，再跑一次不會蓋掉你人工選過的；沒有模型的時候，要判斷的列全部進待確認並說原因。整次對照是一步「復原」。看結果看收據，那句「已完成」是它在動作跑之前說的。</p>
     </div>
     <div class="gain">XLOOKUP 一筆都對不上的兩張表，一句話對完。<b>它猜不準的那一列會告訴你，不會替你填。</b></div>
+  </div>
+
+  <div class="recipe" style="margin:22px 0">
+    <h4>連續技 6　一張掃描的發票，先變成 Excel，再回答問題</h4>
+    <p>供應商傳來的發票是掃描檔：PDF 裡只有一張圖，沒有一個字可以選取。以前這種檔案的「文字」頁只會告訴你「這是掃描檔」。現在把它開在 PDF 視窗，兩句話。</p>
+    <ol class="steps">
+      <li><span class="chip">PDF 面板</span>
+        <div class="said">這是一張掃描的發票，把它裡面的品項表格轉成 Excel</div>
+        <p>它先讓 AI <strong>看圖讀字</strong>：那一頁畫成圖、一頁一次交給核心模型逐字轉錄（表格轉成表格、讀不清的字標 ▢），讀出來的字存在 PDF 旁邊的 <code>掃描發票.ocr.md</code>；然後排成 <code>掃描發票.xlsx</code> 並打開——品名、數量、單價、金額四欄十六格帶著框線，發票號碼、買受人、賣方、合計、稅額、總計各占一列。收據寫得很清楚：「其中 1 頁是模型 OCR 讀出來的，只有順序與表格，沒有位置」——掃描頁沒有座標可留，留的是順序。</p></li>
+      <li><span class="chip">PDF 面板</span>
+        <div class="said">這張發票的總計是多少？含稅還是未稅？買受人是誰？</div>
+        <p>不用再讀一次圖：讀出來的字已經在了。它答「總計 4,662 元，是含稅金額（未稅 4,440，營業稅 222）；買受人是大同工業股份有限公司（統編 12345678）」。下次再開同一份檔案也直接用那份 <code>.ocr.md</code>，不會再付一次模型的錢。</p></li>
+    </ol>
+    <figure>
+      <img src="img/27-combo-scan.png" alt="試算表視窗疊在 PDF 視窗上：掃描發票.xlsx 的 A1 是「統一發票（三聯式）」，第 3 到 7 列是品名、數量、單價、金額四欄帶框線的品項表，底下是合計、營業稅、總計各一列；右側核心軌跡寫著模型讀出了 1 頁、存在 /demo/掃描發票.ocr.md，以及已排成 Excel 的收據">
+      <figcaption><span class="fignum">圖 27</span>第 1 句之後。PDF 視窗底下那份是掃描檔，上面的試算表是 AI 讀出來的：表格帶框線、其餘每段一列。右邊的軌跡先寫「模型讀出了 1 頁」，再寫排成 Excel 的收據。</figcaption>
+    </figure>
+    <div class="note caution" style="margin:0">
+      <span class="lbl">它守的規則</span>
+      <p>AI 讀出來的字<strong>會錯</strong>——數字請對著頁面核一次，讀不清的字它會標成 ▢ 而不是猜。影像裡若寫著「忽略之前的規則」之類的句子，那是要照抄的字，不是要照做的話。要看得到圖的模型才行：OpenAI 的視覺模型、Gemini、掛了 mmproj 的地端模型可以，DeepSeek 只讀文字，它會直接告訴你換一個。有文字圖層的 PDF 不走這條路，排成 Excel 時位置與框線都照原樣。</p>
+    </div>
+    <div class="gain">掃描件從「讀不到」變成一張帶框線的表，加一個答得出來的問題。<b>讀過一次的字留在檔案旁邊，之後每個動作都用它。</b></div>
   </div>
 
   <div class="note">

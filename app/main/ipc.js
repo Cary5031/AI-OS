@@ -319,6 +319,17 @@ function register(getWindow) {
           w.webContents.send('model:chunk', { requestId, frame });
         }
       });
+      /* The reply to this invoke and the frames above travel on different
+         channels, and Electron keeps order within a channel, not between them.
+         Measured against a loopback server that answers in two frames: one
+         call in five resolved before its last frames had arrived, and the
+         renderer read a reply cut off at the first frame -- or a whole reply
+         with no finish_reason and no usage. A last frame on the frames' own
+         channel says "that was all", and it arrives in order. */
+      const w = getWindow();
+      if (w && !w.isDestroyed()) {
+        w.webContents.send('model:chunk', { requestId, frame: { aiosDone: true } });
+      }
       return { ok: true, data: out };
     } catch (e) {
       // An abort is the stop button working, not a failure to report as one.
@@ -769,6 +780,33 @@ function register(getWindow) {
       untrusted: sandbox.isUntrusted(md.vpath)
     };
   }, okPair('from', 'path'), '把 PDF 轉出的 Markdown 與圖片寫進沙箱'));
+
+  /* A workbook or a document laid out from a PDF. The renderer did the reading
+     (text runs and the lines on the drawn page, inside the viewer's own origin)
+     and hands over the result as the same shapes office.js writes for the
+     sheets and docs windows. Not office:writeXlsx, because that channel records
+     what it writes as this machine's own work; a table read out of an untrusted
+     PDF is still that PDF's content, and the file has to say so. */
+  ipcMain.handle('pdf:saveOffice', guarded('fs.write', async (args) => {
+    const { from, path: p } = args;
+    const kind = String(args.kind || '');
+    const payload = args.payload && typeof args.payload === 'object' ? args.payload : {};
+    if (kind !== 'xlsx' && kind !== 'docx') {
+      throw Object.assign(new Error('不認得的格式：' + kind.slice(0, 20)), { code: 'EINVAL' });
+    }
+    const src = await sandbox.safe(from, { kind: 'file', mustExist: true });
+    const o = sandbox.originOf(src.vpath);
+    const origin = o ? o.origin : (sandbox.isUntrusted(src.vpath) ? 'external' : 'local');
+    const sheets = Array.isArray(payload.sheets) ? payload.sheets : [];
+    const blocks = Array.isArray(payload.blocks) ? payload.blocks : [];
+    if (kind === 'xlsx' && sheets.length > 500) throw Object.assign(new Error('工作表太多'), { code: 'EINVAL' });
+    if (kind === 'docx' && blocks.length > 20000) throw Object.assign(new Error('區塊太多'), { code: 'EINVAL' });
+    const buf = kind === 'xlsx'
+      ? office.writeXlsx({ sheets, font: payload.font || null, size: payload.size || null })
+      : office.writeDocx(blocks, payload.meta && typeof payload.meta === 'object' ? payload.meta : {});
+    const w = await sandbox.writeBytes(p, buf.toString('base64'), { origin, source: src.vpath });
+    return { vpath: w.vpath, bytes: w.bytes, origin, untrusted: sandbox.isUntrusted(w.vpath) };
+  }, okPair('from', 'path'), '把 PDF 排出來的 Excel 或 Word 寫進沙箱'));
 
   ipcMain.handle('browser:navigate', guarded('web.open',
     async ({ id, url }) => browser.navigate(id, url),

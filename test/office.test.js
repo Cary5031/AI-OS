@@ -349,6 +349,27 @@ test('an empty cell that only carries formatting is still written', () => {
     'otherwise the formatting is silently dropped on export');
 });
 
+test('a styled empty cell does not swallow the cells after it', () => {
+  /* Excel writes a formatted empty cell as <c r="B1" s="3"/>. The reader's
+     first alternative, <c ...>...</c>, matched that self-closing tag too and
+     ran on to the next </c>, so C1 was read as the inside of B1 and vanished.
+     Found when a PDF laid out as a sheet lost every cell that followed a
+     bordered blank -- which in a table is most of them. */
+  const buf = office.writeXlsx({ cells: {
+    A1: { v: 'a' },
+    B1: { v: '', border: { t: { style: 'single', width: 0.5, colour: '808080' } } },
+    C1: { v: 'c' },
+    A2: { v: '', bg: 'FFF2CC' },
+    B2: { v: 7 }
+  } });
+  const back = office.readXlsx(buf);
+  assert.equal(back.cells.A1.v, 'a');
+  assert.equal(back.cells.C1.v, 'c', 'the cell after the styled blank is still there');
+  assert.ok(back.cells.B1.border && back.cells.B1.border.t, 'and the blank keeps its border');
+  assert.equal(back.cells.B2.v, 7);
+  assert.equal(back.cells.A2.bg, 'FFF2CC');
+});
+
 test('xlsx round-trips a whole workbook, not just the sheet in front of you', () => {
   const buf = office.writeXlsx({
     font: '微軟正黑體',

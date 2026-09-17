@@ -1175,7 +1175,13 @@ function readXlsx(buffer, opts = {}) {
     let maxRow = 0;
     let maxCol = 0;
 
-    const cRe = /<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g;
+    /* A cell with content is <c ...>...</c>; a formatted empty one is
+       <c ... s="3"/>, which is how Excel itself writes every styled blank. The
+       first alternative must not match the second kind: with a plain [^>]* it
+       did, and then ran on to the next </c>, so the cell after every styled
+       blank was read as part of it and vanished. Attributes that end in "/"
+       are the self-closing form, and go to the second alternative. */
+    const cRe = /<c\b((?:[^>]*[^/>])?)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g;
     let cm;
     while ((cm = cRe.exec(xml))) {
       const attrs = cm[1] || cm[3] || '';

@@ -18,7 +18,8 @@
    is a reflow, not a reproduction. A two-column paper comes out as one column.
    A table whose cells wrap onto several lines comes out as several rows. A page
    with no text layer -- a scan -- comes out as one image and a note saying so,
-   because there is no OCR on this machine.
+   unless the caller passes the model's OCR of that page in `opts.ocr`, in which
+   case the transcription stands where the text would have been.
 
    Table detection is deliberately timid. Guessing wrong turns a readable page
    into a grid of nonsense, so a run of lines has to agree on its column edges
@@ -88,6 +89,9 @@ export async function convert(pdfjs, doc, opts = {}) {
   const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
   const stem = String(opts.stem || 'pdf');
   const assetDir = stem + '.assets';
+  /* Page number -> Markdown the model read off that page's image. Only pages
+     with no text layer consult it; a page that has text does not need a guess. */
+  const ocr = opts.ocr && typeof opts.ocr === 'object' ? opts.ocr : {};
 
   const pages = [];
   for (let n = 1; n <= doc.numPages; n++) {
@@ -115,6 +119,7 @@ export async function convert(pdfjs, doc, opts = {}) {
   if (meta) { out.push('# ' + escapeText(meta)); out.push(''); }
 
   let scanned = 0;
+  let transcribed = 0;
   for (const page of pages) {
     if (pages.length > 1) {
       out.push('');
@@ -127,11 +132,14 @@ export async function convert(pdfjs, doc, opts = {}) {
 
     if (!kept.length) {
       scanned++;
+      const read = typeof ocr[page.n] === 'string' && ocr[page.n].trim() ? ocr[page.n].trim() : '';
+      if (read) transcribed++;
       if (!withImages) {
-        out.push('*（第 ' + page.n + ' 頁沒有文字圖層，可能是掃描頁；這台機器沒有 OCR。）*');
+        out.push(read || '*（第 ' + page.n + ' 頁沒有文字圖層，可能是掃描頁；要讀它，請在 PDF 視窗執行 OCR，由模型看圖讀字。）*');
         out.push('');
         continue;
       }
+      if (read) blocks.forEach((b) => { if (b.t === 'image' && b.whole) b.ocr = read; });
     }
 
     emit(out, blocks, assetDir);
@@ -144,6 +152,7 @@ export async function convert(pdfjs, doc, opts = {}) {
     stats: {
       pages: pages.length,
       textlessPages: scanned,
+      ocrPages: transcribed,
       images: images.length,
       bodySize: +body.toFixed(2),
       linePitch: +pitch.toFixed(2),
@@ -162,7 +171,7 @@ export async function convert(pdfjs, doc, opts = {}) {
  * matters for pages with their own /Rotate: the raw text transform is in
  * unrotated user space and would sort the lines the wrong way round.
  */
-async function pageLines(pdfjs, doc, n) {
+export async function pageLines(pdfjs, doc, n) {
   const pg = await doc.getPage(n);
   const vp = pg.getViewport({ scale: 1 });
   const tc = await pg.getTextContent();
@@ -327,7 +336,7 @@ function findGutter(parts, pageWidth) {
  * gaps between runs mean different things in Latin and CJK typesetting, so the
  * decision is made per boundary rather than by always inserting a separator.
  */
-function joinParts(parts) {
+export function joinParts(parts) {
   let out = '';
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
@@ -347,6 +356,17 @@ function joinParts(parts) {
   return collapse(out);
 }
 
+/* Chromium's own PDF export maps some glyphs to Kangxi radical code points:
+   月 arrives as ⽉ (U+2F49), 金 as ⾦. They render alike and compare unlike, so a
+   search for 九月 in the Markdown found nothing. NFKC per character folds them
+   back; main/pdf.js does the same for the plain extractor. */
+function unifyRadicals(s) {
+  return String(s || '').replace(/[\u2e80-\u2eff\u2f00-\u2fdf]/g, (c) => {
+    const n = c.normalize('NFKC');
+    return n.length === 1 ? n : c;
+  });
+}
+
 /**
  * Tidy a line of joined text.
  *
@@ -356,6 +376,7 @@ function joinParts(parts) {
  * spaced as written.
  */
 function collapse(s) {
+  s = unifyRadicals(s);
   let out = String(s || '').replace(/\s+/g, ' ');
   // Twice: in 本 課 程 the first pass consumes the space after 本, and the space
   // before 程 needs the already-joined 課 as its left neighbour.
@@ -794,7 +815,7 @@ function emit(out, blocks, assetDir) {
           '](' + b.href + ')');
         if (b.whole) {
           out.push('');
-          out.push('*（這一頁沒有文字圖層，上面是整頁的影像；這台機器沒有 OCR，所以沒有文字可讀。）*');
+          out.push(b.ocr || '*（這一頁沒有文字圖層，上面是整頁的影像；要讀它，請在 PDF 視窗執行 OCR，由模型看圖讀字。）*');
         }
         out.push('');
         break;
