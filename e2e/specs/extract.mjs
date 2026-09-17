@@ -24,6 +24,7 @@
 
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import nodeZlib from 'node:zlib';
 import { run } from '../lib/cdp.mjs';
 import { pressConsent } from '../lib/dialog.mjs';
 
@@ -45,6 +46,55 @@ const PDF_A = '%PDF-1.4 marker-A';
 const PDF_B = '%PDF-1.4 marker-B';
 const PDF_C = '%PDF-1.4 marker-C';
 const PDF_D = '%PDF-1.4 marker-D';
+
+const DOC_SCAN = '/inbox/e2e-掃描件.pdf';
+
+/* A real bitmap, so the PDF printed from it has no text layer -- which is what
+   a scan is, and what this fixture has to be. An <img> of an SVG will not do:
+   Chromium keeps SVG text as text when it prints, and the reader then correctly
+   reports the file is not a scan. 8-bit greyscale PNG, one filter byte a row. */
+function greyPng(w, h, ink) {
+  const zlib = nodeZlib;
+  const raw = Buffer.alloc((w + 1) * h, 0xff);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w + 1)] = 0;
+    for (let x = 0; x < w; x++) raw[y * (w + 1) + 1 + x] = ink(x, y) ? 0x10 : 0xf6;
+  }
+  let tbl = null;
+  const crc32 = (buf) => {
+    if (!tbl) {
+      tbl = new Int32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        tbl[n] = c;
+      }
+    }
+    let c = -1;
+    for (let i = 0; i < buf.length; i++) c = tbl[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ -1) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 0;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+}
+
+const SCAN_PNG = greyPng(1000, 700, (x, y) =>
+  (y > 100 && y < 150 && x > 60 && x < 780) ||
+  (y > 230 && y < 270 && x > 60 && x < 540) ||
+  (y > 350 && y < 390 && x > 60 && x < 660)).toString('base64');
 
 /* 爐號 sits inside the repeating block, so it is required per repetition and
    therefore NOT required in the flat table. Included so the window's red cells
@@ -591,6 +641,54 @@ export async function spec(t, app) {
       assert.equal(posts[posts.length - 1].headers['x-goog-api-key'], 'model-secret');
       assert.equal(posts[posts.length - 1].headers['x-api-key'], undefined,
         '工作室的金鑰不可以跑到模型那邊去');
+    });
+
+    await t.test('掃描件沒有文字圖層，所以頁面被畫出來，跟著檔案一起送', async () => {
+      /* The document this machine could not read at all. Everything upstream of
+         the model works by reading a PDF, and a scan gives it nothing -- so the
+         pages are drawn and the model is shown them. Driven end to end here
+         because the drawing happens in an offscreen window on another origin,
+         which is exactly the part a unit test cannot reach. */
+      const r = await run(cdp, via(`
+        await window.aios.taint.clear();
+        var made = await AIOS.printing.toPdf(${JSON.stringify(DOC_SCAN)}, {
+          title: '掃描件',
+          bodyHtml: '<img src="data:image/png;base64,${SCAN_PNG}" style="width:100%">'
+        });
+        await AIOS.afterFsChange();
+        var seen = await window.aios.pdf.read(${JSON.stringify(DOC_SCAN)});
+        out.push({ made: made.vpath, scanned: seen.ok && seen.data.scanned,
+                   chars: seen.ok ? seen.data.chars : -1 });
+
+        out.push(await inst.ctx.api.clearAll());
+        out.push(await inst.ctx.api.refreshMode(true));
+        out.push(await inst.ctx.api.choose(${JSON.stringify(CATEGORY)}, ${JSON.stringify(VENDOR_B)}));
+        out.push(await inst.ctx.api.addDocs([${JSON.stringify(DOC_SCAN)}]));
+        out.push(await inst.ctx.api.runAll());
+        out.push([].slice.call(document.querySelectorAll('.ext-doc-meta'))
+          .map(function (e) { return e.textContent; }).join(' | '));
+      `), { timeout: 180000 });
+      assert.equal(r.error, undefined, r.error);
+
+      assert.equal(r.out[0].scanned, true,
+        '素材本身要真的是掃描檔，不然這個測試什麼也沒測到：' + JSON.stringify(r.out[0]));
+      assert.equal(r.out[0].chars, 0, '而且真的一個字都取不到');
+      assert.equal(r.out[2], 'fallback', '這一段跑的是備援');
+
+      const posts = model.seen.filter((s2) => s2.method === 'POST');
+      const body = JSON.parse(posts[posts.length - 1].body);
+      const inline = body.contents[0].parts.filter((p) => p.inline_data)
+        .map((p) => p.inline_data.mime_type);
+      assert.ok(inline.includes('application/pdf'), '檔案本身還是送了：' + inline.join('、'));
+      assert.ok(inline.filter((t2) => t2 === 'image/jpeg').length >= 1,
+        '畫出來的頁面也要在裡面：' + inline.join('、'));
+      assert.equal(inline[0], 'application/pdf', '檔案排在頁面前面');
+
+      const last = body.contents[0].parts[body.contents[0].parts.length - 1];
+      assert.ok(last.text, '提示詞仍然排在最後');
+
+      assert.match(r.out[6], /掃描檔，送了 [0-9]+ 頁的頁面圖/,
+        '清單上要說得出這一份是怎麼送的：' + r.out[6]);
     });
   } finally {
     await new Promise((r) => studio.server.close(() => r()));

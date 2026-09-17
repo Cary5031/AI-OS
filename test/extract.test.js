@@ -905,3 +905,118 @@ test('a name already sitting in the destination is numbered around, not written 
   });
   assert.equal(clean.plan[0].newName, '大同-A-001.pdf');
 });
+
+/* ------------------------------------------------- scanned documents ------ */
+
+/**
+ * Stand in for the fallback API and keep the body that arrived.
+ *
+ * A socket rather than a stub, because what is being checked is the request
+ * that actually goes out: the order of the parts and which of them is there at
+ * all. A stub of `request` would let the assembly drift and still pass.
+ */
+async function withFakeModel(run) {
+  const http = require('node:http');
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try { seen = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { seen = null; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '[{"單號":"A1"}]' }] } }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 }
+      }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aios-extract-raster-'));
+  await M.init(dir);
+  await M.configure('fallback', {
+    base: 'http://127.0.0.1:' + port, model: 'gemini-2.5-pro', auth: 'none'
+  });
+
+  const bound = M.beginBatch('fallback');
+  try {
+    return await run({ got: () => seen });
+  } finally {
+    M.endBatch(bound.token);
+    await new Promise((r) => server.close(r));
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+}
+
+const parts = (body) => (body && body.contents && body.contents[0] && body.contents[0].parts) || [];
+const inlineTypes = (body) => parts(body)
+  .filter((p) => p.inline_data).map((p) => p.inline_data.mime_type);
+
+test('a document with a text layer still goes as itself and nothing else', async () => {
+  /* The guard on the change below. Adding pictures for scans must not start
+     sending pictures for every document -- that would double every request and
+     flatten nothing, since these files already carry their own layout. */
+  await withFakeModel(async (h) => {
+    const out = await M.generate({ base64: 'eA==', prompt: '抓明細', columns: ['單號'] });
+    assert.deepEqual(inlineTypes(h.got()), ['application/pdf']);
+    assert.equal(parts(h.got()).length, 2, '檔案一個 part，提示詞一個');
+    assert.equal(out.sentAs.pages, 0);
+    assert.equal(out.sentAs.file, true);
+  });
+});
+
+test('a scanned document sends its drawn pages with the file, in page order', async () => {
+  await withFakeModel(async (h) => {
+    const out = await M.generate({
+      base64: 'eA==', prompt: '抓明細', columns: ['單號'],
+      images: [
+        { base64: 'aQ==', mimeType: 'image/jpeg' },
+        { base64: 'ag==', mimeType: 'image/jpeg' },
+        { base64: 'aw==', mimeType: 'image/jpeg' }
+      ]
+    });
+    assert.deepEqual(inlineTypes(h.got()),
+      ['application/pdf', 'image/jpeg', 'image/jpeg', 'image/jpeg']);
+
+    const p = parts(h.got());
+    assert.ok(p[p.length - 1].text, '提示詞排在最後：先給文件，才說要拿它做什麼');
+    assert.deepEqual(p.slice(1, 4).map((x) => x.inline_data.data), ['aQ==', 'ag==', 'aw=='],
+      '頁面的順序就是頁碼的順序');
+
+    assert.equal(out.sentAs.pages, 3);
+    assert.equal(out.sentAs.file, true);
+    assert.equal(out.sentAs.droppedFile, false);
+  });
+});
+
+test('when the file and its pages will not fit together, the file is the half that goes', async () => {
+  /* Losing nothing: for a scan the file IS those pages, at whatever size the
+     scanner chose. Dropping the drawn ones instead would leave the backend with
+     the thing it could not read in the first place. */
+  const big = (mib) => 'A'.repeat(Math.ceil(mib * 1048576 * 4 / 3));
+  await withFakeModel(async (h) => {
+    const out = await M.generate({
+      base64: big(8), prompt: '抓明細', columns: ['單號'],
+      images: [{ base64: big(7), mimeType: 'image/jpeg' }]
+    });
+    assert.deepEqual(inlineTypes(h.got()), ['image/jpeg'], '檔案沒有跟著去');
+    assert.equal(out.sentAs.file, false);
+    assert.equal(out.sentAs.droppedFile, true, '而且回報說它被拿掉了，不是默默不送');
+    assert.equal(out.sentAs.pages, 1);
+  });
+});
+
+test('pages that are too big even alone are refused in words, not truncated', async () => {
+  const big = (mib) => 'A'.repeat(Math.ceil(mib * 1048576 * 4 / 3));
+  await withFakeModel(async () => {
+    await assert.rejects(() => M.generate({
+      base64: 'eA==', prompt: '抓明細', columns: ['單號'],
+      images: [{ base64: big(15), mimeType: 'image/jpeg' }]
+    }), (e) => e.code === 'E2BIG');
+  });
+});

@@ -86,6 +86,25 @@ export async function spec(t, app) {
       AIOS.wm.closeAll({ force: true });
       await new Promise(function (r) { setTimeout(r, 250); });
 
+      /* Say that nobody is reaching for the dock, because on this machine
+         somebody might be. While a window is maximised the dock hides below the
+         command strip, and hovering the strip holds it out on purpose -- a dock
+         that vanished as you moved towards it is one nobody could click. That
+         is the HOVER behaviour; this test is about the MAXIMISE one, and with a
+         real mouse resting at the bottom of a real screen -- which is where a
+         mouse usually is -- the two were being measured at once and the answer
+         depended on where somebody had left the pointer.
+
+         So the pointer is sent away through the app's own listener, and the
+         class it sets is cleared for the measurement. Nothing moves the mouse
+         back while the suite runs, and the fold itself is still asserted below:
+         a dock that stopped folding fails here exactly as before. */
+      ['intent-form', 'dock'].forEach(function (id) {
+        var e = document.getElementById(id);
+        if (e) e.dispatchEvent(new PointerEvent('pointerleave', { bubbles: false }));
+      });
+      document.body.classList.remove('peek');
+
       function rail(id) { return document.getElementById(id); }
       function shown(id) {
         var h = rail(id);
@@ -106,8 +125,32 @@ export async function spec(t, app) {
       var before = AIOS.wm.freeRect();
 
       AIOS.wm.toggleMax(win);
-      /* Past the dock slide: measuring mid-animation measures nothing. */
-      await new Promise(function (r) { setTimeout(r, 400); });
+      /* Maximising moves the strip and the dock out from under wherever the
+         pointer is, which is itself an enter or a leave. Said again, for the
+         same reason as above. */
+      document.body.classList.remove('peek');
+      /* Wait for the dock to have ARRIVED, not for a number of milliseconds and
+         not for it to stop changing -- "has not started moving yet" and "has
+         finished moving" read exactly alike, and a fixed wait measures the speed
+         of the machine. Giving up after three seconds leaves the assertion below
+         to report where the dock actually is, which is the useful failure. */
+      await (async function arrive(el) {
+        /* Bounded in wall time, never in iterations. A window that is not on top
+           -- another window over it, or a screen that has gone to sleep during a
+           long suite -- has its timers throttled to about one a minute, and
+           eighty of those is an hour. Counting iterations turned an environment
+           that used to merely slow this test down into one that timed the whole
+           suite out. */
+        var until = Date.now() + 3000;
+        do {
+          if (Math.round(el.getBoundingClientRect().top) >= window.innerHeight - 2) return;
+          // Held for the whole measurement, not just its first frame: the dock
+          // slides out from under the pointer, and passing beneath it is an
+          // enter.
+          document.body.classList.remove('peek');
+          await new Promise(function (r) { setTimeout(r, 50); });
+        } while (Date.now() < until);
+      })(document.getElementById('dock'));
 
       function box(e) {
         var x = e.getBoundingClientRect();
@@ -126,14 +169,30 @@ export async function spec(t, app) {
         rails: { left: shown('hud-left'), right: shown('hud-right') },
         dockOff: dock.top >= window.innerHeight - 2,
         barFullWidth: Math.abs(bar.w - desk.w) <= 2,
-        barAtBottom: Math.abs(bar.bottom - window.innerHeight) <= 2
+        barAtBottom: Math.abs(bar.bottom - window.innerHeight) <= 2,
+        /* Reported so a failure caused by a window nobody is drawing reads as
+           one. A hidden document does not composite, so an animation measured
+           in it never arrives -- that is the environment, not the fold. */
+        visible: document.visibilityState
       };
 
       /* Opening a rail while maximised is a decision: the window gives that
-         width back rather than sitting on top of what somebody asked to see. */
+         width back rather than sitting on top of what somebody asked to see.
+
+         Waited for, not timed. The rail slides and the window resizes with it,
+         so a fixed wait measures how fast this machine is: a two-pixel overlap
+         here was a window still on its way, reported as a window sitting on top
+         of the rail. The loop gives up after three seconds and lets the
+         assertion below report where things actually are. */
       press('hud-left');
-      await new Promise(function (r) { setTimeout(r, 150); });
-      var withRail = { win: box(win.el), rail: box(rail('hud-left')) };
+      var railEl = rail('hud-left');
+      var railUntil = Date.now() + 3000;
+      do {
+        await new Promise(function (r) { setTimeout(r, 50); });
+        if (Math.round(win.el.getBoundingClientRect().left) >=
+            Math.round(railEl.getBoundingClientRect().right)) break;
+      } while (Date.now() < railUntil);
+      var withRail = { win: box(win.el), rail: box(railEl) };
 
       AIOS.wm.toggleMax(win);
       await new Promise(function (r) { setTimeout(r, 150); });
@@ -154,7 +213,8 @@ export async function spec(t, app) {
     assert.equal(m.body, true, '最大化時桌面要進入收起家具的狀態');
     assert.equal(m.chipsShown, false, '建議詞要收起來，那一排就是被討回來的空間');
     assert.deepEqual(m.rails, { left: false, right: false }, 'HUD 欄也要跟著收起來');
-    assert.equal(m.dockOff, true, 'dock 要退到畫面外，需要時再伸手叫它出來：' + JSON.stringify(m.dock));
+    assert.equal(m.dockOff, true, 'dock 要退到畫面外，需要時再伸手叫它出來：' +
+      JSON.stringify(m.dock) + '（視窗當時 ' + m.visible + '）');
     assert.equal(m.barFullWidth, true, '意圖列變成整條指令列：' + JSON.stringify(m.bar));
     assert.equal(m.barAtBottom, true, '而且貼齊底邊，中間不留縫：' + JSON.stringify(m.bar));
 

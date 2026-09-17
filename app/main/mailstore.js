@@ -385,7 +385,11 @@ function list({ folder = null, includeDeleted = false, limit = 200, search = '' 
     if (!v) continue;
     if (!includeDeleted && v.deleted) continue;
     if (folder && !inFolder(v, folder)) continue;
-    if (q && !(v.subject + ' ' + v.from + ' ' + v.fromName).toLowerCase().includes(q)) continue;
+    /* Recipients count as part of what a row says about itself: 「那封寄給
+       採購的信」 is as common a way to look for a message as its subject,
+       and a filter that only read the sender could not answer it. */
+    if (q && !(v.subject + ' ' + v.from + ' ' + v.fromName + ' ' + v.to + ' ' + v.cc)
+      .toLowerCase().includes(q)) continue;
     out.push(v);
   }
   out.sort((a, b) => (b.date || 0) - (a.date || 0));
@@ -451,10 +455,13 @@ function snippetOf(text, needle, span) {
 /**
  * Find messages.
  *
- * `text` is looked for in the subject, the sender, and -- unless `inBody` is
- * false -- the body; a body hit comes back with a snippet so a list can say
- * why the message is there. `from` and `to` take an address, a domain or a
- * name (see partyMatches). `since` and `until` are epoch milliseconds.
+ * `text` is looked for in the subject, the sender, the recipients (To and Cc)
+ * and -- unless `inBody` is false -- the body; a body hit comes back with a
+ * snippet so a list can say why the message is there. `from` and `to` take an
+ * address, a domain or a name (see partyMatches); `to` is matched against To
+ * and Cc together, because 「這封有寄給我」 does not distinguish the two and a
+ * person copied on a message was still sent it. `since` and `until` are epoch
+ * milliseconds.
  *
  * Bodies are read from disk through a bounded cache. This is a linear scan and
  * it is meant to be: a mirror holds thousands of messages, not millions, and
@@ -495,6 +502,11 @@ async function search(opts = {}) {
     scanned++;
     if (norm(v.subject).includes(q)) { hits.push({ ...v, where: 'subject', snippet: '' }); }
     else if (norm(v.from + ' ' + v.fromName).includes(q)) { hits.push({ ...v, where: 'from', snippet: '' }); }
+    /* To and Cc, before the body. A person typing an address into the box means
+       「這個人相關的信」, and on a message they were copied on the address is in
+       the header and not in the text -- so a search that skipped the headers
+       found nothing and said, wrongly, that there was no such message. */
+    else if (norm(v.to + ' ' + v.cc).includes(q)) { hits.push({ ...v, where: 'to', snippet: '' }); }
     else if (inBody && v.hasBody) {
       // eslint-disable-next-line no-await-in-loop
       const b = await body(v.messageId);

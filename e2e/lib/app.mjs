@@ -73,9 +73,29 @@ export async function launch({ exe = null, dataDir = null, port = null,
      depending on what had been done to the machine by hand. Tests that depend
      on history are the thing this suite exists to catch. */
   const profileArgs = profile ? [`--user-data-dir=${profile}`] : [];
+
+  /* Do not let Chromium decide nobody is looking.
+     ---------------------------------------------------------------------
+     This suite drives a real window on a real desktop, where a terminal or an
+     editor is usually on top of it. Chromium notices that and acts on it: it
+     marks the document hidden, stops compositing it, and throttles its timers
+     towards one a minute. All three are correct for a browser and wrong for a
+     test harness, and each one produced a failure that read as a product bug --
+     a browser tab reporting a 0x0 viewport with its paragraphs laid out
+     correctly behind it (the shell sees document.hidden and detaches the native
+     view on purpose, see apps/browser.js), and a three-second wait that took a
+     quarter of an hour and timed the whole suite out.
+     Switches, not a product setting: the application keeps its real behaviour,
+     and only the copy this file starts is told that something is always
+     looking at it. */
+  const awake = [
+    '--disable-features=CalculateNativeWinOcclusion',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding'
+  ];
   const argv = exe
-    ? ['--windowed', `--remote-debugging-port=${port}`, ...profileArgs, ...args]
-    : ['.', '--windowed', `--remote-debugging-port=${port}`, ...profileArgs, ...args];
+    ? ['--windowed', `--remote-debugging-port=${port}`, ...awake, ...profileArgs, ...args]
+    : ['.', '--windowed', `--remote-debugging-port=${port}`, ...awake, ...profileArgs, ...args];
 
   const child = spawn(bin, argv, { cwd: ROOT, env, stdio: 'ignore', detached: false });
   let exited = null;
@@ -89,6 +109,19 @@ export async function launch({ exe = null, dataDir = null, port = null,
   }, { timeout, what: 'renderer 視窗出現' });
 
   const cdp = await connect(page.webSocketDebuggerUrl);
+
+  /* Raise it. This suite drives a real window on a real desktop, and Chromium
+     treats one it considers occluded as one nobody is looking at: it stops
+     rendering that document and throttles its timers towards one a minute. Both
+     show up as specs failing for reasons that have nothing to do with the code
+     -- a browser tab reporting `visibility: "hidden"` and a 0x0 viewport with
+     the paragraph laid out correctly behind it, or a three-second wait taking
+     fifteen minutes and timing the whole suite out. A window launched from a
+     terminal opens behind that terminal often enough to matter.
+
+     Best effort: a target that will not come forward is not a reason to refuse
+     to run, and the specs that care say so in their own failure messages. */
+  await cdp.send('Page.bringToFront').catch(() => {});
 
   await until(() => evaluate(cdp, 'typeof (window.AIOS && window.AIOS.apps) === "object"'),
     { timeout, what: 'AIOS 載入' });

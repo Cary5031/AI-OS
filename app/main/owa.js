@@ -409,6 +409,34 @@ function manyAddresses(list) {
   return arr.map((b) => oneAddress(b).text).filter(Boolean).join(', ');
 }
 
+/* How much of a recipient list is kept on a row. A To header has no length
+   limit and a distribution list can run to hundreds of names; two thousand
+   characters is roughly forty people, which is already past the point where
+   anybody reads the list rather than searches it. */
+const MAX_PARTY_CHARS = 2000;
+
+/**
+ * A recipient list, capped between recipients rather than through one.
+ *
+ * `clean(..., 600)` used to do this, and its cut landed wherever 600 fell:
+ * 「王小明 <ming@ab」 is not an address, matches no search, and looks like a
+ * real one on screen. Cutting whole recipients and saying how many were left
+ * out is the version a reader can trust -- an elided list says so.
+ */
+function manyParties(list) {
+  const all = (Array.isArray(list) ? list : (list ? [list] : []))
+    .map((b) => clean(oneAddress(b).text, 200)).filter(Boolean);
+  const kept = [];
+  let len = 0;
+  for (const one of all) {
+    if (kept.length && len + one.length + 2 > MAX_PARTY_CHARS) break;
+    kept.push(one);
+    len += one.length + 2;
+  }
+  if (kept.length < all.length) kept.push(`（另有 ${all.length - kept.length} 人未列出）`);
+  return kept.join(', ');
+}
+
 function timeOf(v) {
   if (!v) return 0;
   const t = Date.parse(String(v));
@@ -540,8 +568,8 @@ function normaliseItem(raw, opts = {}) {
     folder,
     from: clean(from.text, 200),
     fromName: clean(from.name, 120),
-    to: clean(manyAddresses(pick(raw, ['ToRecipients', 'toRecipients'])), 600),
-    cc: clean(manyAddresses(pick(raw, ['CcRecipients', 'ccRecipients'])), 600),
+    to: manyParties(pick(raw, ['ToRecipients', 'toRecipients'])),
+    cc: manyParties(pick(raw, ['CcRecipients', 'ccRecipients'])),
     subject: clean(subject, 200) || '(無主旨)',
     date,
     seen: read === undefined ? false : !!(read === true || read === 'true'),
@@ -2274,6 +2302,6 @@ module.exports = {
   walkItems, lastPage, attachmentsOf, attachmentContentOf, bodyTextOf, rawHtmlOf, htmlToText,
   syncPlan, adoptPage, NO_ANSWER,
   needsLogin, classify, atLoginHost, findItemBody, getItemBody, getAttachmentBody, deepLink, sanitiseBase,
-  pick, extendedValue, oneAddress, manyAddresses,
+  pick, extendedValue, oneAddress, manyAddresses, manyParties,
   PARTITION, DEFAULT_BASE, FIRST_DAYS, OVERLAP_MS, PAGE, MAX_PER_SYNC, LIST_PROPERTIES
 };

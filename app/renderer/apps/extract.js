@@ -586,7 +586,7 @@
           docs.push({
             path: vpath, name: name,
             bytes: (entry && entry.bytes) || 0,
-            status: 'queued', rows: 0, error: '', vendor: '', tokens: 0
+            status: 'queued', rows: 0, error: '', vendor: '', tokens: 0, pages: 0, shrunk: false
           });
           added++;
         });
@@ -1028,6 +1028,13 @@
             rows.forEach(function (x, n) { x[X.SOURCE_COLUMNS[2]] = String(n + 1); });
             doc.rows = norm.rows.length;
             doc.tokens = (r.data.usage && r.data.usage.total) || 0;
+            var shot = r.data.rastered;
+            doc.pages = (shot && shot.pages) || 0;
+            doc.shrunk = !!(shot && shot.shrunk);
+            if (shot && shot.error) {
+              doc.error = '這是掃描檔，但頁面畫不出來（' + shot.error + '）：' +
+                '送出去的只有檔案本身，抓不到東西是正常的';
+            }
             doc.status = norm.rows.length ? 'done' : 'empty';
             if (norm.dropped.length) doc.error = '多給了設定裡沒有的欄位：' + norm.dropped.join('、');
             if (r.data.truncated) doc.error = '結果被截斷了，可能不完整';
@@ -1401,6 +1408,13 @@
           if (d.status === 'running') meta.push('解析中…');
           if (d.status === 'queued') meta.push('待解析');
           if (d.tokens) meta.push(d.tokens + ' tokens');
+          /* Said in the list rather than only in a toast that has gone by the
+             time somebody looks at a wrong figure: a row read off a picture of
+             a page was read differently from one read off a text layer. */
+          if (d.pages) {
+            meta.push('掃描檔，送了 ' + d.pages + ' 頁的頁面圖' +
+              (d.shrunk ? '（為了塞進一次請求有縮小過）' : ''));
+          }
           if (d.filed) meta.push(d.filed === 'finished' ? '已歸檔' : '已歸到待確認');
           if (meta.length) li.appendChild(el('div', 'ext-doc-meta micro', meta.join('　')));
           if (d.error) li.appendChild(el('div', 'ext-doc-err micro', d.error));

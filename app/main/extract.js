@@ -51,6 +51,18 @@
    destroys the association between a part number and the quantity printed
    beside it. Tried against real documents, measured, worse.
 
+   AND WHAT HAPPENS WHEN THERE IS NO TEXT AT ALL
+
+   A scan has no text layer, so the argument above has nothing to protect: there
+   is no layout to flatten because there is nothing to read. Those documents get
+   their pages DRAWN -- pdf.rasterize, an offscreen window on the viewer's own
+   origin -- and the pictures travel with the file rather than instead of it.
+   With it, because the file is still the thing the backend was built to take,
+   and a page that failed to draw then costs nothing; instead of it only when
+   both together will not fit one request, which for a scan loses nothing since
+   the file's pixels and the drawn pixels are the same page. Which of the two
+   happened comes back in `sentAs`, and the window says so.
+
    CONFIGURED THE WAY A CUSTOM MODEL IS CONFIGURED
 
    Each backend takes a base address, an auth kind, an API key, and a list of
@@ -792,11 +804,28 @@ async function generate(job = {}) {
   }
 
   const data = String(job.base64 || '');
-  if (!data) throw Object.assign(new Error('沒有文件內容可以送出'), { code: 'EINVAL' });
+  const shots = Array.isArray(job.images) ? job.images.filter((im) => im && im.base64) : [];
+  if (!data && !shots.length) throw Object.assign(new Error('沒有文件內容可以送出'), { code: 'EINVAL' });
+
   const bytes = Math.floor(data.length * 3 / 4);
-  if (bytes > MAX_INLINE) {
+  const shotBytes = shots.reduce((n, im) => n + Math.floor(String(im.base64).length * 3 / 4), 0);
+
+  /* A document that is pictures arrives as the file AND as its pages drawn out
+     (see the note above this function). Both together can be more than one
+     request holds, and then the file is the half to drop: for a scan it carries
+     the same pixels the drawn pages do, only at whatever size the scanner chose.
+     Dropped, never silently -- `sentAs` goes back to the window, which says so. */
+  let sendFile = !!data;
+  if (sendFile && shots.length && bytes + shotBytes > MAX_INLINE) sendFile = false;
+
+  const total = (sendFile ? bytes : 0) + shotBytes;
+  if (total > MAX_INLINE) {
+    /* Name the half that is actually too big. "This document is 15 MiB" is a
+       confusing thing to read about a 2 MiB file whose drawn pages are the
+       weight, and it points at the wrong fix. */
+    const what = sendFile ? '' : '畫出來的頁面';
     throw Object.assign(new Error(
-      `「${job.filename || '這份文件'}」有 ${(bytes / 1048576).toFixed(1)} MiB，` +
+      `「${job.filename || '這份文件'}」${what}有 ${(total / 1048576).toFixed(1)} MiB，` +
       `超過單次直送的 ${Math.floor(MAX_INLINE / 1048576)} MiB 上限。請先用 PDF 工具拆頁再送。`
     ), { code: 'E2BIG' });
   }
@@ -811,7 +840,15 @@ async function generate(job = {}) {
     contents: [{
       role: 'user',
       parts: [
-        { inline_data: { mime_type: String(job.mimeType || 'application/pdf'), data: data } },
+        ...(sendFile
+          ? [{ inline_data: { mime_type: String(job.mimeType || 'application/pdf'), data: data } }]
+          : []),
+        /* After the file and before the prompt: the pages are the document, and
+           the instruction is what to do with it. A model handed the instruction
+           first and twenty pictures afterwards answers about the last one. */
+        ...shots.map((im) => ({
+          inline_data: { mime_type: String(im.mimeType || 'image/jpeg'), data: String(im.base64) }
+        })),
         { text: prompt }
       ]
     }],
@@ -835,7 +872,18 @@ async function generate(job = {}) {
     what: b.label + '（' + b.model + '）'
   });
 
-  return Object.assign(readCandidate(out.json), { model: b.model });
+  return Object.assign(readCandidate(out.json), {
+    model: b.model,
+    sentAs: {
+      file: sendFile,
+      pages: shots.length,
+      /* Told, not implied. A row that came out of a picture of a page was read
+         differently from one that came out of a text layer, and somebody
+         checking a wrong part number deserves to know which. */
+      droppedFile: !!data && !sendFile,
+      bytes: total
+    }
+  });
 }
 
 /**

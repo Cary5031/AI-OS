@@ -2720,6 +2720,13 @@ select optgroup {
   font-size: 12px; color: var(--fg-dim); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 收件者與副本。兩行為止：一封發給二十個人的信如果整串攤開，
+   下一封就被推出畫面了；完整的標頭在 title，也在開信畫面。 */
+.ml-rcpt {
+  font-size: 10px; line-height: 1.4; color: var(--fg-faint); margin-top: 2px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; word-break: break-word;
+}
 .ml-read {
   overflow-y: auto; padding: 14px 16px;
   scrollbar-width: thin; scrollbar-color: var(--hair-2) transparent;
@@ -2728,6 +2735,9 @@ select optgroup {
 .ml-dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0 0 12px; }
 .ml-dl dt { font-family: var(--mono); font-size: 9.5px; color: var(--fg-faint); padding-top: 2px; }
 .ml-dl dd { margin: 0; font-size: 12px; color: var(--fg-dim); word-break: break-word; }
+/* 開信畫面不截斷：一個收件者一行，有幾個人就有幾行。 */
+.ml-dl dd.ml-parties { display: flex; flex-direction: column; gap: 1px; }
+.ml-party { line-height: 1.5; }
 .ml-acts { display: flex; gap: 6px; margin-bottom: 12px; }
 .ml-attach { margin-top: 12px; }
 .ml-attach-row { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); padding: 3px 0; }

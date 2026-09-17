@@ -197,7 +197,7 @@ test('index.html loads every renderer script that exists', () => {
   };
   walk('.', '');
 
-  /* Four files are documents of their own rather than shell scripts:
+  /* Five files are documents of their own rather than shell scripts:
        consent-view.js  the separate consent window
        askbox-view.js   the confirmation layer the main process draws over the
                         window (main/askbox.js), with its own narrow bridge
@@ -205,10 +205,14 @@ test('index.html loads every renderer script that exists', () => {
                         main/pdf.js and loaded as a module by pdfview.html
        pdfmd.js         the PDF-to-Markdown converter, imported by pdfview.js
                         and served on the same scheme as /convert.js
-     Loading any of them in the shell would be a bug: the two pdf files are ES
+       pdfraster.js     the page rasteriser, loaded by main/pdf.js into an
+                        offscreen window on that same scheme -- it is what a
+                        scanned document is read through
+     Loading any of them in the shell would be a bug: the three pdf files are ES
      modules that import pdf.js, and they run in a different origin on purpose;
      the two dialog scripts expect a bridge the shell does not have. */
-  const ownDocument = ['consent-view.js', 'askbox-view.js', 'pdfview.js', 'pdfmd.js'];
+  const ownDocument = ['consent-view.js', 'askbox-view.js', 'pdfview.js', 'pdfmd.js',
+                       'pdfraster.js'];
   const expected = onDisk.filter((f) => !ownDocument.includes(f));
   const missing = expected.filter((f) => !loaded.includes(f));
   assert.deepEqual(missing, [], 'renderer files never loaded: ' + missing.join(', '));
@@ -230,6 +234,8 @@ test('scripts load in dependency order', () => {
   assert.ok(at('apps/registry.js') < at('apps/files.js'), 'registry before any app');
   assert.ok(at('apps/formula.js') < at('apps/sheets.js'), 'formula engine before sheets');
   assert.ok(at('apps/appshell.js') < at('apps/forge.js'), 'app runtime before the forge');
+  // apps/mail.js reads AIOS.mailparty at load, not at mount.
+  assert.ok(at('mailparty.js') < at('apps/mail.js'), 'the recipient reader before the mail window');
   assert.ok(at('shell.js') < at('boot.js'), 'shell services before boot');
   assert.equal(order[order.length - 1], 'boot.js', 'boot.js runs last');
 });

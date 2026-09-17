@@ -343,3 +343,34 @@ test('短編號跟著信走：新的信進來不會讓舊的編號失效', async
   assert.equal(store.resolve(h), '<m1@example.com>',
     '本機刪掉只是墓碑，連結還是該找得到它（列出時才會被濾掉）');
 });
+
+test('收件者跟副本也是搜尋看得到的地方', async () => {
+  /* The mirror had held To and Cc on every row since it was written, and
+     nothing ever read them: 「發給採購的那封」 and 「我被 cc 的那些」 came back
+     empty, which reads as 「沒有這封信」 rather than as 「這裡沒在找那個」.
+     Somebody copied on a message was still sent it, so `to` matches both. */
+  await freshStore();
+  store.put(msg(1, { to: '王小明 <ming@abc.com>' }));
+  store.put(msg(2, { cc: '李大華 <lee@abc.com>' }));
+  store.put(msg(3, { to: 'nobody@zzz.example' }));
+  await store.flush();
+
+  const typed = await store.search({ text: 'ming@abc.com' });
+  assert.deepEqual(typed.hits.map((h) => h.messageId), ['<m1@example.com>'],
+    '打一個位址進搜尋框就該找到寄給他的信');
+  assert.equal(typed.hits[0].where, 'to', '清單要說得出這封為什麼在裡面');
+
+  const copied = await store.search({ text: '李大華' });
+  assert.deepEqual(copied.hits.map((h) => h.messageId), ['<m2@example.com>'],
+    '只出現在副本裡的人也是收件者');
+
+  assert.equal((await store.search({ to: 'abc.com' })).hits.length, 2,
+    '網域要同時抓到收件那封跟副本那封');
+  assert.equal((await store.search({ to: '王小明' })).hits.length, 1,
+    '顯示名稱也算');
+  assert.equal((await store.search({ to: 'ming@abc.com' })).hits.length, 1,
+    '整個位址是精確比對');
+
+  assert.equal(store.list({ search: 'lee@abc.com' }).length, 1,
+    '資料夾裡的過濾也要看收件者，不然同一個字在兩個地方答案不一樣');
+});

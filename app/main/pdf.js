@@ -1464,6 +1464,15 @@ function serveView(rawUrl) {
     return { file: path.join(__dirname, '..', 'renderer', 'pdfmd.js'), type: MIME['.js'] };
   }
 
+  /* The rasteriser, which is the viewer's opposite number: same origin, same
+     policy, no screen. Loaded by rasterize() below into a window nobody sees. */
+  if (p === '/raster.html') {
+    return { file: path.join(__dirname, '..', 'renderer', 'pdfraster.html'), type: MIME['.html'] };
+  }
+  if (p === '/raster.js') {
+    return { file: path.join(__dirname, '..', 'renderer', 'pdfraster.js'), type: MIME['.js'] };
+  }
+
   // The one file this token is for. No path in the request.
   if (p === '/doc.pdf') {
     return { file: rec.real, type: MIME['.pdf'] };
@@ -1601,10 +1610,77 @@ async function toPdf(html, opts = {}) {
   }
 }
 
+/**
+ * Draw a PDF's pages and hand them back as JPEGs.
+ *
+ * For documents that are pictures. A scan has no text layer, so everything that
+ * works by reading a PDF gets nothing from it -- and the reader that can still
+ * read it is the model, which needs to be shown the page rather than told about
+ * it. Used by the document extractor; see the note above `generate` in
+ * extract.js for why the pages go WITH the file rather than instead of it.
+ *
+ * Offscreen, exactly like toPdf: a window with no screen, destroyed in a
+ * `finally`. Unlike toPdf this one has to run a script -- pdf.js is the thing
+ * doing the work -- so it gets the viewer's origin and the viewer's policy,
+ * which has no http: or https: in it. The page cannot send anything anywhere;
+ * the only way a byte leaves is the value this function reads back.
+ *
+ * The token is minted here and revoked in the `finally`, so the grant lives
+ * exactly as long as the window that needs it.
+ */
+async function rasterize({ real, vpath }, opts = {}) {
+  const { BrowserWindow } = require('electron');
+  const view = publishView({ real, vpath });
+
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      offscreen: true,
+      javascript: true,
+      images: true,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: false,
+      preload: undefined
+    }
+  });
+
+  try {
+    /* The token's own page, not the viewer's: publishView hands back a viewer
+       URL because that is what every other caller wants, and the grant is on the
+       token rather than on a document name. */
+    await win.loadURL(`${VIEW_SCHEME}://${view.token}/raster.html`);
+
+    /* Wait for the module to have run, not for a number of milliseconds: it
+       pulls in pdf.js and a worker, and how long that takes is a fact about the
+       machine rather than about this code. */
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const ready = await win.webContents.executeJavaScript('!!window.__rasterReady')
+        .catch(() => false);
+      if (ready) break;
+      if (Date.now() > deadline) throw new Error('算繪頁面的視窗沒有備妥');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    const req = JSON.stringify({ budget: Number(opts.budget) > 0 ? Number(opts.budget) : undefined });
+    const out = await win.webContents.executeJavaScript('window.__raster(' + req + ')');
+    if (!out || !out.ok) {
+      throw Object.assign(new Error((out && out.error) || '算繪頁面失敗'),
+        { code: (out && out.code) || 'ERASTER' });
+    }
+    return out.data;
+  } finally {
+    revokeView(view.token);
+    if (!win.isDestroyed()) win.destroy();
+  }
+}
+
 module.exports = {
   read, probe, tidy, parseCMap, decodeTextString, pdfDate,
   publishView, revokeView, serveView, readViewFile, VIEW_SCHEME,
-  publishPrint, toPdf,
+  publishPrint, toPdf, rasterize,
   /* For pdfedit.js. The parser and the emitter are one pair and belong to one
      module; what is built out of them does not. */
   Doc, isDict, isRef, contentTokens,

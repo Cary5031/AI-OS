@@ -655,3 +655,30 @@ test('回應的大小上限要容得下鏡像願意保存的最大附件', () =>
   assert.ok(cap > store.MAX_ONE_ATTACHMENT * 4 / 3,
     '上限 ' + cap + ' 放不下 ' + store.MAX_ONE_ATTACHMENT + ' 位元組的附件（base64 會脹三分之一）');
 });
+
+test('收件者很多的一封信，切在人跟人中間，而且說有幾個人沒列出來', () => {
+  /* The old cap was `clean(..., 600)`, whose cut landed wherever 600 characters
+     fell: 「王小明 <ming@ab」 is not an address, matches no search, and looks
+     like a real one on screen. A distribution list is exactly where 「這封還寄
+     給了誰」 gets asked, so the list is cut between recipients and says how many
+     it left out. */
+  const crowd = [];
+  for (let i = 0; i < 200; i++) {
+    crowd.push({ Mailbox: { Name: '同事' + i, EmailAddress: 'person' + i + '@company.com' } });
+  }
+  const row = owa.normaliseItem(item({ ToRecipients: crowd }), { folder: 'INBOX' });
+
+  assert.ok(row.to.length <= 2100, '一個標頭不該無限長：' + row.to.length);
+  assert.match(row.to, /（另有 \d+ 人未列出）$/, '沒列出來的人數要講');
+  for (const one of row.to.split(', ')) {
+    if (one.startsWith('（')) continue;
+    assert.match(one, /<[^>]+@[^>]+>$/, '每個留下來的收件者都還是完整的：' + one);
+  }
+
+  const few = owa.normaliseItem(item({
+    ToRecipients: [{ Mailbox: { Name: '王小明', EmailAddress: 'ming@abc.com' } }],
+    CcRecipients: [{ Mailbox: { Name: '李大華', EmailAddress: 'lee@abc.com' } }]
+  }), {});
+  assert.equal(few.to, '王小明 <ming@abc.com>', '人不多就原封不動');
+  assert.equal(few.cc, '李大華 <lee@abc.com>', '副本也一樣');
+});

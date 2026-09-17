@@ -322,7 +322,14 @@ export async function spec(t, app) {
        -- with the paragraph sitting 97px down a 482px viewport the whole time.
        Layout is not suspended with rendering, which is why measuring works and
        waiting does not. See onScreenNow in main/translate-agent.js. */
-    const dom = await inPage(`
+    /* Polled up to a bound, not measured once after a fixed wait. The page has
+       to reload, the view has to come back, the observer has to fire and a
+       round trip to the model has to land -- and 2500ms was enough for all of
+       that only on a machine with nothing else happening. Under load this read
+       an empty page and reported it as a translator that had not translated.
+       The last reading is kept either way, so a real failure still says what it
+       saw. */
+    const look = `
       var p1 = document.getElementById('p1');
       var r1 = p1 ? p1.getBoundingClientRect() : null;
       return {
@@ -335,7 +342,13 @@ export async function spec(t, app) {
           spans: document.querySelectorAll('.aios-tr-line').length
         }
       };
-    `);
+    `;
+    let dom = await inPage(look);
+    const by = Date.now() + 20000;
+    while (!dom.near && Date.now() < by) {
+      await sleep(300);
+      dom = await inPage(look);
+    }
     const why = ' — status=' + JSON.stringify(r) + ' page=' + JSON.stringify(dom.why);
     assert.equal(dom.near, true, '看得到的段落要翻' + why);
     assert.equal(dom.far, false, '三千像素外的段落還不該翻' + why);

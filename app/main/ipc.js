@@ -380,20 +380,67 @@ function register(getWindow) {
      cross the bridge twice to get somewhere the main process could have read it
      from directly, and the window would be holding the document for no reason. */
   ipcMain.handle('extract:send', guarded('extract.send', async (args = {}) => {
+    const r = await sandbox.safe(args.path, { kind: 'file', mustExist: true });
     const file = await sandbox.readBytes(args.path);
     /* The document is untrusted content, and the rows coming back are its words
        rearranged. Armed here, in the process that enforces it, exactly as
        fs:readBytes does -- routing a file through a model does not launder it. */
     if (file.untrusted) gate.addTaint(file.vpath, file.vpath);
+
+    /* A PDF with no text layer is a picture, and a picture read as a PDF gives
+       nothing back. Drawing its pages out is done HERE rather than in the
+       window, for the same reason the bytes are read here: the renderer names a
+       sandbox path and never handles the document.
+
+       Only for a PDF, and only when it really has no text anywhere. A file that
+       has a text layer already carries the association between a part number and
+       the quantity printed beside it, which is the thing worth protecting -- see
+       "WHY THE PDF GOES WHOLE" in extract.js. Pictures are added for the file
+       that has none of that, and the file still goes with them. */
+    let images = [];
+    let rastered = null;
+    const looksPdf = String(args.mimeType || 'application/pdf').toLowerCase() === 'application/pdf';
+    if (looksPdf) {
+      try {
+        const doc = pdf.read(Buffer.from(file.base64, 'base64'));
+        if (doc.ok && doc.textless && (doc.emptyReasons || []).includes('image')) {
+          /* The pages get the room, not the leftovers. Budgeting them against
+             what the file left over is how a 13 MiB scan ends up drawn at 900px
+             to make space for the very bytes those pages already are -- the file
+             and the drawing are the same picture. So: keep both when there is
+             comfortably enough for both, and otherwise give the pages the whole
+             request and let generate() drop the file, which for a scan costs
+             nothing. The slack is the prompt and the schema, which travel in the
+             same body. */
+          const slack = 256 * 1024;
+          const alongside = extract.MAX_INLINE - file.bytes - slack;
+          const budget = alongside >= 4 * 1024 * 1024
+            ? alongside
+            : extract.MAX_INLINE - slack;
+          const shot = await pdf.rasterize({ real: r.real, vpath: r.vpath }, { budget });
+          images = shot.pages || [];
+          rastered = { pages: images.length, bytes: shot.bytes, shrunk: !!shot.shrunk };
+        }
+      } catch (e) {
+        /* A document that could not be drawn is still a document worth sending:
+           the backends read PDFs too, and this is the path that makes a scan
+           work rather than the path that makes anything work. The window is told
+           so it can say the pages did not come out, instead of silently getting
+           the empty rows a scan gives on its own. */
+        rastered = { pages: 0, error: e.message || String(e) };
+      }
+    }
+
     const out = await extract.generate({
       base64: file.base64,
+      images: images,
       filename: String(file.vpath || '').split('/').pop(),
       mimeType: args.mimeType,
       prompt: args.prompt,
       columns: args.columns,
       temperature: args.temperature
     });
-    return Object.assign(out, { path: file.vpath, untrusted: !!file.untrusted });
+    return Object.assign(out, { path: file.vpath, untrusted: !!file.untrusted, rastered });
   }, (args) => { sandbox.resolve(args.path); }, '把一份沙箱文件送到備援的萃取模型'));
 
   /* Asking the studio something. Listing the categories, the vendors, a
@@ -978,11 +1025,12 @@ function register(getWindow) {
        search snippet or in full. Both arm the gate. */
     const bodies = out.hits.filter((h) => h.where === 'body' || h.text);
     if (bodies.length) {
-      gate.addTaint('mail:search:' + String(opts.text || opts.from || '').slice(0, 40),
-        `信件搜尋「${String(opts.text || opts.from || '').slice(0, 40)}」的內文（${bodies.length} 封）`);
+      const asked = String(opts.text || opts.from || opts.to || '').slice(0, 40);
+      gate.addTaint('mail:search:' + asked,
+        `信件搜尋「${asked}」的內文（${bodies.length} 封）`);
     }
     return out;
-  }, null, '在本機已同步的信裡搜尋主旨、寄件人與內文'));
+  }, null, '在本機已同步的信裡搜尋主旨、寄件人、收件者與內文'));
 
   /* Put an attachment into the sandbox, as a file that remembers it came from
      mail. The bytes were kept by the mirror when the message was read; this

@@ -154,7 +154,18 @@ export async function spec(t, app) {
       var SAY = '這禮拜有人問我問題、還在等我回覆的信挑出來，摘要直接寫對方在等什麼。';
       var before = (await window.aios.mailtodo.state()).data.rules.length;
       var add = qa('.mt-add')[0];
-      if (add) { add.click(); await tick(); }
+      /* Wait for the field, not for a tick. When the previous test leaves a rule
+         behind, the first screen is the list rather than the form, so this path
+         presses 「新增」 and then had one 60ms tick to hope the form had been
+         drawn -- and when it had not, the next line set .value on null. Bounded
+         in wall time because a window that is not on top has its timers
+         throttled, and counting ticks then counts minutes. */
+      if (add) {
+        add.click();
+        var formBy = Date.now() + 5000;
+        while (!q('.mt-say') && Date.now() < formBy) await tick();
+      }
+      if (!q('.mt-say')) throw new Error('按了「新增」之後，輸入框沒有出現');
       q('.mt-say').value = SAY;
       qa('.mt-form-go .fbtn').filter(function (b) { return b.textContent.indexOf('不用模型') >= 0; })[0].click();
       for (var i = 0; i < 60; i++) {

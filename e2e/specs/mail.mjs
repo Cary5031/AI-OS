@@ -174,6 +174,50 @@ export async function spec(t, app) {
     });
   });
 
+  await t.test('收件者與副本：模組上了線，前綴讀得出來，清單兩行、開信不截斷', async () => {
+    /* Three things only the real renderer can answer: that index.html loads
+       mailparty.js at all (apps/mail.js reads it at load, so a missing script
+       is a ReferenceError before the window ever mounts), and that the two
+       stylesheet rules behave in opposite directions -- the list row clamped,
+       the reading pane allowed to grow. A unit test can check neither. */
+    const r = await run(cdp, `
+      if (!AIOS.mailparty) return { error: 'index.html 沒有載入 mailparty.js' };
+      var P = AIOS.mailparty;
+
+      var row = document.createElement('div');
+      row.className = 'ml-rcpt';
+      row.style.width = '250px';
+      row.textContent = '收件：' + new Array(40).join('王小明、');
+      document.body.appendChild(row);
+      var clamped = row.scrollHeight > row.clientHeight + 1;
+      var lines = getComputedStyle(row).webkitLineClamp;
+      row.remove();
+
+      var dd = document.createElement('dd');
+      dd.className = 'ml-parties';
+      dd.style.width = '250px';
+      for (var i = 0; i < 12; i++) {
+        var one = document.createElement('div');
+        one.className = 'ml-party';
+        one.textContent = '同事' + i + ' <person' + i + '@company.com>';
+        dd.appendChild(one);
+      }
+      document.body.appendChild(dd);
+      var grew = dd.scrollHeight <= dd.clientHeight + 1 && dd.getBoundingClientRect().height > 100;
+      dd.remove();
+
+      return { out: [P.query('報價 收件:王小明'), P.split('"Chen, Cary" <c@x.com>, b@y.com').length,
+                     clamped, lines, grew] };
+    `);
+    assert.equal(r.error, undefined, r.error);
+    assert.deepEqual(r.out[0], { text: '報價', from: '', to: '王小明' },
+      '搜尋框的「收件:」前綴沒有變成條件：' + JSON.stringify(r.out[0]));
+    assert.equal(r.out[1], 2, '引號裡的逗號被當成分隔符了');
+    assert.equal(r.out[2], true, '清單那行沒有被夾住，一封發給四十個人的信會把下一封推出畫面');
+    assert.equal(r.out[3], '2', '夾在兩行，不是別的行數');
+    assert.equal(r.out[4], true, '開信畫面的收件者清單被截斷了，那一面本來就該是完整的');
+  });
+
   await t.test('筆記裡的 aios-mail: 連結會被畫成連結，而不是「不支援」', async () => {
     /* The kernel ends 「幫我記下來」 with one of these. If the viewer treated
        the scheme as unknown it would render dead text with a note saying so,
