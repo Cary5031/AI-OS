@@ -566,7 +566,13 @@ async function find(query, opts = {}) {
     let lines = [];
 
     if (wantContent && !nameHit) {
-      if (scanned >= FIND_LIMITS.files) { truncated = true; break; }
+      /* Out of reading budget -- for this file, not for the walk. Breaking
+         here abandoned every file after the four hundredth, including the
+         ones whose NAME matches, which costs no read at all. Measured on a
+         sandbox of 457 files: a search for 交付可靠度 returned nothing while
+         /notes/e2e-find/交付可靠度.md sat there with that exact name, and
+         「not found」 looks the same as 「not there」. */
+      if (scanned >= FIND_LIMITS.files) { truncated = true; continue; }
       if (f.bytes > FIND_LIMITS.fileBytes) { skippedBig++; continue; }
       scanned++;
       let text = null;

@@ -1601,7 +1601,7 @@ body.maxed.peek .dock {
   color: var(--fg-faint);
 }
 .sb-taint {
-  display: flex; align-items: flex-start; gap: 8px;
+  display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;
   margin: 9px 0 0; padding: 7px 9px;
   border-left: 2px solid var(--taint);
   border-radius: 0 5px 5px 0;
@@ -1610,6 +1610,12 @@ body.maxed.peek .dock {
   line-height: 1.5;
   color: var(--taint);
 }
+
+.sb-taint-what { flex: 1 1 auto; min-width: 0; }
+.sb-taint-count {
+  flex: 1 1 100%; opacity: .72; font-variant-numeric: tabular-nums;
+}
+.sb-taint-count:empty { display: none; }
 .sb-taint span { flex: 1; word-break: break-all; }
 .sb-taint button {
   flex: none;
@@ -2797,12 +2803,25 @@ select optgroup {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0;
 }
 
+/* The row that reaches further back into the mirror. Centred and quiet: it is
+   a way on, not a message. */
+.ml-more { display: flex; justify-content: center; padding: 10px 8px 14px; }
+
 .ml-web { display: flex; flex-direction: column; gap: 8px; }
 .ml-web-door { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .ml-sep { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 6px 0 2px; }
 .ml-web-state {
   padding: 5px 8px; border: 1px solid var(--line); border-radius: 3px;
   background: var(--bg-sunken); font-family: var(--mono); font-size: 10px;
+}
+/* What 診斷 wrote. Scrolls rather than stretching the window, wraps rather
+   than cutting a server's sentence off, and stays selectable because the
+   reason to read it is usually to send it to somebody. */
+.ml-web-report {
+  margin: 4px 0 0; padding: 6px 8px; max-height: 220px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 3px; background: var(--bg-sunken);
+  font-family: var(--mono); font-size: 10px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; user-select: text;
 }
 
 /* ###########################################################################

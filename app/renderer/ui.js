@@ -540,10 +540,65 @@
         var t = S.taint || { tainted: false, sources: [] };
         taintEl.hidden = !t.tainted;
         if (t.tainted) {
-          taintEl.querySelector('span').textContent =
-            T('ui.tainted', '已讀過不可信內容：') + t.sources.map(function (s) { return s.vpath; }).join('、');
+          var sum = AIOS.ui.taintSummary(t.sources);
+          taintEl.querySelector('.sb-taint-what').textContent =
+            T('ui.tainted', '讀過外部內容，寫檔與刪除會先問過你');
+          taintEl.querySelector('.sb-taint-count').textContent = sum.counts;
+          taintEl.title = T('ui.taintWhy',
+            '這個工作階段讀過信件、網頁或 PDF 的內容。' +
+            '為了不讓那些內容指揮這台機器，' +
+            '寫檔、刪除、連外、寄信、安裝與執行程式，' +
+            '在目標不是你自己指名的時候會先問過你。' +
+            '按「清除標記」就恢復，已經讀進來的內容不會因此消失。') +
+            (sum.recent ? '\n' + T('ui.taintRecent', '最近讀到：') + sum.recent : '');
         }
       }
+    },
+
+    /**
+     * What the taint badge says, as counts rather than as a list.
+     *
+     * It used to print every source's label joined by 、, which grew by one
+     * entry per message opened: after a morning in the mailbox the panel was a
+     * paragraph of subjects, and the one thing it never said was what any of
+     * it meant for the person reading it. Counted by kind, the line stays one
+     * line however long the session runs, and the labels move to the tooltip
+     * where they answer 「which ones?」 without being in the way.
+     */
+    taintSummary: function (sources) {
+      var list = sources || [];
+      var order = ['mail', 'search', 'web', 'file', 'app'];
+      var word = {
+        mail: [T('taint.mail', '信件'), T('taint.mailUnit', ' 封')],
+        search: [T('taint.search', '信件搜尋'), T('taint.searchUnit', ' 次')],
+        web: [T('taint.web', '網頁'), T('taint.webUnit', ' 個')],
+        file: [T('taint.file', '檔案'), T('taint.fileUnit', ' 個')],
+        app: [T('taint.app', '程式交出來的資料'), T('taint.appUnit', ' 項')]
+      };
+      var n = { mail: 0, search: 0, web: 0, file: 0, app: 0 };
+      list.forEach(function (s) { n[AIOS.ui.taintKind(s)]++; });
+      var parts = order.filter(function (k) { return n[k]; })
+        .map(function (k) { return word[k][0] + ' ' + n[k] + word[k][1]; });
+      /* Newest first, because the one that just armed it is the one being
+         asked about. Five, because a tooltip nobody can read is the problem
+         this is fixing. */
+      var recent = list.map(function (s, i) { return { s: s, i: i }; })
+        /* Ties broken by insertion order: a dozen messages opened in one
+           burst share a millisecond, and sorting on the clock alone showed
+           the oldest of them as the newest. */
+        .sort(function (a, b) { return (b.s.at || 0) - (a.s.at || 0) || b.i - a.i; })
+        .slice(0, 5).map(function (x) { return x.s.vpath; }).join('\n');
+      return { counts: parts.join('　·　'), recent: recent, total: list.length };
+    },
+
+    /** Which kind of thing a taint source is, from the key main stored it under. */
+    taintKind: function (s) {
+      var src = String((s && s.source) || '');
+      if (src.indexOf('mail:search:') === 0) return 'search';
+      if (src.indexOf('mail:') === 0) return 'mail';
+      if (/^https?:/i.test(src)) return 'web';
+      if (src.indexOf('app:') === 0) return 'app';
+      return 'file';
     },
 
     /* -------------------------------------------------------------- dock */

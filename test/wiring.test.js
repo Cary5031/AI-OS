@@ -8174,6 +8174,170 @@ test('an attachment can be saved into a directory, named by name, and the open r
   assert.match(app, /ctx\.api\.saveAttachment\(args\.attachment, args\.to\)/, 'the action passes the name through, not Number() of it');
 });
 
+test('a mailbox that answers 200 with an error inside is not an empty mailbox', () => {
+  /* Measured on a real account. From 2026-09-18 every FindItem came back as
+     HTTP 200, content-type JSON, and `ResponseClass: "Error"` with
+     `ErrorInternalServerError / "Index was outside the bounds of the array."`
+     inside the body. classify() reads the status line, the content type and
+     the login redirect and nothing else, so the answer went through as a
+     normal response; walkItems() found no items in it, an empty page is what a
+     folder with nothing new looks like, and for four days every sync wrote
+     「0 new, complete」 while the newest message on screen stayed four days
+     old. EWS puts per-operation failure in the body -- so the body has to be
+     read. */
+  const owa = read('main/owa.js');
+  assert.match(owa, /function ewsSaid\(json\)/, 'one place decides what a refusal looks like');
+  const said = funcBody(owa, 'ewsSaid');
+  assert.match(said, /ResponseClass/, 'it reads the response class');
+  assert.match(said, /ResponseCode/, 'and carries the code the server used');
+  assert.match(said, /if \(seen\.some\(/, 'a batch where something succeeded is not a failed call');
+
+  const call = funcBody(owa, 'call');
+  assert.match(call, /const said = ewsSaid\(json\);/, 'every call asks');
+  assert.ok(call.indexOf('ewsSaid(json)') < call.lastIndexOf('return json'),
+    'before the answer is handed back, not after');
+  assert.match(call, /EWS_SHAPE_ERRORS\.test\(said\.code\)/,
+    'a shape-shaped refusal re-measures the dialect instead of failing for ever');
+  assert.match(call, /again && again\.applied/,
+    'and only asks again when the measurement installed something new');
+  assert.ok(owa.includes('const EWS_SHAPE_ERRORS =') && owa.includes('ErrorInternalServerError'),
+    'the list names the codes worth re-measuring for');
+
+  /* The ladder has to see it too. Reading a refusal as 「fine, but empty」 let
+     it write the broken shape down as the answer, and then no re-measure could
+     ever climb back out. */
+  const probe = owa.slice(owa.indexOf('async function probeShapes'));
+  const attempt = probe.slice(probe.indexOf('async function attempt('), probe.indexOf('/* 1. The skeleton'));
+  assert.match(attempt, /const said = ewsSaid\(json\);/, 'the probe asks the same question');
+  assert.match(attempt, /rec\.ok = false;/, 'and a refused step is a step that did not work');
+
+  /* The fixture is the other half. It answered without a ResponseClass at all,
+     which no real server does, so the suite could not have caught any of this.
+     Kept honest here, because the next person to add a case will copy the
+     shape that is already there. */
+  const spec = fs.readFileSync(path.join(APP, '..', 'e2e', 'specs', 'owa.mjs'), 'utf8');
+  assert.match(spec, /ResponseClass: 'Success'/, 'the good answers carry one');
+  assert.match(spec, /ResponseClass: 'Error'/, 'and the case that refuses looks like a refusal');
+
+  /* And the window says so. A background check that fails quietly is how a
+     mailbox sits four days behind under a footer that reads 「最後檢查
+     10:41」. */
+  const mail = read('renderer/apps/mail.js');
+  assert.match(mail, /var lastFail = '';/, 'the window remembers what went wrong');
+  assert.match(funcBody(mail, 'footText'), /收信失敗/, 'and the footer says it instead of a timestamp');
+  const check = funcBody(mail, 'checkNow');
+  assert.match(check, /failStreak\+\+;/, 'consecutive failures are counted');
+  assert.match(check, /if \(failStreak === 2\) ctx\.toast/, 'and the second one is said out loud, once');
+
+  /* And the button those messages name. `owa:diagnose` was registered in main
+     and exposed in preload from the day the web mailbox shipped, and no
+     window ever called it -- while classify() was telling people to
+     「按「診斷」看它實際回了什麼」. A channel with no caller is a promise the
+     product does not keep. */
+  assert.match(read('main/owa.js'), /按「診斷」/, 'the error text still points at a button');
+  assert.match(mail, /A\.mail\.diagnose\(\{ shapes: 'apply' \}\)/,
+    'and the mail window has one, which measures and installs');
+  assert.match(mail, /report\.textContent = lines/, 'what it found is shown, not just toasted');
+
+  /* And the button had to be able to do something when pressed. diagnose()
+     folded its three modes -- false, true, 'apply' -- into a boolean on its
+     first line and then compared that boolean to 'apply', so the install could
+     not be reached from anywhere and every diagnosis ended in 「什麼都沒改」. */
+  const diag = funcBody(owa, 'diagnose');
+  assert.ok(diag.includes("opts.shapes !== undefined ? opts.shapes : true"),
+    'the mode is kept as a value');
+  assert.ok(diag.includes("probeShapes({ apply: want === 'apply' })"),
+    'and the install is reachable');
+
+  /* The page the mailbox cannot serve. Measured: 50 items refused every time,
+     1 item accepted in every shape -- so it was one message, not the request.
+     Split the range, step over the position that fails, carry on. */
+  assert.ok(owa.includes('const MAX_SKIPS_PER_PAGE'), 'stepping over has a budget');
+  const find = funcBody(owa, 'findPage');
+  assert.ok(find.includes('EWS_CANNOT_SERVE.test(e.ews'),
+    'only a server that crashed serving the page is walked around');
+  assert.ok(find.includes('room.skips >= MAX_SKIPS_PER_PAGE'),
+    'and past the budget it is a failure again');
+  assert.ok(find.includes('if (top && !page.items.length) throw e;'),
+    'a page that yielded nothing at all is a refusal, not a successful sync of nothing');
+  assert.ok(find.includes('offset + half'),
+    'halved by position: advancing by rows would re-read what the first half adopted');
+  const sync = funcBody(owa, 'syncFolder');
+  assert.ok(sync.includes('seen += page.span') && sync.includes('offset += page.span'),
+    'the walk advances by positions consumed, or it asks for the broken one for ever');
+  assert.ok(sync.includes('unreadable: unreadable.length'), 'and the count comes back');
+  assert.match(mail, /res\.data\.unreadable/, 'the window says how many were stepped over');
+
+  /* And the footer counts the mirror, not the page of it on screen. It said
+     「本機 200 封，最早到 8/21」 over a mirror holding 1893 messages back to
+     that date -- the count described the list's own page size and the date
+     described the whole copy, in one sentence, which reads as a mailbox that
+     has lost most of its mail. */
+  const foot = funcBody(mail, 'footText');
+  assert.ok(foot.includes('Math.max(held, messages.length)'), 'the number is what the mirror holds');
+  assert.ok(foot.includes('清單顯示最新'), 'and a capped list says so');
+  assert.match(funcBody(mail, 'loadFolder'), /held = \(cov\.ok && cov\.data && cov\.data\.messages\)/,
+    'taken from coverage, which was already being fetched for the date');
+  assert.match(funcBody(mail, 'renderList'), /loadFolder\(folder, messages\.length \+ 200\)/,
+    'and there is a way past the first page that is not search');
+
+  /* A skipped message is named, not counted. The crash is in serialising some
+     property, so the same server answers a thinner question about the same
+     position -- the id alone, then the id with a subject and a date. */
+  const desc = funcBody(owa, 'describeSkipped');
+  assert.ok(desc.includes("baseShape: 'IdOnly'"), 'it asks for the least the server can give');
+  assert.ok(desc.includes('deepLink(id)'), 'an id is a link into Outlook, where it can still be read');
+  assert.ok(desc.includes('d.sortable ? sortByReceived(d) : null'),
+    'in the order the walk counted positions in, or it would name a different message');
+  assert.ok(funcBody(owa, 'buildFindItem').includes("o.offset || 0"),
+    'which needs the offset to reach the request at all');
+  assert.match(mail, /res\.data\.unreadableItems/, 'and the window says who it was');
+});
+
+test('the taint badge says what it means for you, not who it read', () => {
+  /* It printed every source label joined by 、. One message opened is one
+     source, so a morning in the mailbox turned the sandbox panel into a
+     paragraph of other people's subject lines -- confusing, faintly alarming,
+     and never once saying what any of it meant for the person reading it. */
+  const ui = read('renderer/ui.js');
+  assert.match(ui, /taintSummary: function \(sources\)/, 'the counting lives in one place');
+  const sum = funcBody(ui, 'taintSummary');
+  assert.ok(sum.includes("n[AIOS.ui.taintKind(s)]++"), 'counted by kind');
+  assert.ok(sum.includes('slice(0, 5)'), 'and only the newest few are named, in the tooltip');
+  assert.ok(funcBody(ui, 'taintKind').includes("mail:search:"), 'a search is not a message');
+  const render = funcBody(ui, 'renderSandbox');
+  assert.ok(render.includes('.sb-taint-what') && render.includes('.sb-taint-count'),
+    'the panel has a line for the consequence and a line for the counts');
+  assert.ok(!render.includes('.map(function (s) { return s.vpath; }).join'),
+    'and no longer prints every source');
+  assert.match(read('renderer/index.html'), /class="sb-taint-what"/, 'the markup has both');
+
+  /* The same list reached two more places, and a justification nobody
+     finishes reading is one they answer without reading. */
+  assert.match(read('main/gate.js'), /all\.slice\(0, 3\)/, 'the consent sentence names three');
+  assert.match(read('renderer/surfaces.js'), /AIOS\.ui\.taintSummary/,
+    'and the capability panel counts them the same way');
+});
+
+test('running out of reading budget stops the reading, not the search', () => {
+  /* Measured on a sandbox of 457 files: fs.find('交付可靠度') returned nothing
+     while /notes/e2e-find/交付可靠度.md sat there with exactly that name. The
+     content scan has a budget; hitting it used to break the whole walk, so
+     every file after the four-hundredth was not even name-checked -- and
+     「not found」 reads the same as 「not there」. */
+  const sb = read('main/sandbox.js');
+  const find = funcBody(sb, 'find');
+  assert.ok(find.includes('if (scanned >= FIND_LIMITS.files) { truncated = true; continue; }'),
+    'the budget skips a file, it does not abandon the folder');
+  assert.ok(find.includes('if (hits.length >= FIND_LIMITS.hits) { truncated = true; break; }'),
+    'enough hits is still a reason to stop');
+  /* And the window says so, because the number of files it did not read is
+     the difference between 「not there」 and 「I stopped looking」. */
+  const files = read('renderer/apps/files.js');
+  assert.match(files, /contentShort = r\.data\.truncated/, 'the file manager keeps the number');
+  assert.match(files, /內容只讀了前/, 'and puts it under the results');
+});
+
 test('an office program opened on a path nobody has written yet starts a new file there', () => {
   /* Measured on every combo: the planner opens the app on the path it is about
      to save to. Each app toasted 「找不到」 and kept no path, so the save went

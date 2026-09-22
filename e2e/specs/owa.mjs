@@ -88,7 +88,19 @@ const MESSAGES = [
 /* The state the fake server is in. `signedIn` false makes it behave the way a
    tenant does when the session has expired: it answers the service endpoint
    with the sign-in page instead of JSON. */
-const state = { signedIn: true, changeKey: 0, calls: [], learned: 0, seenAuth: [] };
+/* `serverError` is the shape a real mailbox refused in: HTTP 200, JSON, and
+   ResponseClass: Error inside the body. See the case near the end. */
+const state = {
+  signedIn: true, changeKey: 0, calls: [], learned: 0, seenAuth: [],
+  /* Two ways a mailbox can refuse, both seen on a real tenant. `serverError`
+     refuses everything; `refuseShape` refuses one BaseShape and serves the
+     rest, which is what a service-side change looks like from here. */
+  serverError: null, refuseShape: null,
+  /* One message the server cannot serialise: any page that would contain it
+     fails, any page that does not is served normally. That is what a real
+     mailbox did for four days. */
+  poison: null
+};
 
 function itemFor(m, { withBody = false } = {}) {
   const out = {
@@ -189,7 +201,44 @@ function makeServer() {
          counted so the spec can assert the token really was harvested. */
       if (action === 'GetFolderChangeDigest') {
         state.learned = String(req.headers.authorization || '').length;
-        send({ Body: { ResponseMessages: { Items: [{}] } } });
+        send({ Body: { ResponseMessages: { Items: [{ ResponseClass: 'Success', ResponseCode: 'NoError' }] } } });
+        return;
+      }
+
+      const askedShape = ((body.Body || {}).ItemShape || {}).BaseShape || '';
+      let poisoned = false;
+      if (action === 'FindItem' && state.poison) {
+        const pg = body.Body.Paging || {};
+        const all = MESSAGES.slice().sort((a, b) => Date.parse(b.received) - Date.parse(a.received));
+        const inPage = all.slice(pg.Offset || 0, (pg.Offset || 0) + (pg.MaxEntriesReturned || 50))
+          .some((m) => m.id === state.poison);
+        /* The crash is in serialising a property, not in the message
+           existing: asked for the id, or for the id with a subject and a
+           date, the same server answers. That is what makes it possible to
+           say which message was skipped, and it is why describeSkipped asks
+           thinly rather than giving up on a number. */
+        const heavy = (((body.Body || {}).ItemShape || {}).AdditionalProperties || [])
+          .some((x) => !/Subject|DateTimeReceived/.test(x.FieldURI || ''));
+        poisoned = inPage && heavy;
+      }
+      if (action === 'FindItem' && (state.serverError || poisoned ||
+          (state.refuseShape && askedShape === state.refuseShape))) {
+        /* Exactly what Exchange Online sent this mailbox from 2026-09-18: a
+           200 with the failure inside it. Nothing about the status line or the
+           content type says anything is wrong. */
+        send({
+          Body: {
+            ResponseMessages: {
+              Items: [{
+                ResponseClass: 'Error',
+                ResponseCode: state.serverError || 'ErrorInternalServerError',
+                MessageText: 'An internal server error occurred. The operation failed., ' +
+                  'Index was outside the bounds of the array.',
+                RootFolder: null
+              }]
+            }
+          }
+        });
         return;
       }
 
@@ -203,6 +252,8 @@ function makeServer() {
           Body: {
             ResponseMessages: {
               Items: [{
+                ResponseClass: 'Success',
+                ResponseCode: 'NoError',
                 RootFolder: {
                   TotalItemsInView: sorted.length,
                   IncludesLastItemInRange: offset + page.length >= sorted.length,
@@ -219,7 +270,7 @@ function makeServer() {
         const want = String((body.Body.ItemIds || [{}])[0].Id || '');
         const m = MESSAGES.find((x) => x.id === want);
         if (!m) { send({ Body: { ResponseMessages: { Items: [] } } }); return; }
-        send({ Body: { ResponseMessages: { Items: [{ Items: [itemFor(m, { withBody: true })] }] } } });
+        send({ Body: { ResponseMessages: { Items: [{ ResponseClass: 'Success', ResponseCode: 'NoError', Items: [itemFor(m, { withBody: true })] }] } } });
         return;
       }
 
@@ -231,6 +282,8 @@ function makeServer() {
           Body: {
             ResponseMessages: {
               Items: [{
+                ResponseClass: 'Success',
+                ResponseCode: 'NoError',
                 Attachments: [{
                   FileAttachment: {
                     AttachmentId: { Id: att.id },
@@ -528,6 +581,147 @@ export async function spec(t, app) {
       assert.ok(String(r.probe.loginUrl).startsWith(base), '要把人送去登入的地方');
       assert.equal(r.still, 3, '登入過期不該讓已經同步下來的信消失');
       state.signedIn = true;
+    });
+
+    await t.test('伺服器把錯誤包在 200 裡：同步要失敗並照實說，不是回報「沒有新信」', async () => {
+    /* A real mailbox stopped here on 2026-09-18 and nobody was told for four
+       days. EWS reports per-operation failure inside the body: HTTP 200,
+       content-type JSON, and ResponseClass: Error. classify() only read the
+       status line, so the answer went through as a normal response; it
+       contained no items, an empty page is what a folder with nothing new
+       looks like, and every sync since reported 「0 new, complete」 while the
+       newest message on screen stayed four days old.
+
+       The fixture is at fault too, and that is the other half of this case:
+       it never sent a ResponseClass at all, so the suite could not have caught
+       this. It now answers the way the server does -- Success on the good
+       ones, and this on demand. */
+      /* Put back whatever happens below: a failed assertion that leaves the
+         server refusing turns every later case into a second red line about
+         something that is not broken. */
+      let r;
+      try {
+        state.serverError = 'ErrorInternalServerError';
+        r = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600);
+          var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
+          return { ok: s.ok, code: s.code, err: s.error, data: s.data, still: list.data.length };
+        `, { timeout: 120000 });
+      } finally {
+        state.serverError = null;
+      }
+      assert.equal(r.ok, false,
+        '伺服器說錯誤就是錯誤，不能當成「沒有新信」：' + JSON.stringify(r.data));
+      assert.match(String(r.err), /ErrorInternalServerError/,
+        '要把伺服器自己的話帶出來，人才知道要查什麼：' + r.err);
+      assert.equal(r.still, 3, '同步失敗不該動到已經鏡像下來的信');
+
+      // And it is not a one-way door: the server recovers, the mirror follows.
+      const back = await run(cdp, `
+        var s = await window.aios.mail.sync('INBOX', 600);
+        var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
+        return { ok: s.ok, err: s.error, n: list.data.length };
+      `, { timeout: 120000 });
+      assert.equal(back.ok, true, '伺服器好了就要能繼續：' + back.err);
+      assert.equal(back.n, 3);
+    });
+
+    await t.test('信箱突然不收某一種請求形狀：自己量一次、換一種，然後繼續收信', async () => {
+    /* The likelier half of the real failure. A tenant that took
+       `BaseShape: AllProperties` yesterday can stop taking it today -- the
+       dialect is measured once at setup and then trusted for ever, so one
+       service-side change freezes the mailbox until somebody re-measures by
+       hand. Nobody re-measures by hand; they just notice, four days later,
+       that no mail has arrived.
+
+       So a refusal that looks like a shape problem re-measures once and asks
+       again. The ladder's own first rung used to ask for AllProperties too,
+       which meant it gave up before it started -- hence the IdOnly rung in
+       probeShapes. */
+      let r;
+      try {
+        state.refuseShape = 'AllProperties';
+        state.calls.length = 0;
+        r = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600);
+          var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
+          return { ok: s.ok, err: s.error, n: list.data.length };
+        `, { timeout: 120000 });
+      } finally {
+        state.refuseShape = null;
+      }
+      assert.equal(r.ok, true,
+        '量得出來的事情就不該停在那裡：' + r.err);
+      assert.equal(r.n, 3, '換了形狀之後讀到的還是同一份信箱');
+      assert.ok(state.calls.filter((c) => c === 'FindItem').length > 3,
+        '這一關的重點是它真的去量了：' + state.calls.join(','));
+    });
+
+    await t.test('一封伺服器交不出來的信：跳過它、說出來，同一頁的其餘照收', async () => {
+    /* The real one, and the reason a mailbox stayed four days behind.
+
+       A page of 50 came back ErrorInternalServerError every time, while the
+       same request for a single item succeeded in every shape the ladder
+       could measure -- AllProperties, Default, IdOnly, named properties and
+       all. So the shape was never the problem: one message inside that page
+       is one the server cannot serialise. The sync always starts at the
+       newest page, so one such message stops the entire mailbox, and every
+       message that arrives after it stays invisible.
+
+       No message is added to the fixture here on purpose: `scanned` counts
+       positions walked, so 3 walked with 1 stepped over is the proof that the
+       other two were read in this very sync rather than left over from an
+       earlier one. */
+      let r;
+      try {
+        state.poison = 'AAMkOWA002';
+        r = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
+          var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
+          return { ok: s.ok, err: s.error, data: s.data, n: list.data.length };
+        `, { timeout: 120000 });
+      } finally {
+        state.poison = null;
+      }
+      assert.equal(r.ok, true, '一封交不出來不該讓整個信箱停下來：' + r.err);
+      assert.equal(r.data.unreadable, 1,
+        '而且要說出有幾封被跳過，不是静静少一封：' + JSON.stringify(r.data));
+      assert.equal(r.data.scanned, 3,
+        '跏過坡掉的那一個位置，同一頁的其餘要繼續走完：' + JSON.stringify(r.data));
+      assert.equal(r.n, 3, '跳過不是刪除：已經鏡像下來的那封還在');
+
+      /* And it says which one. A count on its own tells somebody their mail
+         is incomplete and gives them nothing to do about it. */
+      const who = (r.data.unreadableItems || [])[0] || {};
+      assert.equal(who.subject, '交期確認',
+        '要說得出是哪一封：' + JSON.stringify(r.data.unreadableItems));
+      assert.ok(who.date > 0, '連同收信時間');
+      assert.match(String(who.webLink), /\/mail\/deeplink\/read\//,
+        '以及一個在 Outlook 裡打得開它的連結：' + JSON.stringify(who));
+
+      /* And a mailbox that refuses everything is still a failure, not a
+         successful sync of nothing -- the splitting is for one bad message,
+         not for a server that has stopped answering. */
+      let all;
+      try {
+        state.serverError = 'ErrorInternalServerError';
+        all = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
+          return { ok: s.ok, err: s.error, data: s.data };
+        `, { timeout: 120000 });
+      } finally {
+        state.serverError = null;
+      }
+      assert.equal(all.ok, false, '全部拒絕還說成功，就是一開始那個 bug：' + JSON.stringify(all.data));
+
+      /* Server well again: the one that was stepped over comes in. */
+      const back = await run(cdp, `
+        var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
+        return { ok: s.ok, err: s.error, unreadable: s.data && s.data.unreadable, scanned: s.data && s.data.scanned };
+      `, { timeout: 120000 });
+      assert.equal(back.ok, true, back.err);
+      assert.equal(back.unreadable, 0, '伺服器好了就不該還有人被跳過');
+      assert.equal(back.scanned, 3, '三封都走過一遍');
     });
 
     /* ------------------------------------------------------ the scenario -- */

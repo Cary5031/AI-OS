@@ -226,6 +226,7 @@
       /* Files whose *contents* matched the search box. Filled in the background;
          see the input handler. */
       var contentHits = [];
+      var contentShort = 0;
 
       /** The row as an extension is handed it: what the row shows, nothing else. */
       function unitOf(ent) {
@@ -275,6 +276,11 @@
 
         if (!entries.length) {
           list.appendChild(el('li', 'fm-empty', filter ? '沒有符合的檔案' : '（空目錄）'));
+        }
+        if (filter && contentShort) {
+          list.appendChild(el('li', 'fm-empty',
+            '（檔名全部比過了；內容只讀了前 ' + contentShort +
+            ' 個檔案，再往後的沒看。縮小範圍或用更少見的字再試一次。）'));
         }
 
         entries.forEach(function (ent) {
@@ -506,12 +512,19 @@
              for a hundred files to be read before it shows anything reads as
              broken, and the name match is what most searches wanted anyway. */
           contentHits = [];
+          contentShort = 0;
           renderList(q);
           if (q.length < 2) return;
           var r = await A.fs.find(q, { dir: '/' });
           if (!r.ok || search.value.trim() !== q) return;
           contentHits = r.data.hits.filter(function (h) { return h.where === 'content'; });
-          if (contentHits.length) renderList(q);
+          /* What it did not get to. Reading files has a budget, and a search
+             that quietly stopped reading reports 「沒有符合的檔案」 about a
+             file that is sitting there -- so the budget is said out loud
+             rather than left to be discovered. Names are always compared to
+             the end; this is only about what is inside them. */
+          contentShort = r.data.truncated ? (r.data.scanned || 0) : 0;
+          renderList(q);
         }, 200);
       });
 

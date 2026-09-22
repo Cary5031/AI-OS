@@ -573,7 +573,15 @@ function decide(op, args) {
         reason: `使用者自己指名了 ${mine}，不是讀進來的內容要求的，維持 ${spec.cap} = ${level.toUpperCase()}`
       };
     }
-    const sources = [...taint.values()].map((t) => t.vpath).join('、');
+    /* The newest few, not all of them. One message opened is one entry, so a
+       morning in the mailbox put thirty subjects inside the sentence the user
+       has to read before answering -- and a justification nobody finishes
+       reading is one they answer without reading. */
+    const all = [...taint.values()].map((v, i) => ({ v, i }))
+      .sort((a, b) => (b.v.at || 0) - (a.v.at || 0) || b.i - a.i)
+      .map((x) => x.v);
+    const sources = all.slice(0, 3).map((t) => t.vpath).join('、') +
+      (all.length > 3 ? `等 ${all.length} 項` : '');
     return {
       decision: 'ask',
       cap: spec.cap,

@@ -772,11 +772,16 @@
       body.appendChild(t);
 
       if (tainted) {
-        var src = (AIOS.state.taint.sources || []).map(function (s) { return s.vpath || s.source; });
-        body.appendChild(el('p', 'fence-note',
-          '這個工作階段讀過不可信內容（' + src.join('、') + '），所以 ' +
-          elevated.join(' / ') + ' 的 ALLOW 暫時降級為 ASK。' +
-          '要恢復就用桌面選單的「清除汙染標記」。'));
+        /* Counted, not listed. One message opened is one source, so this
+           paragraph used to grow by a subject line on every click. */
+        var sum = AIOS.ui.taintSummary(AIOS.state.taint.sources || []);
+        var note = el('p', 'fence-note',
+          '這個工作階段讀過外部內容（' + sum.counts + '），所以 ' +
+          elevated.join(' / ') + ' 的 ALLOW 暫時降級為 ASK：' +
+          '目標不是你自己指名的時候會先問過你。' +
+          '要恢復就按沙箱那塊的「清除標記」。');
+        if (sum.recent) note.title = '最近讀到：\n' + sum.recent;
+        body.appendChild(note);
       } else {
         body.appendChild(el('p', 'fence-note',
           '目前沒有讀過不可信內容，所以設定值就是生效值。一旦讀了，' +

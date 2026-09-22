@@ -213,6 +213,12 @@
       var watching = false;
       var lastCheck = 0;
       var checking = false;
+      /* What the last background check ran into, and how many in a row. The
+         footer shows a failed check instead of a timestamp that implies a
+         successful one -- 「最後檢查 10:41」 under a mailbox four days stale is
+         a lie the window told for four days. */
+      var lastFail = '';
+      var failStreak = 0;
       var folders = [];
       var folder = (ctx.state && ctx.state.folder) || 'INBOX';
       var messages = [];
@@ -261,13 +267,27 @@
 
       /* The parts of the footer that come from a round trip, kept so the watcher
          can move the clock without paying for them again. */
+      /* `held` is what the mirror has; `messages` is the page of it on screen.
+         The two used to be reported as one number -- 「本機 200 封，最早到
+         8/21」 under a mirror holding 1893 back to that date, which reads as a
+         mailbox that has lost most of its mail. */
       var footParts = { reach: '', last: '' };
+      var held = 0;
+      var shown = 200;
 
       function footText() {
-        return folder + '：本機 ' + messages.length + ' 封' + footParts.reach + footParts.last +
-          (watching
-            ? '　·　自動收信中' + (lastCheck ? '（最後檢查 ' + when(lastCheck) + '）' : '')
-            : '');
+        var watch = watching
+          ? '　·　自動收信中' + (lastCheck ? '（最後檢查 ' + when(lastCheck) + '）' : '')
+          : '';
+        if (lastFail) {
+          watch = '　·　收信失敗：' + lastFail +
+            (failStreak > 1 ? '（連續 ' + failStreak + ' 次）' : '');
+        }
+        var total = Math.max(held, messages.length);
+        var capped = messages.length < total
+          ? '（清單顯示最新 ' + messages.length + ' 封）'
+          : '';
+        return folder + '：本機 ' + total + ' 封' + capped + footParts.reach + footParts.last + watch;
       }
 
       var split = el('div', 'ml-split');
@@ -674,6 +694,11 @@
             (k.at ? '　上次 ' + new Date(k.at).toLocaleTimeString() + '：' + k.note : '');
         }
 
+        /* Where 「診斷」 writes. Pre-wrapped and selectable: the whole point is
+           that a person can read it and paste it to somebody else. */
+        var report = el('pre', 'ml-web-report micro');
+        report.hidden = true;
+
         var login = el('button', 'fbtn fbtn-primary', '在瀏覽器登入 Outlook');
         login.type = 'button';
         login.addEventListener('click', function () { openLogin(); });
@@ -683,6 +708,38 @@
         check.type = 'button';
         check.addEventListener('click', function () { look(); });
         box.appendChild(check);
+
+        /* The button the error messages have been telling people to press.
+           `owa:diagnose` has been registered in main and exposed in preload
+           since the web mailbox shipped, and nothing ever called it -- so
+           「按「診斷」看它實際回了什麼」 named a button that did not
+           exist. It measures the request shapes against the live mailbox and
+           installs the one that works, which is also the repair when a tenant
+           stops accepting the shape it accepted yesterday. */
+        var diag = el('button', 'fbtn', '診斷');
+        diag.type = 'button';
+        diag.title = '量一次這個信箱接得住哪種請求，並且改用量得出來的那一種';
+        diag.addEventListener('click', async function () {
+          diag.disabled = true;
+          report.textContent = '診斷中（會對信箱發出十幾個試探請求）…';
+          report.hidden = false;
+          var r = await A.mail.diagnose({ shapes: 'apply' });
+          diag.disabled = false;
+          if (!r.ok) { report.textContent = '診斷失敗：' + r.error; return; }
+          var d = r.data;
+          var lines = [d.verdict || ''];
+          var sh = d.shapes || {};
+          if (sh.error) lines.push('形狀量不了：' + sh.error);
+          (sh.steps || []).forEach(function (st) {
+            lines.push((st.ok ? '✔ ' : '✖ ') + st.label +
+              (st.fault ? '｜' + String(st.fault).slice(0, 120) : '') +
+              (st.usable !== undefined ? '｜讀到 ' + st.usable + ' 封' : ''));
+          });
+          if (sh.applied) lines.push('—— 量出來的形狀已經換上去，再按一次收信試試。');
+          else if (sh.steps) lines.push('—— 沒有任何一種形狀讀得到信，所以什麼都沒改。');
+          report.textContent = lines.filter(Boolean).join('\n');
+        });
+        box.appendChild(diag);
 
         var now = el('button', 'fbtn', '馬上續期一次');
         now.type = 'button';
@@ -708,6 +765,7 @@
             '。瀏覽器裡的登入沒有動，要一併登出請到那個分頁。', 't-warn');
         });
         box.appendChild(forget);
+        box.appendChild(report);
 
         look();
         return box;
@@ -825,6 +883,22 @@
           });
           listPane.appendChild(li);
         });
+        /* The rest of the mirror, one page at a time. Without this the only
+           way past the newest 200 was search, which is fine for 「那封報價
+           單」 and no help at all for 「往回看」 -- and the backfill keeps
+           making the gap bigger, not smaller. */
+        if (showing.kind === 'folder' && messages.length < held) {
+          var more = el('li', 'ml-more');
+          var btn = el('button', 'fbtn', '再載入 200 封（還有 ' + (held - messages.length) + ' 封）');
+          btn.type = 'button';
+          btn.addEventListener('click', async function () {
+            btn.disabled = true;
+            btn.textContent = '載入中…';
+            await loadFolder(folder, messages.length + 200);
+          });
+          more.appendChild(btn);
+          listPane.appendChild(more);
+        }
         paintContributions();
       }
 
@@ -855,7 +929,8 @@
       async function loadFolder(name, limit) {
         if (!status.configured) { accountForm(); return; }
         folder = name || folder;
-        var res = await A.mail.mirrorList({ folder: folder, limit: limit || 200 });
+        shown = limit || 200;
+        var res = await A.mail.mirrorList({ folder: folder, limit: shown });
         if (!res.ok) {
           foot.textContent = '';
           ctx.toast('讀取失敗：' + res.error, 't-err');
@@ -873,6 +948,11 @@
            in here. Saying the date is the difference between a partial answer
            and a wrong one. */
         var cov = await A.mail.coverage(folder);
+        held = (cov.ok && cov.data && cov.data.messages) || 0;
+        /* The list was drawn before this answer came back, and how much is
+           behind the page is only knowable from it. Redrawn only when there
+           is something behind the page to say. */
+        if (showing.kind === 'folder' && messages.length < held) renderList();
         var reach = cov.ok && cov.data && cov.data.oldest
           ? '，最早到 ' + new Date(cov.data.oldest).toLocaleDateString()
           : '';
@@ -959,9 +1039,22 @@
               stopWatching();
               ctx.toast('Outlook 的登入過期了，自動收信先停下來。重新登入之後會自己接回去。', 't-warn');
               accountForm();
+              return 0;
             }
+            /* Everything else: the footer says so immediately, and the second
+               one in a row is said out loud once. One failure is a blip and
+               not worth a toast; a second means the mailbox has stopped
+               updating, and the alternative -- a window that looks healthy
+               while nothing arrives -- is what let a real mailbox sit four
+               days behind without a word. */
+            failStreak++;
+            lastFail = String(res.error || res.code || '不知道為什麼').slice(0, 120);
+            if (showing.kind === 'folder') foot.textContent = footText();
+            if (failStreak === 2) ctx.toast('自動收信連續失敗：' + lastFail, 't-err');
             return 0;
           }
+          failStreak = 0;
+          lastFail = '';
           var got = res.data.fetched || 0;
           if (got) {
             /* Not while the list is showing search results: replacing what
@@ -1036,15 +1129,42 @@
             openLogin();
             return;
           }
+          /* The footer carries it too, so the window does not go back to
+             looking like a mailbox that is up to date the moment the toast
+             fades. */
+          lastFail = String(res.error || res.code || '').slice(0, 120);
           ctx.toast('同步失敗：' + res.error, 't-err');
           if (res.code === 'EAUTH') accountForm();
           return;
         }
+        failStreak = 0;
+        lastFail = '';
         if (res.data.reset) {
           ctx.toast('伺服器重新編號過信件（UIDVALIDITY 變了），已重新讀取這個資料夾', 't-warn');
         }
         /* A field the web source renamed out from under us shows up here, once,
            instead of as a column of blanks nobody can explain. */
+        /* A message the mailbox itself could not hand over. Said once, with
+           the number, because a silently shorter list is the thing nobody
+           notices until they go looking for a mail that never arrived. */
+        if (res.data.unreadable) {
+          /* Named where the server would say who it was. 「有 1 封信交不出
+             來」 tells somebody their mail is incomplete and gives them
+             nothing to do about it; a subject, a date and a link into Outlook
+             is the difference between a warning and an errand. */
+          var who = (res.data.unreadableItems || []).map(function (u) {
+            var when = u.date ? new Date(u.date).toLocaleString() + ' ' : '';
+            return when + (u.subject ? '「' + u.subject + '」' : '（連主旨都交不出來）');
+          }).join('、');
+          ctx.toast('有 ' + res.data.unreadable + ' 封信伺服器交不出來（它自己出錯），已經跳過' +
+            (who ? '：' + who : '') + '。其餘都收下來了。', 't-warn');
+          /* And a way to look at it, because the one place it can still be
+             read is the mailbox itself. */
+          var link = (res.data.unreadableItems || []).filter(function (u) { return u.webLink; })[0];
+          if (link) {
+            ctx.toast('要看那一封的話，它在 Outlook 網頁版裡開得起來：' + link.webLink, 't-info');
+          }
+        }
         if (res.data.missing && res.data.missing.length) {
           ctx.toast('這次同步有欄位讀不到：' + res.data.missing.join('、') +
             '。Outlook 的介面可能改版了。', 't-warn');

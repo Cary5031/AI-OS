@@ -147,6 +147,50 @@ export async function spec(t, app, { fresh = false } = {}) {
     assert.equal(r.cleared, false, '清除汙染之後 renderer 還以為被汙染');
   });
 
+  await t.test('汙染標記說的是「這對你代表什麼」，而不是一列越來越長的來源', async () => {
+    /* It printed every source's label joined by 、. One message opened is one
+       source, so after a morning in the mailbox the sandbox panel was a
+       paragraph of other people's subject lines -- and the one thing it never
+       said was what any of it meant for the person reading it. */
+    const r = await run(cdp, `
+      await window.aios.taint.clear();
+      var read = function () {
+        AIOS.ui.renderSandbox();
+        var el = document.getElementById('sb-taint');
+        return {
+          what: el.querySelector('.sb-taint-what').textContent,
+          counts: el.querySelector('.sb-taint-count').textContent,
+          visible: el.textContent.trim().length,
+          title: el.title
+        };
+      };
+      for (var i = 1; i <= 3; i++) {
+        await window.aios.taint.add('mail:u' + i, '信件「主旨 ' + i + '」（某人）');
+      }
+      await window.aios.taint.add('https://example.com/a', '網頁「Example」');
+      await new Promise(function (r2) { setTimeout(r2, 300); });
+      var few = read();
+      for (var j = 4; j <= 40; j++) {
+        await window.aios.taint.add('mail:u' + j, '信件「主旨 ' + j + '」（某人）');
+      }
+      await new Promise(function (r2) { setTimeout(r2, 300); });
+      var many = read();
+      await window.aios.taint.clear();
+      return { few: few, many: many };
+    `, { timeout: 30000 });
+
+    assert.match(r.few.what, /寫檔/, '第一行要說出後果，不是名詞：' + r.few.what);
+    assert.match(r.few.counts, /信件 3 封/, '第二行是數量：' + r.few.counts);
+    assert.match(r.few.counts, /網頁 1 個/, '而且分類數：' + r.few.counts);
+    assert.ok(!r.few.counts.includes('主旨 1'), '別人寫的主旨不在畫面上：' + r.few.counts);
+    assert.match(r.few.title, /主旨/, '但在提示裡查得到');
+
+    assert.match(r.many.counts, /信件 40 封/, '數量要跟著走：' + r.many.counts);
+    /* The point of the whole change: ten times the sources, the same line. */
+    assert.ok(Math.abs(r.many.visible - r.few.visible) <= 2,
+      '開了四十封信之後這塊要還是一樣長：' + r.few.visible + ' → ' + r.many.visible);
+  });
+
   await t.test('用量會累加，而且能歸零', async () => {
     /* Every call reported its own spend and nothing added them up, so on a
        metered core there was no way to answer 「今天花了多少」 short of reading
@@ -227,7 +271,14 @@ export async function spec(t, app, { fresh = false } = {}) {
       await window.aios.fs.write('/notes/e2e-find/乙.txt', '完全無關的內容');
       await AIOS.afterFsChange();
 
-      var res = await window.aios.fs.find('交付可靠度');
+      /* Scoped to the directory these three were just written to. Unscoped,
+         what comes back depends on how many other readable files the sandbox
+         happens to hold: content scanning has a budget of FIND_LIMITS.files,
+         and on a machine that has been used for a while these three sit past
+         it -- a real limit, reported by the truncated flag, but not what
+         is about. The unscoped search below covers what must hold whatever
+         the budget does. */
+      var res = await window.aios.fs.find('交付可靠度', { dir: '/notes/e2e-find' });
       if (!res.ok) return { error: res.error };
       var hits = res.data.hits.filter(function (h) { return /e2e-find/.test(h.vpath); });
       var out = {
@@ -241,6 +292,17 @@ export async function spec(t, app, { fresh = false } = {}) {
       var scoped = await window.aios.fs.find('交付可靠度', { dir: '/inbox' });
       out.scopedAway = scoped.ok ? scoped.data.hits.filter(function (h) { return /e2e-find/.test(h.vpath); }).length : -1;
 
+      /* A name match costs no read, so running out of reading budget must not
+         stop it. It used to break the whole walk at the four-hundredth file
+         scanned, so on a sandbox of any size a search for a file whose name
+         is exactly the query came back empty -- and 「not found」 reads the
+         same as 「not there」. */
+      var wide = await window.aios.fs.find('交付可靠度');
+      out.wideName = wide.ok
+        ? wide.data.hits.some(function (h) { return h.vpath === '/notes/e2e-find/交付可靠度.md'; })
+        : false;
+      out.wideTruncated = wide.ok ? !!wide.data.truncated : null;
+
       out.exec = typeof AIOS.exec['fs.find'] === 'function';
       var ran = await AIOS.exec['fs.find']({ query: '交付可靠度' });
       out.note = ran && ran.note;
@@ -253,6 +315,8 @@ export async function spec(t, app, { fresh = false } = {}) {
     assert.deepEqual(r.paths, ['/notes/e2e-find/交付可靠度.md', '/notes/e2e-find/甲.txt'],
       '找到的不是預期的那兩個：' + JSON.stringify(r.paths));
     assert.equal(r.byContent.length, 1, '應該只有一個是靠內容命中');
+    assert.equal(r.wideName, true,
+      '掉出讀檔預算之後，檔名還是要比到底（truncated=' + r.wideTruncated + '）');
     assert.equal(r.byContent[0].line, 2, '命中的行號不對');
     assert.match(r.byContent[0].text, /交付可靠度/,
       '要回報命中的那一行，不然呼叫端還是得把每個檔案打開');

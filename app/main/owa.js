@@ -1503,6 +1503,15 @@ async function send(action, body) {
    change nothing about the one that failed. */
 const REBUILDABLE = /^(FindItem|GetItem)$/;
 
+/* A ladder of a dozen requests is worth running when a shape has moved under
+   us. It is not worth running per failed call: one broken page is split into
+   a handful of smaller requests, each of which fails the same way, and each
+   of which would otherwise measure the whole dialect again -- a hundred
+   requests for one bad message. So: once per sync. Counted rather than timed,
+   because a clock either blocks the next honest attempt or lets the storm
+   through, depending on how fast the caller happens to be. */
+let remeasuredThisRun = false;
+
 /**
  * The same request, asked again in the dialect just measured.
  *
@@ -1562,6 +1571,41 @@ async function call(action, body, { retried = false, remeasured = false } = {}) 
     throw fail('ESHAPE', '回應不是 JSON，Outlook 的介面可能改版了');
   }
   await sample(action, body, json);
+
+  /* A refusal wearing a 200. See ewsSaid: this has to happen before the
+     answer is handed back, or an error reads as an empty folder. */
+  const said = ewsSaid(json);
+  if (said) {
+    /* The same self-healing as 「invalid argument」 above, for the same reason
+       and with the same budget: the dialect is measurable, so it is measured
+       once and the call retried, rather than every sync failing until somebody
+       reads a packet capture. */
+    if (!remeasured && REBUILDABLE.test(action) && EWS_SHAPE_ERRORS.test(said.code) &&
+        !remeasuredThisRun) {
+      remeasuredThisRun = true;
+      try {
+        /* Only worth asking again if the measurement found something it could
+           install. A probe that proved nothing leaves the dialect alone, and
+           re-sending the identical request would just collect the identical
+           refusal. */
+        const again = await probeShapes({ apply: true });
+        if (again && again.applied) {
+          return await call(action, rebuild(action, body), { retried, remeasured: true });
+        }
+      } catch (e) {
+        if (isLoginError(e)) throw e;
+        /* fall through to the honest failure below */
+      }
+    }
+    const e = fail('EREMOTE', 'Outlook 網頁信箱拒絕了這個請求：' + said.code +
+      (said.text ? '（' + scrub(said.text).slice(0, 160) + '）' : ''));
+    e.detail = evidence(facts, asked);
+    /* The server's own code, for callers that can do something about a
+       particular one -- see findPage, which walks around a page the mailbox
+       cannot serve. */
+    e.ews = said.code;
+    throw e;
+  }
   return json;
 }
 
@@ -1729,7 +1773,10 @@ function buildFindItem(opts) {
       ItemShape: shape,
       ParentFolderIds: [(o.folder || folderFor(d))(o.folderId || 'inbox')],
       Traversal: 'Shallow',
-      Paging: (o.paging || pageFor(d))(o.count || 1)
+      /* Offset matters to anyone asking about a particular position rather
+         than about the top of the folder -- see describeSkipped. The probe
+         does not pass one and gets 0, as it always did. */
+      Paging: (o.paging || pageFor(d))(o.count || 1, o.offset || 0)
     }
   };
   if (o.sort) body.Body.SortOrder = o.sort;
@@ -1740,6 +1787,56 @@ function sortByReceived(d) {
   const path = fieldPath('received', d);
   if (!path) return null;
   return [{ __type: 'SortResults:#Exchange', Order: 'Descending', Path: path }];
+}
+
+/* Response codes that mean 「the request was shaped in a way this server
+   cannot serve」 rather than 「that item does not exist」. Worth re-measuring
+   the dialect for; the rest are not, and a dozen probe requests per dead call
+   would be its own bug. ErrorInternalServerError is in here on purpose: it is
+   the server crashing rather than refusing, and the shape is the only thing
+   this side can change. */
+const EWS_SHAPE_ERRORS =
+  /^Error(InternalServerError|InvalidArgument|SchemaValidation|InvalidPropertyRequest|InvalidPropertySet|UnsupportedPathForQuery|UnsupportedQueryFilter|InvalidRestriction|ItemCorrupt)$/i;
+
+/**
+ * Did the mailbox refuse this request inside a 200?
+ *
+ * EWS reports per-operation failure in the body, not in the status line: HTTP
+ * 200, `content-type: application/json`, and a ResponseMessage that says
+ * `ResponseClass: "Error"`. Nothing above this looked, so the answer reached
+ * walkItems(), which found no items in it and returned an empty page -- and an
+ * empty page is exactly what a folder with nothing new looks like. The mirror
+ * then wrote 「synced, 0 new, complete」 over and over.
+ *
+ * Measured on a real mailbox: from 2026-09-18 08:24 every FindItem came back
+ * `ErrorInternalServerError / "An internal server error occurred. The
+ * operation failed., Index was outside the bounds of the array."`, and for
+ * four days the mail window reported success and showed nothing newer.
+ *
+ * A batch that partly worked is not a failure: GetItem can be asked for
+ * several ids and answer for some of them. So this reports only when nothing
+ * in the response succeeded.
+ */
+function ewsSaid(json) {
+  const seen = [];
+  const walk = (n, d) => {
+    if (!n || typeof n !== 'object' || d > 8 || seen.length > 64) return;
+    if (Array.isArray(n)) { n.forEach((x) => walk(x, d + 1)); return; }
+    const cls = pick(n, ['ResponseClass', 'responseClass']);
+    if (cls !== undefined) {
+      seen.push({
+        cls: String(cls),
+        code: String(pick(n, ['ResponseCode', 'responseCode']) || ''),
+        text: String(pick(n, ['MessageText', 'messageText']) || '')
+      });
+    }
+    Object.keys(n).forEach((k) => walk(n[k], d + 1));
+  };
+  walk(json, 0);
+  if (!seen.length) return null;
+  if (seen.some((x) => !/^Error$/i.test(x.cls))) return null;
+  const first = seen.find((x) => x.code || x.text) || seen[0];
+  return { code: first.code || 'ErrorUnknown', text: first.text || '' };
 }
 
 /** What the server said went wrong, in its own words. */
@@ -1794,6 +1891,17 @@ async function probeShapes({ apply = true } = {}) {
       }
       if (!out.bad) {
         const json = JSON.parse(out.facts.text);
+        /* A 200 that says ResponseClass: Error is a step that did not work.
+           Without this the ladder reads every refusal as 「fine, but empty」,
+           writes the broken shape down as the answer, and a re-measure can
+           never climb back out of it. */
+        const said = ewsSaid(json);
+        if (said) {
+          rec.ok = false;
+          rec.fault = [said.code, said.text].filter(Boolean).join(': ').slice(0, 200);
+          steps.push(rec);
+          return rec;
+        }
         rec.ids = countIds(json, 0);
         const items = walkItems(json, [], 0);
         rec.usable = items.length;
@@ -1825,6 +1933,20 @@ async function probeShapes({ apply = true } = {}) {
   if (!r.ok) {
     found.paging = 'IndexedPageView'; found.folder = 'target';
     r = await attempt('骨架：改用 TargetFolderId 包一層', { paging: PAGE_PLAIN, folder: FOLDER_TARGET });
+  }
+  if (!r.ok) {
+    /* Every rung so far asked for AllProperties, because that is what
+       buildFindItem falls back to. So a mailbox that has stopped accepting
+       that shape looks exactly like one that refuses the skeleton, and the
+       ladder gives up on its first rung having measured nothing -- which is
+       the state a real tenant was left in, syncing nothing for four days. The
+       thinnest request there is settles which of the two it was: if ids come
+       back, the paging and the folder were never the problem and the shape
+       ladder below can do its job. */
+    found.paging = 'IndexedPageView'; found.folder = 'plain';
+    r = await attempt('骨架：只要編號（IdOnly）',
+      { paging: PAGE_PLAIN, folder: FOLDER_PLAIN, baseShape: 'IdOnly' });
+    if (r.ok) found.baseShape = 'IdOnly';
   }
   if (!r.ok) return { steps, worked: null, dialect: dialect() };
   const skeleton = { paging: pageFor(found), folder: folderFor(found) };
@@ -2009,7 +2131,14 @@ async function borrowAttachment(skeleton, found) {
  * here: names, lengths and the server's own error text tell the four apart.
  */
 async function diagnose(opts) {
-  const shapes = !opts || opts.shapes !== false;
+  /* Three modes, and they have to stay three: false (do not measure), true
+     (measure and report), 'apply' (measure, report, and install what worked).
+     This used to fold them into a boolean on the first line and then compare
+     that boolean to 'apply' -- which is never true, so the install could not
+     be reached from anywhere and 「診斷」 always ended with 「什麼都沒改」
+     however it was called. */
+  const want = opts && opts.shapes !== undefined ? opts.shapes : true;
+  const shapes = want !== false;
   const out = { base: base(), configured: configured(), at: Date.now() };
   if (!configured()) { out.verdict = '還沒設定網頁信箱帳號。'; return out; }
 
@@ -2036,7 +2165,7 @@ async function diagnose(opts) {
     /* A report, not a reconfiguration. `apply` is opt-in so pressing 「診斷」
        cannot leave the module measuring differently than it did before. */
     try {
-      out.shapes = await probeShapes({ apply: shapes === 'apply' });
+      out.shapes = await probeShapes({ apply: want === 'apply' });
     } catch (e) {
       out.shapes = { error: String(e.message || e), code: e.code || '', steps: e.steps || [] };
     }
@@ -2107,9 +2236,129 @@ function loginUrl() {
 
 /* -------------------------------------------------------------- syncing ---- */
 
-async function findPage(folderId, offset, count) {
-  const json = await call('FindItem', findItemBody(folderId, offset, count));
-  return { items: walkItems(json, [], 0), last: lastPage(json) };
+/* What a mailbox says when it cannot serve a page rather than when it will
+   not: the server threw while building the answer. Splitting the page is the
+   only thing this side can do about it, and it is worth doing -- the
+   alternative is a folder that never syncs again. */
+const EWS_CANNOT_SERVE = /^Error(InternalServerError|ItemCorrupt|CorruptData)$/i;
+
+/**
+ * One page of headers -- and a way around the message the server chokes on.
+ *
+ * Measured on a real mailbox, 2026-09-18 to 09-22: every FindItem for 50 items
+ * came back `ErrorInternalServerError ... Index was outside the bounds of the
+ * array`, while the same request for a single item succeeded in every shape
+ * the ladder could measure -- AllProperties, Default, IdOnly, named properties
+ * and all. So it was never the shape. One message inside that page is one the
+ * server cannot serialise, and because the sync always starts at the newest
+ * page, one such message stops the whole mailbox for as long as it stays in
+ * the inbox: four days, in that case, with 「同步完成，沒有新信」 on screen.
+ *
+ * So the range is halved until the position that fails is alone, and that one
+ * position is stepped over and reported. Everything else in the page arrives.
+ * The cost is bounded and paid only when something is wrong: about 2·log2(n)
+ * extra requests for one bad message in a page of fifty.
+ *
+ * `span` is how many positions were consumed, which is not the same as how
+ * many rows came back once one has been skipped -- the caller walks by offset,
+ * and advancing by rows would ask for the same broken position for ever.
+ */
+/* How many positions in one page may be stepped over before this stops being
+   「one message the server cannot serve」 and starts being 「the server is not
+   serving」. Three is generous for the first and nowhere near enough to paper
+   over the second. */
+const MAX_SKIPS_PER_PAGE = 3;
+
+/**
+ * Who is sitting at a position the server could not serve?
+ *
+ * The crash happens while the server builds the answer, so the way to learn
+ * anything about the message is to ask for less of it. Two rungs: the id
+ * alone, which is the thinnest thing EWS can return and enough to build a
+ * link into Outlook, and then the id plus subject and date, which is enough
+ * to name it in a sentence. Either can fail on its own, and a failure here
+ * is not worth reporting -- it only means the message stays anonymous.
+ *
+ * At most two extra requests per skipped position, and positions are capped
+ * at MAX_SKIPS_PER_PAGE, so the cost of naming is bounded by the cost of
+ * skipping.
+ */
+async function describeSkipped(folderId, offset) {
+  const out = { offset };
+  const d = DIALECT;
+  const ask = async (props) => {
+    const body = buildFindItem({
+      paging: pageFor(d), folder: folderFor(d), folderId, baseShape: 'IdOnly', props,
+      count: 1, offset,
+      /* The same order the walk counted positions in, or 「position 37」 means
+         two different messages in two requests. */
+      sort: d.sortable ? sortByReceived(d) : null
+    });
+    const json = await call('FindItem', body);
+    return walkItems(json, [], 0)[0] || null;
+  };
+  try {
+    const bare = await ask([]);
+    if (!bare) return out;
+    const id = idOf(bare);
+    if (id) { out.sourceId = id; out.webLink = deepLink(id); }
+  } catch (e) {
+    return out;
+  }
+  try {
+    const named = await ask([fieldPath('subject', d), fieldPath('received', d)].filter(Boolean));
+    if (named) {
+      const subject = pick(named, ['Subject', 'subject']);
+      const when = pick(named, ['DateTimeReceived', 'dateTimeReceived']);
+      if (subject !== undefined) out.subject = String(subject).slice(0, 200);
+      if (when) out.date = Date.parse(when) || 0;
+    }
+  } catch (e) { /* anonymous but linkable is still better than a number */ }
+  return out;
+}
+
+async function findPage(folderId, offset, count, budget) {
+  const top = !budget;
+  const room = budget || { skips: 0 };
+  try {
+    const json = await call('FindItem', findItemBody(folderId, offset, count));
+    const items = walkItems(json, [], 0);
+    return { items, last: lastPage(json), span: items.length, skipped: [] };
+  } catch (e) {
+    if (!EWS_CANNOT_SERVE.test(e.ews || '')) throw e;
+    if (count <= 1) {
+      /* One position, and the server still cannot produce it. Step over it --
+         within a budget, because a mailbox that refuses everything would
+         otherwise be walked one position at a time and reported as a
+         successful sync of nothing at all. */
+      if (room.skips >= MAX_SKIPS_PER_PAGE) throw e;
+      room.skips++;
+      /* Ask who it was, thinly. A number on its own („position 37 failed")
+         is useless to the person whose mail is missing; a subject and a link
+         into Outlook is something they can act on. */
+      const who = await describeSkipped(folderId, offset);
+      return { items: [], last: null, span: 1, skipped: [who] };
+    }
+    /* Halved by position, not by what came back. A page that ran out of
+       folder returns fewer rows than it asked for, and starting the second
+       half where the rows stopped would re-read the ones already adopted and
+       count their positions twice. */
+    const half = Math.floor(count / 2);
+    const a = await findPage(folderId, offset, half, room);
+    const b = await findPage(folderId, offset + half, count - half, room);
+    const page = {
+      items: a.items.concat(b.items),
+      last: b.last,
+      span: a.span + b.span,
+      skipped: a.skipped.concat(b.skipped)
+    };
+    /* Nothing whatsoever came out of a page that was split all the way down:
+       that is not a bad message, that is a mailbox that is not answering, and
+       calling it a successful sync of zero messages is the failure this whole
+       change exists to stop. */
+    if (top && !page.items.length) throw e;
+    return page;
+  }
 }
 
 /**
@@ -2127,6 +2376,10 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
   const folderId = distinguished(name);
   if (!store.ready()) await store.init(account.email);
 
+  /* A new sync may measure again: whatever was learned last time, the thing
+     that changed under us may have changed back, or changed further. */
+  remeasuredThisRun = false;
+
   const cur = store.cursor(name);
   const plan = syncPlan({ cursor: cur, deep, days });
   const cap = Math.max(1, Math.min(MAX_PER_SYNC, (limit | 0) || MAX_PER_SYNC));
@@ -2137,6 +2390,8 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
   let newest = 0;
   let short = [];
   const fresh = [];
+  /* Positions the server could not serve even one at a time. See findPage. */
+  const unreadable = [];
 
   /**
    * Walk pages from an offset until the floor, the cap, or the end.
@@ -2150,8 +2405,12 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
     let reached = false;
     while (seen < cap) {
       const page = await findPage(folderId, offset, Math.min(PAGE, cap - seen));
-      if (!page.items.length) { reached = true; break; }
-      seen += page.items.length;
+      if (page.skipped.length) unreadable.push(...page.skipped);
+      /* Nothing came back and nothing was stepped over: that is the end of the
+         folder. A page that was entirely skipped is not the end -- walking has
+         to carry on past it, or the sync stops at the bad message after all. */
+      if (!page.items.length && !page.skipped.length) { reached = true; break; }
+      seen += page.span;
 
       const got = adoptPage(page.items, {
         folder: name,
@@ -2165,7 +2424,7 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
       short = short.concat(got.missing);
       if (got.newest > newest) newest = got.newest;
 
-      offset += page.items.length;
+      offset += page.span;
       if (got.stop) { reached = true; break; }
       if (page.last === true) { reached = true; break; }
     }
@@ -2219,7 +2478,17 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
     complete: done,
     reachedFloor: done,
     coverage: store.coverage(name),
-    missing: [...new Set(short)]
+    missing: [...new Set(short)],
+    /* Messages the mailbox refused to hand over even on their own. Counted
+       rather than named, because the only thing known about them is where
+       they sat in the list -- the server could not produce them, so there is
+       no subject and no id to show. */
+    unreadable: unreadable.length,
+    /* Who they were, as far as the server would say. Each is
+       { offset, sourceId?, webLink?, subject?, date? } -- a message the
+       mailbox cannot produce in a list may still answer a thinner question,
+       and even the id alone is a link the person can open in Outlook. */
+    unreadableItems: unreadable
   };
 }
 
