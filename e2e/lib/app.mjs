@@ -91,7 +91,17 @@ export async function launch({ exe = null, dataDir = null, port = null,
   const awake = [
     '--disable-features=CalculateNativeWinOcclusion',
     '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding'
+    '--disable-renderer-backgrounding',
+    /* The three above are about occlusion -- being covered. None of them
+       reaches the case where the machine is genuinely away: the workstation
+       locks, the display sleeps, somebody minimises the window on their way
+       out. The document is hidden then whatever those say, and a hidden
+       document's timers are held to one a second. Measured here, minimised,
+       twenty waits of 100ms: 20.0s without this switch and 2.2s with it. On
+       the run that prompted the line it turned a poll of 80 x 100ms inside one
+       spec into 288 seconds instead of 8, slowed every spec after it, and
+       brought the suite within a minute of its own fifteen-minute ceiling. */
+    '--disable-background-timer-throttling'
   ];
   const argv = exe
     ? ['--windowed', `--remote-debugging-port=${port}`, ...awake, ...profileArgs, ...args]

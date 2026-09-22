@@ -105,10 +105,13 @@ export async function spec(t, app) {
   let before = null;
 
   /** Evaluate inside the web page itself, not in the shell. */
-  async function inPage(body) {
+  async function inPage(body, url) {
+    /* Exactly, not by prefix: the off-screen case opens a second tab on this
+       same server, and a prefix match would read whichever came back first. */
+    const want = url || pageUrl;
     const target = await until(async () => {
       const list = await targets(port);
-      return list.find((x) => x.url.startsWith(pageUrl) && x.webSocketDebuggerUrl) || null;
+      return list.find((x) => x.url === want && x.webSocketDebuggerUrl) || null;
     }, { timeout: 20000, what: '網頁的 CDP target' });
     const p = await connect(target.webSocketDebuggerUrl);
     try {
@@ -293,7 +296,7 @@ export async function spec(t, app) {
     assert.equal(seen.calls, callsBefore, '模型一次都沒有被呼叫');
   });
 
-  await t.test('只翻譯捲動到的區域：捲軸外的段落先不翻', async () => {
+  await t.test('只翻譯捲動到的區域：捲軸外的段落先不翻', async (sub) => {
     const r = await run(cdp, `
       var inst = AIOS.apps.instances().filter(function (i) { return i.def.id === 'browser'; })[0];
       var id = inst.ctx.api.tabId();
@@ -344,6 +347,21 @@ export async function spec(t, app) {
       };
     `;
     let dom = await inPage(look);
+    /* The premise, checked rather than assumed. This case is about where
+       things are on screen, so the page needs a screen to be on: a viewport.
+       A tab gets one when its window is shown, and nothing this side can
+       manufacture it -- placing the view by hand while the window is off
+       screen was measured doing nothing at all. So when the desktop is away
+       (minimised, locked, a machine nobody is sitting at) this says so and
+       stands down, instead of reporting 「看得到的段落要翻」 about a page that
+       has no 看得到 and cannot be scrolled. What the translator does in that
+       state is not left untested -- it is the case directly below. */
+    if (dom.why.viewport === '0x0') {
+      sub.diagnostic('桌面不在畫面上（分頁沒有視埠 ' + JSON.stringify(dom.why) +
+        '），這一關要的是捲動位置，略過；「視窗沒上螢幕」那一關管的就是這個狀態。');
+      return;
+    }
+
     const by = Date.now() + 20000;
     while (!dom.near && Date.now() < by) {
       await sleep(300);
@@ -360,6 +378,84 @@ export async function spec(t, app) {
       return d ? d : null;
     }, { timeout: 30000, what: '捲到之後補翻' });
     assert.equal(woke, true, '捲到就補翻');
+  });
+
+  /* The case the one above kept tripping over on a busy desktop, made
+     deterministic here: a page that was never put on screen.
+
+     It is not an exotic state. The shell places a browser view only while its
+     window is visible -- syncBounds returns early otherwise -- and Windows
+     marks the whole application hidden the moment the session locks or the
+     window is minimised, which is what an unattended machine does to a build
+     that takes nine minutes. A page opened in that window is never told how
+     big it is: innerWidth, clientWidth, outerWidth, visualViewport and screen
+     all read 0, and it lays itself out at zero width. Every rectangle is then
+     measured against nothing, so 「只翻譯捲動到的區域」 found nothing on
+     screen and a translation somebody had pressed the button for sat at
+     「翻譯 0 / 0 段」 for as long as the window stayed away.
+
+     Note that detaching a view that was placed once does NOT reproduce this:
+     it keeps its last size and goes on reporting it. Only a view that never
+     had bounds reads 0, which is why the tab below is made by hand. */
+  await t.test('視窗沒上螢幕的時候，按下去的翻譯繼續跑，不是停在零段', async () => {
+    // A second address on the same fixture server -- it answers any path with
+    // the same article -- so this tab has a CDP target of its own to read.
+    const off = pageUrl + 'offscreen';
+    const r = await run(cdp, `
+      /* Made and navigated and never shown, which is the whole point: no
+         bounds are ever delivered, so the view keeps the 0x0 it was created
+         with. */
+      var res = await window.aios.browser.create(null);
+      if (!res.ok) return { error: res.error };
+      var id = res.data.id;
+      await window.aios.translate.setSettings({ viewportOnly: true });
+      await window.aios.browser.navigate(id, ${JSON.stringify(off)});
+      await new Promise(function (r) { setTimeout(r, 1500); });
+      var s = await window.aios.translate.start(id);
+      return s.ok ? { tabId: id } : { error: s.error };
+    `, { timeout: 60000 });
+    assert.equal(r.error, undefined, r.error);
+
+    const look = `
+      var p1 = document.getElementById('p1');
+      var r1 = p1 ? p1.getBoundingClientRect() : null;
+      return {
+        near: !!document.querySelector('#p1 .aios-tr-line'),
+        far: !!document.querySelector('#far .aios-tr-line'),
+        why: {
+          viewport: window.innerWidth + 'x' + window.innerHeight,
+          visibility: document.visibilityState,
+          p1Top: r1 ? Math.round(r1.top) : null,
+          spans: document.querySelectorAll('.aios-tr-line').length
+        }
+      };
+    `;
+    let dom = await inPage(look, off);
+    /* The premise, asserted rather than assumed: with a viewport this case
+       would pass without testing anything. */
+    assert.equal(dom.why.viewport, '0x0',
+      '這一關的前提是那個分頁沒有視埠：' + JSON.stringify(dom.why));
+
+    const by = Date.now() + 20000;
+    while (!dom.near && Date.now() < by) {
+      await sleep(300);
+      dom = await inPage(look, off);
+    }
+    const st = await run(cdp, `
+      var r = await window.aios.translate.status(${JSON.stringify(r.tabId)});
+      return r.ok ? r.data : { error: r.error };
+    `);
+    const why = ' — status=' + JSON.stringify(st) + ' page=' + JSON.stringify(dom.why);
+    assert.equal(dom.near, true, '沒上螢幕的頁面也要把頂端那一屏翻完' + why);
+    assert.equal(dom.far, false, '不能因此變成整頁都翻' + why);
+    assert.ok(st.done >= 1, '進度要跟著走，不是停在「等你捲到」' + why);
+
+    await run(cdp, `
+      var id = ${JSON.stringify(r.tabId)};
+      await window.aios.translate.stop(id);
+      await window.aios.browser.destroy(id);
+      return 1;
+    `, { timeout: 30000 });
   });
 
   await t.test('模型出錯時標記失敗，重試可以救回來', async () => {

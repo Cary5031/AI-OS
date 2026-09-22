@@ -487,6 +487,42 @@ function pageAgent() {
      translated or not depending on which of them noticed it first. */
   const VIEW_MARGIN = 400;
 
+  /* The last viewport this page was measured at, and what to assume when it
+     has never had one. Both exist because a page is not always being shown,
+     and a page that is not being shown is not told how big it is.
+
+     Measured, on this machine: a view that was placed once and then detached
+     -- the window went behind another one, a menu opened, another tab came to
+     the front -- keeps its last size, so the live reading is still the truth.
+     A view that was NEVER placed is told nothing: innerWidth, clientWidth,
+     outerWidth, visualViewport and even screen all read 0, and the document
+     lays itself out at zero width. That is the state of every page opened
+     while its window was off screen, which on Windows includes the whole
+     application from the moment the session locks.
+
+     What this used to do with that was return false: no viewport, so nothing
+     is on screen, so nothing is translated. It is defensible and it is
+     useless -- a translation somebody had pressed the button for sat at
+     「翻譯 0 / 0 段」 for as long as the window stayed away, and the strip
+     said 「等你捲到」 about a page that could not be scrolled because it was
+     not on screen. So: the last real viewport if there was one, and otherwise
+     a nominal window. Guessing the window is the conservative half of the
+     job; the geometry is still measured, so what gets translated is the top
+     of the document rather than all of it, and the moment the page is shown
+     the real numbers take over. */
+  let lastView = null;
+  const NOMINAL_VIEW = { w: 1280, h: 800 };
+
+  function viewport() {
+    const w = window.innerWidth || document.documentElement.clientWidth || 0;
+    const h = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (w > 0 && h > 0) {
+      if (!lastView || lastView.w !== w || lastView.h !== h) lastView = { w: w, h: h };
+      return lastView;
+    }
+    return lastView || NOMINAL_VIEW;
+  }
+
   /**
    * Is this element within the viewport right now, measured rather than waited
    * for?
@@ -512,19 +548,17 @@ function pageAgent() {
    * Layout is not suspended with rendering, so a rectangle is still the truth:
    * on that same run getBoundingClientRect put the first paragraph 97px down a
    * 482px viewport, correctly, while the observer was silent.
+   *
+   * What the rectangle is compared against is the other half -- see viewport()
+   * above for the page that cannot say how big it is.
    */
   function onScreenNow(el) {
     let r;
     try { r = el.getBoundingClientRect(); } catch (e) { return false; }
     if (!r) return false;
     if (!r.width && !r.height) return false;
-    const h = window.innerHeight || document.documentElement.clientHeight || 0;
-    const w = window.innerWidth || document.documentElement.clientWidth || 0;
-    /* No viewport at all -- a view sized to nothing. Everything would count as
-       off screen, which is the right answer but an unhelpful one, so this says
-       so by returning false and letting the caller leave the record alone. */
-    if (!h || !w) return false;
-    return r.bottom > -VIEW_MARGIN && r.top < h + VIEW_MARGIN && r.right > 0 && r.left < w;
+    const v = viewport();
+    return r.bottom > -VIEW_MARGIN && r.top < v.h + VIEW_MARGIN && r.right > 0 && r.left < v.w;
   }
 
   function startObservers() {
