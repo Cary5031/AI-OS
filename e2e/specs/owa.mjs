@@ -99,7 +99,19 @@ const state = {
   /* One message the server cannot serialise: any page that would contain it
      fails, any page that does not is served normally. That is what a real
      mailbox did for four days. */
-  poison: null
+  poison: null,
+  /* `poison` refuses only the heavy properties, which is what a meeting
+     invitation does on a real server -- ask for less and it answers.
+     `poisonHard` refuses that item whatever is asked, which is the case
+     where nothing can be rescued. */
+  poisonHard: false,
+  /* And the one a real tenant turned out to have: the item breaks anything
+     asked for under BaseShape AllProperties -- a page of fifty and a page of
+     one alike -- and answers in full when the fields are named instead. */
+  poisonAll: false,
+  /* Every BaseShape a FindItem asked for, so a case can assert what the
+     mailbox stopped asking for. */
+  shapes: []
 };
 
 function itemFor(m, { withBody = false } = {}) {
@@ -207,6 +219,27 @@ function makeServer() {
 
       const askedShape = ((body.Body || {}).ItemShape || {}).BaseShape || '';
       let poisoned = false;
+      /* A real tenant answered `item:Subject` and refused `ItemSubject` with
+         OwaMethodArgumentException -- which is the whole reason the property
+         ladder exists. The fixture used to accept both, so the dialect it
+         measured was not the one a tenant measures, and a projection written
+         for the real spelling silently returned nothing here. */
+      if (action === 'FindItem') {
+        const props = (((body.Body || {}).ItemShape || {}).AdditionalProperties || []);
+        if (props.some((x) => /^(Item|Message)[A-Z]/.test(String(x.FieldURI || '')))) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            Body: { FaultMessage: 'Invalid argument used to call method FindItem',
+                    ExceptionName: 'OwaMethodArgumentException' }
+          }));
+          return;
+        }
+      }
+
+      if (action === 'FindItem') {
+        state.shapes.push(((body.Body || {}).ItemShape || {}).BaseShape || '');
+      }
+
       if (action === 'FindItem' && state.poison) {
         const pg = body.Body.Paging || {};
         const all = MESSAGES.slice().sort((a, b) => Date.parse(b.received) - Date.parse(a.received));
@@ -219,7 +252,8 @@ function makeServer() {
            thinly rather than giving up on a number. */
         const heavy = (((body.Body || {}).ItemShape || {}).AdditionalProperties || [])
           .some((x) => !/Subject|DateTimeReceived/.test(x.FieldURI || ''));
-        poisoned = inPage && heavy;
+        const wholeShape = ((body.Body || {}).ItemShape || {}).BaseShape === 'AllProperties';
+        poisoned = inPage && (state.poisonHard || (state.poisonAll ? wholeShape : heavy));
       }
       if (action === 'FindItem' && (state.serverError || poisoned ||
           (state.refuseShape && askedShape === state.refuseShape))) {
@@ -242,6 +276,36 @@ function makeServer() {
         return;
       }
 
+      /* What a real server hands back for the shape that was asked for. The
+         fixture used to return every field however thin the question, which
+         is why a rescue rung that asks for an id and nothing else looked like
+         it worked here and came back empty against Exchange. A fixture more
+         generous than the server tests nothing. */
+      const project = (it) => {
+        const shape = (body.Body || {}).ItemShape || {};
+        if ((shape.BaseShape || '') !== 'IdOnly') return it;
+        const asked = (shape.AdditionalProperties || []);
+        const out = { __type: it.__type, ItemId: it.ItemId };
+        /* Both spellings, because a tenant understands one of them and the
+           dialect is whichever one it answered to. */
+        const byUri = {
+          Subject: ['Subject'],
+          DateTimeReceived: ['DateTimeReceived'],
+          HasAttachments: ['HasAttachments'],
+          From: ['From'],
+          ToRecipients: ['ToRecipients', 'DisplayTo', 'MessageToMe'],
+          CcRecipients: ['CcRecipients', 'DisplayCc', 'MessageCcMe'],
+          IsRead: ['IsRead'],
+          InternetMessageId: ['InternetMessageId']
+        };
+        const fieldName = (uri) => String(uri || '').replace(/^(item|message):/, '').replace(/^(Item|Message)/, '');
+        asked.forEach((a) => {
+          if (a.PropertyTag && it.ExtendedProperty) { out.ExtendedProperty = it.ExtendedProperty; return; }
+          (byUri[fieldName(a.FieldURI)] || []).forEach((k) => { if (it[k] !== undefined) out[k] = it[k]; });
+        });
+        return out;
+      };
+
       if (action === 'FindItem') {
         const paging = body.Body.Paging || {};
         const offset = paging.Offset || 0;
@@ -257,7 +321,7 @@ function makeServer() {
                 RootFolder: {
                   TotalItemsInView: sorted.length,
                   IncludesLastItemInRange: offset + page.length >= sorted.length,
-                  Items: page.map((m) => itemFor(m))
+                  Items: page.map((m) => project(itemFor(m)))
                 }
               }]
             }
@@ -657,51 +721,104 @@ export async function spec(t, app) {
         '這一關的重點是它真的去量了：' + state.calls.join(','));
     });
 
-    await t.test('一封伺服器交不出來的信：跳過它、說出來，同一頁的其餘照收', async () => {
-    /* The real one, and the reason a mailbox stayed four days behind.
+    await t.test('伺服器交不出全部欄位的信（會議通知）：問少一點把它讀進來，並說出缺了什麼', async () => {
+    /* The real one, and what it turned out to be. A page of 50 came back
+       ErrorInternalServerError every time while the same position asked for
+       one item answered in every shape the ladder could measure -- so it was
+       never the request, it was one item in the page. The two items were
+       meeting invitations: on the server they are MeetingRequest, not
+       Message, and the list asks for message-only properties (From,
+       ToRecipients, CcRecipients, IsRead, InternetMessageId and the 0x1035
+       extended property). Ask for less of the same item and it answers.
 
-       A page of 50 came back ErrorInternalServerError every time, while the
-       same request for a single item succeeded in every shape the ladder
-       could measure -- AllProperties, Default, IdOnly, named properties and
-       all. So the shape was never the problem: one message inside that page
-       is one the server cannot serialise. The sync always starts at the
-       newest page, so one such message stops the entire mailbox, and every
-       message that arrives after it stays invisible.
-
-       No message is added to the fixture here on purpose: `scanned` counts
-       positions walked, so 3 walked with 1 stepped over is the proof that the
-       other two were read in this very sync rather than left over from an
-       earlier one. */
+       Skipping it was the first fix and it unstuck the mailbox. It also lost
+       the invitation -- from the list, from search, and from every 郵件待辦
+       rule -- which for a meeting notice is the wrong half to lose. */
       let r;
       try {
         state.poison = 'AAMkOWA002';
         r = await run(cdp, `
+          await window.aios.mail.sync('INBOX', 600, { deep: true });
           var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
           var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
-          return { ok: s.ok, err: s.error, data: s.data, n: list.data.length };
+          var row = list.data.filter(function (m) { return m.subject === '交期確認'; })[0] || null;
+          return { ok: s.ok, err: s.error, data: s.data, n: list.data.length, row: row,
+                   subjects: list.data.map(function (m) { return m.subject; }) };
         `, { timeout: 120000 });
       } finally {
         state.poison = null;
       }
-      assert.equal(r.ok, true, '一封交不出來不該讓整個信箱停下來：' + r.err);
-      assert.equal(r.data.unreadable, 1,
-        '而且要說出有幾封被跳過，不是静静少一封：' + JSON.stringify(r.data));
-      assert.equal(r.data.scanned, 3,
-        '跏過坡掉的那一個位置，同一頁的其餘要繼續走完：' + JSON.stringify(r.data));
-      assert.equal(r.n, 3, '跳過不是刪除：已經鏡像下來的那封還在');
+      assert.equal(r.ok, true, r.err);
+      assert.equal(r.data.unreadable, 0, '能讀的不該算成讀不到：' + JSON.stringify(r.data));
+      assert.equal(r.data.partial, 1, '而是要說「有一封只拿得到部分欄位」：' + JSON.stringify(r.data));
+      assert.ok(r.row, '而且那封信要在清單上，不是被跳過：' +
+        JSON.stringify(r.data) + ' 清單=' + JSON.stringify(r.subjects));
+      assert.equal(r.data.scanned, 3, '同一頁的其餘照走：' + JSON.stringify(r.data));
+      const dropped = (r.data.partialItems[0] || {}).dropped || [];
+      assert.ok(dropped.includes('Message-ID'),
+        '缺了什麼要說出來，不是留給人猜：' + JSON.stringify(r.data.partialItems));
 
-      /* And it says which one. A count on its own tells somebody their mail
-         is incomplete and gives them nothing to do about it. */
-      const who = (r.data.unreadableItems || [])[0] || {};
-      assert.equal(who.subject, '交期確認',
-        '要說得出是哪一封：' + JSON.stringify(r.data.unreadableItems));
-      assert.ok(who.date > 0, '連同收信時間');
-      assert.match(String(who.webLink), /\/mail\/deeplink\/read\//,
-        '以及一個在 Outlook 裡打得開它的連結：' + JSON.stringify(who));
+      /* The shape a real tenant turned out to have, and the reason the
+         list stopped asking for AllProperties: the item breaks anything
+         asked for that way -- fifty at a time or one at a time -- and comes
+         back whole the moment the fields are named instead. What must happen
+         is that the mailbox measures that for itself and carries on, not
+         that it limps along one message at a time for ever. */
+      let whole;
+      try {
+        state.poison = 'AAMkOWA002';
+        state.poisonAll = true;
+        state.shapes.length = 0;
+        whole = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
+          var list = await window.aios.mail.mirrorList({ folder: 'INBOX' });
+          var row = list.data.filter(function (m) { return m.subject === '交期確認'; })[0] || null;
+          return { ok: s.ok, err: s.error, data: s.data, from: row && row.from, n: list.data.length };
+        `, { timeout: 120000 });
+      } finally {
+        state.poison = null;
+        state.poisonAll = false;
+      }
+      assert.equal(whole.ok, true, whole.err);
+      assert.equal(whole.n, 3, '三封都在：' + JSON.stringify(whole));
+      assert.ok(whole.from, '而且那一封是完整的，不是殘缺的：' + JSON.stringify(whole));
+      assert.equal(whole.data.unreadable, 0, '沒有人該被丟下：' + JSON.stringify(whole.data));
+      /* The point of the change, stated as what the mailbox no longer does:
+         AllProperties is never asked for once the fields can be named, so
+         the item that only breaks under AllProperties never breaks a page.
+         Naming them costs nothing -- every field the mirror reads was
+         already being asked for by name even under AllProperties. */
+      assert.ok(!state.shapes.includes('AllProperties'),
+        '清單不該再問 AllProperties 了：' + JSON.stringify(state.shapes));
+
+      /* Nothing works on it at all: back to stepping over, with a name and a
+         link rather than a number. */
+      let hard;
+      try {
+        state.poison = 'AAMkOWA002';
+        state.poisonHard = true;
+        hard = await run(cdp, `
+          var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
+          return { ok: s.ok, err: s.error, data: s.data };
+        `, { timeout: 120000 });
+      } finally {
+        state.poison = null;
+        state.poisonHard = false;
+      }
+      assert.equal(hard.ok, true, '一封拿不到不該卡住整個信箱：' + hard.err);
+      assert.equal(hard.data.unreadable, 1, '這次才是真的跳過：' + JSON.stringify(hard.data));
+      assert.equal(hard.data.partial, 0);
+      /* When there is nothing to describe the message by, what was asked and
+         what came back is the only thing anybody has to go on -- so it is
+         carried out rather than swallowed. */
+      const tried = (hard.data.unreadableItems[0] || {}).tried || [];
+      const failed = tried.filter(function (t) { return !t.ok; })[0];
+      assert.ok(failed && failed.code,
+        '要帶出哪一階敷了、伺服器說了什麼：' + JSON.stringify(tried));
+      assert.equal(failed.rung, 'id', '連只要編號都不行，就要說是那一階');
 
       /* And a mailbox that refuses everything is still a failure, not a
-         successful sync of nothing -- the splitting is for one bad message,
-         not for a server that has stopped answering. */
+         successful sync of nothing. */
       let all;
       try {
         state.serverError = 'ErrorInternalServerError';
@@ -714,14 +831,16 @@ export async function spec(t, app) {
       }
       assert.equal(all.ok, false, '全部拒絕還說成功，就是一開始那個 bug：' + JSON.stringify(all.data));
 
-      /* Server well again: the one that was stepped over comes in. */
+      // Server well again: everything comes back in full.
       const back = await run(cdp, `
         var s = await window.aios.mail.sync('INBOX', 600, { deep: true });
-        return { ok: s.ok, err: s.error, unreadable: s.data && s.data.unreadable, scanned: s.data && s.data.scanned };
+        return { ok: s.ok, err: s.error, unreadable: s.data && s.data.unreadable,
+                 partial: s.data && s.data.partial, scanned: s.data && s.data.scanned };
       `, { timeout: 120000 });
       assert.equal(back.ok, true, back.err);
-      assert.equal(back.unreadable, 0, '伺服器好了就不該還有人被跳過');
-      assert.equal(back.scanned, 3, '三封都走過一遍');
+      assert.equal(back.unreadable, 0);
+      assert.equal(back.partial, 0, '伺服器好了就不該還有残缺的列');
+      assert.equal(back.scanned, 3);
     });
 
     /* ------------------------------------------------------ the scenario -- */

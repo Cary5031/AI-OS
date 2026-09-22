@@ -1852,6 +1852,34 @@ function faultOf(text) {
   }
 }
 
+/**
+ * The first thing in a response that has an id, however thin.
+ *
+ * walkItems() is deliberately stricter: it wants a subject, a date, a sender
+ * or an item class as well, so that an attached message or a folder cannot be
+ * mistaken for inbox mail. That strictness is wrong for a deliberate IdOnly
+ * question, whose whole answer is an id -- and reading its empty result as
+ * 「the server gave nothing」 is what made every rescue report 「連主旨都交不
+ * 出來」 while the server was answering perfectly well. */
+function firstIdItem(node, depth) {
+  depth = depth || 0;
+  if (!node || typeof node !== 'object' || depth > 12) return null;
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = firstIdItem(n, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (idOf(node)) return node;
+  for (const k of Object.keys(node)) {
+    if (k === 'Attachments' || k === 'attachments') continue;
+    const hit = firstIdItem(node[k], depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /** Anything with an id, however thin -- an IdOnly answer has nothing else. */
 function countIds(node, depth) {
   depth = depth || 0;
@@ -2004,6 +2032,23 @@ async function probeShapes({ apply = true } = {}) {
   }
   if (!haveImid && !found.extendedImid) {
     steps.push({ label: 'InternetMessageId 兩種都不行', ok: false, status: 0, fault: '身分只能退回雜湊 ItemId' });
+  }
+
+  /* 5b. Prefer naming what we need over asking for everything.
+
+        Measured on a real mailbox: a meeting invitation in the inbox makes
+        this server throw while building a response under
+        `BaseShape: AllProperties` -- a page of fifty and a page of one alike
+        -- while the same item under IdOnly plus these named properties comes
+        back whole, sender, read state, Message-ID and all. AllProperties was
+        never what the mirror reads anyway: every field it uses is in the list
+        above, asked for by name, which is why they are asked for even under
+        AllProperties. So when the named list works, that is the shape, and
+        the mailbox stops depending on the server's idea of 「all」. */
+  if (namedWorks && props.length >= 4) {
+    r = await attempt('改用「只要點名的欄位」（IdOnly ⊕ 欄位清單）',
+      { ...skeleton, baseShape: 'IdOnly', props });
+    if (r.ok && r.usable) found.baseShape = 'IdOnly';
   }
 
   /* 6. Sorting, last among the list probes, because it is the only part the
@@ -2269,51 +2314,111 @@ const EWS_CANNOT_SERVE = /^Error(InternalServerError|ItemCorrupt|CorruptData)$/i
    over the second. */
 const MAX_SKIPS_PER_PAGE = 3;
 
+/* The rungs a single position is asked for, thinnest first. Each adds what
+   the one below it can live without: an id is enough for a link, a subject
+   and a date are enough for a row in the list, a sender and a read flag make
+   it a normal-looking one, and the message id is what the mirror prefers for
+   identity when it can have it.
+
+   Measured on a real mailbox: a meeting invitation in the inbox is not a
+   Message but a MeetingRequest, and asking a page for the message-only
+   properties (From / ToRecipients / CcRecipients / IsRead / InternetMessageId
+   and the 0x1035 extended property) is what makes that server throw while
+   building the answer. Ask for less of the same item and it answers -- so an
+   invitation can be read after all, minus the fields it choked on. Meeting
+   notices are not a rounding error in a mailbox: they were the two messages
+   that stopped one for four days. */
+const RESCUE_RUNGS = [
+  { name: 'id', props: () => [] },
+  { name: 'subject', props: (d) => [fieldPath('subject', d), fieldPath('received', d)] },
+  { name: 'sender', props: (d) => [fieldPath('subject', d), fieldPath('received', d),
+    fieldPath('from', d), fieldPath('isRead', d), fieldPath('hasAttachments', d)] },
+  { name: 'identity', props: (d) => [fieldPath('subject', d), fieldPath('received', d),
+    fieldPath('from', d), fieldPath('isRead', d), fieldPath('hasAttachments', d),
+    fieldPath('internetMessageId', d),
+    d.extendedImid ? { __type: d.extendedImid, PropertyTag: '0x1035', PropertyType: 'String' } : null] }
+];
+
+/** What a rescued row is short of, by how far up the ladder the server came. */
+function droppedAt(rung) {
+  if (rung === 'subject') return ['寄件人', '已讀狀態', '收件者', 'Message-ID'];
+  if (rung === 'sender') return ['收件者', 'Message-ID'];
+  return [];
+}
+
 /**
- * Who is sitting at a position the server could not serve?
+ * Get what can be got from a position the server could not serve in a page.
  *
- * The crash happens while the server builds the answer, so the way to learn
- * anything about the message is to ask for less of it. Two rungs: the id
- * alone, which is the thinnest thing EWS can return and enough to build a
- * link into Outlook, and then the id plus subject and date, which is enough
- * to name it in a sentence. Either can fail on its own, and a failure here
- * is not worth reporting -- it only means the message stays anonymous.
+ * The crash happens while the server writes some property into the answer, so
+ * the way through is to ask for less of the same item. Climbs the rungs above
+ * until one fails, and keeps the richest answer: either an item good enough
+ * for the mirror -- subject and date at least -- or, failing that, a name and
+ * a link so the person can open it where it does still work.
  *
- * At most two extra requests per skipped position, and positions are capped
- * at MAX_SKIPS_PER_PAGE, so the cost of naming is bounded by the cost of
+ * At most four requests, for a position that already failed inside a page
+ * whose skips are capped, so the cost of rescuing is bounded by the cost of
  * skipping.
  */
-async function describeSkipped(folderId, offset) {
-  const out = { offset };
+async function rescueOne(folderId, offset) {
   const d = DIALECT;
-  const ask = async (props) => {
+  const out = { offset, item: null, best: null, dropped: [], tried: [] };
+  const ask = async (props, sorted) => {
     const body = buildFindItem({
-      paging: pageFor(d), folder: folderFor(d), folderId, baseShape: 'IdOnly', props,
-      count: 1, offset,
-      /* The same order the walk counted positions in, or 「position 37」 means
+      paging: pageFor(d), folder: folderFor(d), folderId, baseShape: 'IdOnly',
+      props, count: 1, offset,
+      /* The same order the walk counted positions in, or a position means
          two different messages in two requests. */
-      sort: d.sortable ? sortByReceived(d) : null
+      sort: sorted && d.sortable ? sortByReceived(d) : null
     });
     const json = await call('FindItem', body);
-    return walkItems(json, [], 0)[0] || null;
+    /* Not walkItems: the thinnest rung asks for an id and nothing else, and
+       walkItems would refuse to call that an item. */
+    return firstIdItem(json, 0);
   };
-  try {
-    const bare = await ask([]);
-    if (!bare) return out;
-    const id = idOf(bare);
-    if (id) { out.sourceId = id; out.webLink = deepLink(id); }
-  } catch (e) {
-    return out;
-  }
-  try {
-    const named = await ask([fieldPath('subject', d), fieldPath('received', d)].filter(Boolean));
-    if (named) {
-      const subject = pick(named, ['Subject', 'subject']);
-      const when = pick(named, ['DateTimeReceived', 'dateTimeReceived']);
+  for (const rung of RESCUE_RUNGS) {
+    let got;
+    try {
+      got = await ask(rung.props(d).filter(Boolean), true);
+      out.tried.push({ rung: rung.name, ok: true });
+    } catch (e) {
+      if (isLoginError(e)) throw e;
+      /* What the server said, kept rather than swallowed: when even the
+         thinnest rung fails, this sentence is the only thing anybody has to
+         go on. */
+      out.tried.push({ rung: rung.name, ok: false, code: e.ews || e.code || 'EFAIL',
+        said: String((e.detail && e.detail.head) || e.message || '').slice(0, 200) });
+      break;                      // this rung is where the server gives out
+    }
+    if (!got) break;
+    out.best = rung.name;
+    if (rung.name === 'id') {
+      out.sourceId = idOf(got);
+      out.webLink = out.sourceId ? deepLink(out.sourceId) : '';
+    } else {
+      /* From the subject rung up, the answer carries enough to be a row. */
+      out.item = got;
+      const subject = pick(got, ['Subject', 'subject']);
+      const when = pick(got, ['DateTimeReceived', 'dateTimeReceived']);
       if (subject !== undefined) out.subject = String(subject).slice(0, 200);
       if (when) out.date = Date.parse(when) || 0;
     }
-  } catch (e) { /* anonymous but linkable is still better than a number */ }
+  }
+  out.dropped = out.item ? droppedAt(out.best) : [];
+
+  /* Nothing at all came back, not even an id. That is not the shape of a
+     property the server cannot write, so before giving up: ask the same
+     position without the sort. If that answers, the sort is what this item
+     breaks -- which is a different bug with a different fix, and worth
+     knowing rather than guessing at. The answer is not adopted: unsorted,
+     the position names a different message. */
+  if (!out.best) {
+    try {
+      const any = await ask([], false);
+      out.unsortedAnswers = !!any;
+    } catch (e) {
+      out.unsortedAnswers = false;
+    }
+  }
   return out;
 }
 
@@ -2323,7 +2428,7 @@ async function findPage(folderId, offset, count, budget) {
   try {
     const json = await call('FindItem', findItemBody(folderId, offset, count));
     const items = walkItems(json, [], 0);
-    return { items, last: lastPage(json), span: items.length, skipped: [] };
+    return { items, last: lastPage(json), span: items.length, skipped: [], thin: [] };
   } catch (e) {
     if (!EWS_CANNOT_SERVE.test(e.ews || '')) throw e;
     if (count <= 1) {
@@ -2333,11 +2438,18 @@ async function findPage(folderId, offset, count, budget) {
          successful sync of nothing at all. */
       if (room.skips >= MAX_SKIPS_PER_PAGE) throw e;
       room.skips++;
-      /* Ask who it was, thinly. A number on its own („position 37 failed")
-         is useless to the person whose mail is missing; a subject and a link
-         into Outlook is something they can act on. */
-      const who = await describeSkipped(folderId, offset);
-      return { items: [], last: null, span: 1, skipped: [who] };
+      /* Ask for less of the same item before giving up on it. A meeting
+         invitation answers everything except the message-only properties, so
+         what used to be a skipped position is a row in the list -- short a
+         few fields, and saying which. */
+      const got = await rescueOne(folderId, offset);
+      if (got.item) {
+        return {
+          items: [got.item], last: null, span: 1, skipped: [],
+          thin: [{ offset, subject: got.subject, date: got.date, dropped: got.dropped }]
+        };
+      }
+      return { items: [], last: null, span: 1, skipped: [got], thin: [] };
     }
     /* Halved by position, not by what came back. A page that ran out of
        folder returns fewer rows than it asked for, and starting the second
@@ -2350,7 +2462,8 @@ async function findPage(folderId, offset, count, budget) {
       items: a.items.concat(b.items),
       last: b.last,
       span: a.span + b.span,
-      skipped: a.skipped.concat(b.skipped)
+      skipped: a.skipped.concat(b.skipped),
+      thin: (a.thin || []).concat(b.thin || [])
     };
     /* Nothing whatsoever came out of a page that was split all the way down:
        that is not a bad message, that is a mailbox that is not answering, and
@@ -2392,6 +2505,8 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
   const fresh = [];
   /* Positions the server could not serve even one at a time. See findPage. */
   const unreadable = [];
+  /* And the ones it could, once asked for less: read, but short of fields. */
+  const thin = [];
 
   /**
    * Walk pages from an offset until the floor, the cap, or the end.
@@ -2406,6 +2521,7 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
     while (seen < cap) {
       const page = await findPage(folderId, offset, Math.min(PAGE, cap - seen));
       if (page.skipped.length) unreadable.push(...page.skipped);
+      if (page.thin && page.thin.length) thin.push(...page.thin);
       /* Nothing came back and nothing was stepped over: that is the end of the
          folder. A page that was entirely skipped is not the end -- walking has
          to carry on past it, or the sync stops at the bad message after all. */
@@ -2484,6 +2600,12 @@ async function syncFolder({ folder = 'INBOX', limit = MAX_PER_SYNC, days = 0, de
        they sat in the list -- the server could not produce them, so there is
        no subject and no id to show. */
     unreadable: unreadable.length,
+    /* Rows the mailbox would only hand over in a reduced form -- a meeting
+       invitation is the ordinary case. Counted and named, because a row with
+       no sender and no recipients is a row somebody will otherwise wonder
+       about. */
+    partial: thin.length,
+    partialItems: thin,
     /* Who they were, as far as the server would say. Each is
        { offset, sourceId?, webLink?, subject?, date? } -- a message the
        mailbox cannot produce in a list may still answer a thinner question,

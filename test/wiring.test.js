@@ -8281,17 +8281,50 @@ test('a mailbox that answers 200 with an error inside is not an empty mailbox', 
   assert.match(funcBody(mail, 'renderList'), /loadFolder\(folder, messages\.length \+ 200\)/,
     'and there is a way past the first page that is not search');
 
-  /* A skipped message is named, not counted. The crash is in serialising some
-     property, so the same server answers a thinner question about the same
-     position -- the id alone, then the id with a subject and a date. */
-  const desc = funcBody(owa, 'describeSkipped');
-  assert.ok(desc.includes("baseShape: 'IdOnly'"), 'it asks for the least the server can give');
-  assert.ok(desc.includes('deepLink(id)'), 'an id is a link into Outlook, where it can still be read');
-  assert.ok(desc.includes('d.sortable ? sortByReceived(d) : null'),
-    'in the order the walk counted positions in, or it would name a different message');
+  /* A position the server chokes on is asked for less, not written off. The
+     two messages that stopped a real mailbox were meeting invitations: on the
+     server a meeting request is not a Message, so the list's message-only
+     properties break it -- and losing an invitation from the list, from
+     search and from every 郵件待辦 rule is the wrong half to lose. */
+  assert.ok(owa.includes('const RESCUE_RUNGS'), 'the rungs are named in one place');
+  assert.ok(owa.includes("{ name: 'id', props: () => [] }"), 'the thinnest asks for nothing but the id');
+  const resc = funcBody(owa, 'rescueOne');
+  assert.ok(resc.includes("baseShape: 'IdOnly'"), 'it asks for the least the server can give');
+  /* And can recognise the answer to that question. walkItems wants a subject,
+     a date, a sender or an item class as well as an id -- correct for a page
+     of mail, wrong for a deliberate IdOnly question, whose entire answer is
+     an id. Reading its empty result as 「the server gave nothing」 made every
+     rescue report 「連主旨都交不出來」 while the server was answering. */
+  assert.ok(resc.includes('firstIdItem(json, 0)'), 'an id-only answer is still an answer');
+  assert.match(owa, /function firstIdItem/, 'which needs a reader of its own');
+  /* The fixture could not have caught it: it returned every field however
+     thin the question. Same failure as the ToRecipients one in 1.0.28. */
+  const spec2 = fs.readFileSync(path.join(APP, '..', 'e2e', 'specs', 'owa.mjs'), 'utf8');
+  assert.match(spec2, /if \(\(shape\.BaseShape \|\| ''\) !== 'IdOnly'\) return it;/,
+    'the fake answers the shape it was asked for');
+  assert.match(spec2, /OwaMethodArgumentException/,
+    'and refuses the property spelling a real tenant refuses');
+
+  /* What the measurement finally said. The item that breaks a page breaks a
+     page of one just as well, and answers in full when the fields are named
+     -- so it was never the page size and never the fields, it was asking for
+     AllProperties. Naming them costs nothing: every field the mirror reads
+     was already in the named list, asked for even under AllProperties. */
+  const ladder = funcBody(owa, 'probeShapes');
+  assert.ok(ladder.includes("if (r.ok && r.usable) found.baseShape = 'IdOnly';"),
+    'once the named list works, that is the shape the list uses');
+  assert.ok(ladder.includes('namedWorks && props.length >= 4'),
+    'and only when enough of it was proved');
+  assert.ok(resc.includes('out.item = got;'), 'and keeps the richest answer that came back');
+  assert.ok(resc.includes('d.sortable ? sortByReceived(d) : null'),
+    'in the order the walk counted positions in, or it would rescue a different message');
   assert.ok(funcBody(owa, 'buildFindItem').includes("o.offset || 0"),
     'which needs the offset to reach the request at all');
-  assert.match(mail, /res\.data\.unreadableItems/, 'and the window says who it was');
+  assert.ok(funcBody(owa, 'findPage').includes('thin: [{ offset, subject: got.subject'),
+    'a rescued row travels with what it is short of');
+  assert.match(owa, /partial: thin\.length/, 'and the sync counts them apart from the lost ones');
+  assert.match(mail, /res\.data\.partialItems/, 'the window names them and says which fields are missing');
+  assert.match(mail, /res\.data\.unreadableItems/, 'and still names the ones nothing could rescue');
 });
 
 test('the taint badge says what it means for you, not who it read', () => {

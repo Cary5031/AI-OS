@@ -1147,6 +1147,26 @@
         /* A message the mailbox itself could not hand over. Said once, with
            the number, because a silently shorter list is the thing nobody
            notices until they go looking for a mail that never arrived. */
+        /* Read, but not in full. A meeting invitation is not a Message on
+           the server's side, so the list request's message-only fields break
+           it; asking for less gets the row. Say which fields are missing --
+           a row with no sender is otherwise just odd. */
+        if (res.data.partial) {
+          /* Two different things, and saying the wrong one is its own bug.
+             Measured on a real mailbox: a meeting notice that breaks a page
+             of fifty answers on its own with every field -- nothing is
+             missing, it just had to be asked for by itself. Only say 「缺」
+             when something really is. */
+          var items = res.data.partialItems || [];
+          var short = items.filter(function (u) { return u.dropped && u.dropped.length; });
+          var name = function (u) {
+            return (u.subject ? '「' + u.subject + '」' : '（無主旨）') +
+              (u.dropped && u.dropped.length ? '（缺 ' + u.dropped.join('、') + '）' : '');
+          };
+          ctx.toast('有 ' + res.data.partial + ' 封信要一封一封拿才拿得到（會議通知最常見），' +
+            '已經收進來' + (short.length ? '' : '，欄位齊全') + '：' +
+            items.map(name).join('、'), short.length ? 't-warn' : 't-ok');
+        }
         if (res.data.unreadable) {
           /* Named where the server would say who it was. 「有 1 封信交不出
              來」 tells somebody their mail is incomplete and gives them
@@ -1154,7 +1174,15 @@
              is the difference between a warning and an errand. */
           var who = (res.data.unreadableItems || []).map(function (u) {
             var when = u.date ? new Date(u.date).toLocaleString() + ' ' : '';
-            return when + (u.subject ? '「' + u.subject + '」' : '（連主旨都交不出來）');
+            var name = u.subject ? '「' + u.subject + '」' : '（連主旨都交不出來）';
+            /* What was asked and what came back. When even the thinnest
+               question fails there is nothing else to describe the message
+               by, and the server's own code is what anybody debugging this
+               needs first. */
+            var last = (u.tried || []).filter(function (t) { return !t.ok; })[0];
+            var why = last ? '［第 ' + (u.offset + 1) + ' 則／' + last.rung + '：' + last.code +
+              (u.unsortedAnswers ? '／不排序就答得出來' : '') + '］' : '';
+            return when + name + why;
           }).join('、');
           ctx.toast('有 ' + res.data.unreadable + ' 封信伺服器交不出來（它自己出錯），已經跳過' +
             (who ? '：' + who : '') + '。其餘都收下來了。', 't-warn');
