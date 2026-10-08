@@ -427,12 +427,11 @@ function wireBoot() {
          far worse fault than the one that happened.
 
          It is the first run of a fresh copy that finds this: the default
-         provider is the local one, and the local one is started by a script that
-         lives outside this project. Nobody who has just installed this has that
-         script, and the fix -- choosing a provider -- is in the window that
-         failed to come up. */
+         provider is the local one, and a fresh copy has neither a llama-server
+         listening nor a launcher configured to start one. The fix -- choosing a
+         provider -- is in the window that failed to come up. */
       try {
-        const started = await llama.start(APP_ROOT, { noSpawn: ARGS.has('--no-spawn-llama') });
+        const started = await llama.start({ noSpawn: ARGS.has('--no-spawn-llama') });
         if (started.reason === 'no-spawn') {
           say('  --no-spawn-llama: no local model host will be started', 'warn');
         } else if (started.skipped) {

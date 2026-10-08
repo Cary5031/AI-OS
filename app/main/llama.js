@@ -6,10 +6,10 @@
    The model host is this machine's kernel, so the application boots it and
    waits for it, streaming the real llama.cpp load log into the boot screen.
    That turns the POST sequence from a progress animation into an actual
-   measurement of a 24 GB model being mapped into memory.
+   measurement of the model being mapped into memory.
 
    If a server is already listening we attach to it instead of starting a
-   second one -- two copies of this model would not fit in 12 GB of VRAM.
+   second one -- two copies of one model rarely fit in one card's VRAM.
 
    ---------------------------------------------------------------------------
    The kernel does not have to be local
@@ -46,46 +46,41 @@ const preset = require('./preset');
 const ENDPOINT = 'http://127.0.0.1:8080';
 
 /* ---------------------------------------------------------------------------
-   Launch arguments. -NCpuMoe 34 rather than the script's tuned default of 28.
+   Starting a local model host.
 
-   --n-cpu-moe N keeps the MoE experts of the first N layers in system RAM, so a
-   lower N puts more of the model on the GPU. The obvious reading is "lower is
-   faster", and on this 12 GB card that is only true for a while. Measured on
-   this machine, llama-server alone, 400 decoded tokens, ctx 65536:
+   Nothing here knows which llama.cpp build, which gguf or which offload
+   settings a machine uses. Those are facts about one machine -- every value
+   worth choosing depends on the card and the model -- so they are described
+   from outside, by whoever owns the machine:
 
-     n-cpu-moe   VRAM used   free      decode
-        34        8804 MiB   3484 MiB   25.3 tok/s
-        32        9750 MiB   2521 MiB   27.1 tok/s
-        30       10964 MiB   1324 MiB   27.8 tok/s
-        26       11813 MiB    475 MiB   30.8 tok/s   <- fastest
-        22       11882 MiB    406 MiB   16.1 tok/s   <- collapses
-        18       11838 MiB    450 MiB   12.7 tok/s
+     AIOS_LLAMA_LAUNCHER   what to run. A .ps1 is run with PowerShell 7 (pwsh);
+                           anything else is executed directly, so this can point
+                           straight at llama-server.exe.
+     AIOS_LLAMA_ARGS       its arguments, split on whitespace. Double quotes
+                           keep a path with spaces in one argument.
 
-   Below about 26 the card is saturated at ~11.9 GiB and WDDM starts serving the
-   overflow from system RAM across PCIe, so pushing more layers onto the GPU
-   makes it slower, not faster. At ctx 32768 with n=26 a single request did not
-   finish inside 300 s at all.
+   What it runs has to bring up a llama-server that answers /health at the
+   local provider's endpoint, and keep running while it does: boot waits for
+   /health, and shutdown takes down the whole process tree.
 
-   That leaves the choice bounded from both sides, and the binding constraint is
-   that this process is also a browser. Measured: AI-OS with ten windows open,
-   a live Wikipedia page and a request in flight costs about 850 MiB of VRAM on
-   top of the model. So the usable headroom is `free` minus ~850 MiB:
+   The environment and nowhere else, on purpose. What this process executes
+   must not be something the renderer can choose. The provider window writes
+   model-provider.json through IPC, so a launcher stored there would turn one
+   compromised renderer into arbitrary code on the next boot.
 
-     34  ->  ~2.6 GiB spare   (what ships)
-     32  ->  ~1.7 GiB spare
-     30  ->  ~0.5 GiB spare   too tight
-     28  ->  ~0.05 GiB spare  this is the original crash
+   Unset means "start nothing": a server that is already listening is attached
+   to, and otherwise boot says there is none and carries on.
 
-   28 is where "CUDA error: an illegal memory access was encountered" came from,
-   and the table shows it was never a mystery: there was nothing left for
-   Chromium. 34 buys back roughly 2.6 GiB of slack for 22% of the decode rate,
-   which is the right trade for a machine whose whole point is running a
-   browser, a mail client and an editor beside the model.
-
-   If you want the speed back and are willing to spend the slack, 32 is the only
-   value worth moving to; anything lower needs the browser closed.
+   Whatever the model, budget for this process being a browser too. Measured:
+   ten windows, a live Wikipedia page and a request in flight cost about 850 MiB
+   of VRAM on top of the model. Offload settings that fill the card end in
+   "CUDA error: an illegal memory access was encountered" as soon as Chromium
+   grows -- and once the card is full, Windows serves the overflow from system
+   RAM over PCIe, so pushing more layers onto the GPU makes decoding slower,
+   not faster.
    --------------------------------------------------------------------------- */
-const LAUNCH_ARGS = ['-SkipDownload', '-Mmap', '-NCpuMoe', '34'];
+const LAUNCHER_ENV = 'AIOS_LLAMA_LAUNCHER';
+const LAUNCHER_ARGS_ENV = 'AIOS_LLAMA_ARGS';
 
 let child = null;
 let attached = false;
@@ -104,8 +99,36 @@ function onLog(fn) {
   return backlog.slice();
 }
 
-function scriptPath(appRoot) {
-  return path.resolve(appRoot, '..', 'Start-OrnithA1.ps1');
+/** The launch the environment describes, or null when it describes none. */
+function launcher(env = process.env) {
+  const file = String(env[LAUNCHER_ENV] || '').trim().replace(/^"(.*)"$/, '$1');
+  if (!file) return null;
+  return { file: path.resolve(file), args: splitArgs(env[LAUNCHER_ARGS_ENV]) };
+}
+
+/** Split on whitespace; a double-quoted stretch stays in one argument. */
+function splitArgs(text) {
+  const out = [];
+  let cur = '';
+  let open = false;
+  let started = false;
+  for (const ch of String(text || '')) {
+    if (ch === '"') {
+      open = !open;
+      started = true;
+      continue;
+    }
+    if (!open && /\s/.test(ch)) {
+      if (started) out.push(cur);
+      cur = '';
+      started = false;
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
 }
 
 async function health(timeoutMs = 1500) {
@@ -145,9 +168,9 @@ async function props() {
  * onProgress receives every log line so the boot screen can show the real
  * thing rather than a synthetic bar.
  */
-async function start(appRoot, opts = {}) {
-  /* A hosted core needs no local process, and starting one anyway would map 8.9
-     GB into memory to sit idle. The user chose a provider; honour it. */
+async function start(opts = {}) {
+  /* A hosted core needs no local process, and starting one anyway would map the
+     whole model into memory to sit idle. The user chose a provider; honour it. */
   if (!module.exports.isLocalActive()) {
     emit('core model provider is not local, skipping llama-server', 'info');
     return { attached: false, spawned: false, skipped: true };
@@ -161,29 +184,54 @@ async function start(appRoot, opts = {}) {
 
   /* "Do not start one", not "fail if there is not one".
      This used to throw, which failed the whole boot -- and the flag exists
-     precisely for the case where the user does not want a 9 GB model resident,
-     which is now an ordinary way to run this machine: pick a hosted provider and
-     the local host is dead weight. Refusing to start would leave them with no
-     shell, and the window that changes the provider is inside the shell. */
+     precisely for the case where the user does not want a model of several
+     gigabytes resident, which is now an ordinary way to run this machine: pick
+     a hosted provider and the local host is dead weight. Refusing to start
+     would leave them with no shell, and the window that changes the provider
+     is inside the shell. */
   if (opts.noSpawn) {
     emit('no model host listening, and --no-spawn-llama was given: not starting one', 'warn');
     return { attached: false, spawned: false, skipped: true, reason: 'no-spawn' };
   }
 
-  const script = scriptPath(appRoot);
-  if (!fsc.existsSync(script)) {
-    emit('launch script not found: ' + script, 'error');
-    throw new Error('找不到啟動腳本：' + script);
+  const launch = launcher();
+  if (!launch) {
+    emit('no model host at ' + localEndpoint() + ', and no ' + LAUNCHER_ENV + ' to start one', 'error');
+    throw new Error(localEndpoint() + ' 沒有 llama-server，也沒有設定啟動程式（環境變數 ' + LAUNCHER_ENV + '）');
+  }
+  if (!fsc.existsSync(launch.file)) {
+    emit('launcher not found: ' + launch.file, 'error');
+    throw new Error('找不到啟動程式：' + launch.file);
+  }
+  /* Node refuses to run a batch file without a shell, and not going through a
+     shell is the point of the argument array below. */
+  if (/\.(bat|cmd)$/i.test(launch.file)) {
+    emit('launcher is a batch file: ' + launch.file, 'error');
+    throw new Error('啟動程式要是 .ps1 或執行檔，不能是 .bat／.cmd：' + launch.file);
   }
 
-  emit('spawning kernel: ' + path.basename(script) + ' ' + LAUNCH_ARGS.join(' '), 'hi');
+  const ps1 = /\.ps1$/i.test(launch.file);
+  const argv = ps1
+    ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launch.file, ...launch.args]
+    : launch.args;
+  emit('spawning kernel: ' + [path.basename(launch.file), ...launch.args].join(' '), 'hi');
 
   // Argument array, no shell: nothing here is interpolated into a command line.
-  child = spawn(
-    'pwsh',
-    ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...LAUNCH_ARGS],
-    { cwd: path.dirname(script), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
-  );
+  try {
+    child = spawn(ps1 ? 'pwsh' : launch.file, argv,
+      { cwd: path.dirname(launch.file), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    // A file Windows will not execute at all (EFTYPE) is refused right here.
+    emit('launcher could not run: ' + e.message, 'error');
+    throw new Error('啟動程式跑不起來（' + e.message + '）：' + launch.file);
+  }
+  /* Anything else that keeps the launcher from running -- pwsh missing from
+     PATH, say -- arrives as 'error' rather than 'exit', and an 'error' nobody
+     listens for is thrown in the main process. */
+  child.on('error', (e) => {
+    emit('launcher could not run: ' + e.message, 'error');
+    child = null;
+  });
 
   const pump = (stream, level) => {
     let buf = '';
@@ -229,9 +277,9 @@ async function start(appRoot, opts = {}) {
  * Reclaim the kernel on shutdown.
  *
  * This has to be synchronous. Spawning taskkill asynchronously from a quit
- * handler loses the race: Electron exits, our helper dies with it, and an
- * 8.9 GB model stays resident holding VRAM until the user finds it in Task
- * Manager. spawnSync blocks the quit until the tree is actually gone.
+ * handler loses the race: Electron exits, our helper dies with it, and the
+ * model stays resident holding VRAM until the user finds it in Task Manager.
+ * spawnSync blocks the quit until the tree is actually gone.
  *
  * Only ever kills what this process started. A server the user launched
  * themselves is attached to, not owned, and is left alone.
@@ -246,8 +294,8 @@ function stop() {
   child = null;
 
   try {
-    // /T takes the whole tree: the PowerShell wrapper is the parent of
-    // llama-server, so killing the wrapper alone would orphan the model.
+    // /T takes the whole tree: a launcher script is the parent of
+    // llama-server, so killing the launcher alone would orphan the model.
     const r = spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
       windowsHide: true,
       timeout: 10000,
@@ -1383,7 +1431,8 @@ async function exportPreset(opts) {
 }
 
 module.exports = {
-  ENDPOINT, start, stop, status, health, props, onLog,
+  ENDPOINT, LAUNCHER_ENV, LAUNCHER_ARGS_ENV, launcher, splitArgs,
+  start, stop, status, health, props, onLog,
   initProviders, providerState, selectProvider, configureProvider,
   setSecret, forgetSecret, probeActive, tokenizeActive, chatActive, abortActive,
   listModels, localEndpoint, exportPreset, hasImages, acceptsImages,

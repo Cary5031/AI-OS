@@ -31,6 +31,13 @@ const ACCOUNT = 'staff@company.example';
 const NOTE = '/notes/e2e-owa-待辦.md';
 const SAVED = '/inbox/e2e-owa-報價單.txt';
 
+/* Dated relative to now, not on a calendar. The first sync reaches back
+   FIRST_DAYS (30) days, and these used to be fixed dates in early September:
+   the oldest aged out of the window on 2026-10-08 and the whole spec went red
+   with nothing in the code having changed. */
+const DAY = 86400000;
+const ago = (days) => new Date(Date.now() - days * DAY).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
 /* Three messages: two from the company the morning job asks about, one not.
    One of the two mentions the user by name, which is the thing the sentence
    asks to be marked. */
@@ -41,7 +48,7 @@ const MESSAGES = [
     internetMessageId: '<quote-0908@abc.com>',
     subject: '九月份報價單',
     from: { name: '王小明', address: 'ming@abc.com' },
-    received: '2026-09-08T02:10:00Z',
+    received: ago(3),
     /* Shaped like the mail people actually get: a table of figures, a quoted
        reply, a signature block, a tracking pixel and a link -- plus the script
        and the handler that a reader has to refuse. */
@@ -69,7 +76,7 @@ const MESSAGES = [
     internetMessageId: '',            // the server that answers without one
     subject: '交期確認',
     from: { name: '李大同', address: 'ta@mail.abc.com' },
-    received: '2026-09-09T06:00:00Z',
+    received: ago(2),
     body: '<p>交期改為九月二十日。</p>',
     attachments: []
   },
@@ -79,7 +86,7 @@ const MESSAGES = [
     internetMessageId: '<newsletter@other.example>',
     subject: '每週電子報',
     from: { name: '別家公司', address: 'news@other.example' },
-    received: '2026-09-10T01:00:00Z',
+    received: ago(1),
     body: '<p>本週產業快訊。</p>',
     attachments: []
   }
@@ -862,7 +869,7 @@ export async function spec(t, app) {
         await window.aios.gate.unattended(true);
         var out = { steps: [] };
         try {
-          var hits = await window.aios.mail.search({ from: 'abc.com', since: Date.parse('2026-09-07') });
+          var hits = await window.aios.mail.search({ from: 'abc.com', since: ${Date.parse(ago(4))} });
           out.steps.push('search=' + (hits.ok ? hits.data.hits.length : 'FAIL'));
 
           var lines = ['# 待辦（' + new Date().toLocaleDateString() + '）', ''];
@@ -982,7 +989,7 @@ export async function spec(t, app) {
         internetMessageId: '<just-arrived@abc.com>',
         subject: '剛剛寄到的信',
         from: { name: '王小明', address: 'ming@abc.com' },
-        received: '2026-09-11T08:00:00Z',
+        received: ago(0),
         body: '<p>這封是在視窗開著的時候才到的。</p>',
         attachments: []
       });

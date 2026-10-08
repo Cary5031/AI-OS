@@ -1,10 +1,22 @@
 {
   "name": "ai-os",
-  "version": "1.0.32",
+  "version": "1.0.33",
   "private": true,
   "description": "AI-OS: an intent-kernel desktop machine driven by a local llama.cpp model, with a real sandboxed filesystem.",
+  "license": "MIT",
+  "author": "Cary",
+  "homepage": "https://github.com/Cary5031/AI-OS",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cary5031/AI-OS.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cary5031/AI-OS/issues"
+  },
   "main": "app/main/index.js",
   "scripts": {
+    "_comment:postinstall": "This Electron release does not fetch its binary on install; it waits for the first require('electron'). npm test runs suites in parallel, so on a fresh clone several processes raced to unpack the same folder and three suites crashed. Fetch it once, here.",
+    "postinstall": "install-electron",
     "start": "electron .",
     "start:noaccel": "electron . --disable-gpu-accel",
     "start:nokernel": "electron . --no-spawn-llama",

@@ -728,7 +728,7 @@ test('a missing model host degrades the boot, it does not fail it', () => {
      provider setting, and the window to change it is the one that did not
      come up. */
   const src = read('main/index.js');
-  const call = src.indexOf('llama.start(APP_ROOT');
+  const call = src.indexOf('llama.start(');
   assert.ok(call > 0, 'the model host is started somewhere in boot');
 
   const before = src.slice(0, call);
@@ -829,7 +829,7 @@ test('a shipped preset speaks only on a first run, and cannot author itself', ()
   assert.match(p, /WHAT THIS ENCRYPTION DOES AND DOES NOT DO/,
     'the limitation must stay documented where the key is handled');
   assert.match(p, /AIOS_PRESET_SECRET/,
-    'and a build must be able to use a passphrase that was never committed');
+    'and a deployment must be able to use a passphrase that was never committed');
 });
 
 test('shutdown is reachable from the menu and asks the same way everywhere', () => {
@@ -6096,10 +6096,10 @@ test('a provider is described, not branched on', () => {
   assert.match(src, /generativelanguage\.googleapis\.com\/v1beta\/openai/);
   assert.match(src, /https:\/\/api\.openai\.com\/v1/);
 
-  /* A hosted core needs no local process; starting one would map 8.9 GB into
-     memory to sit idle. Sliced by hand rather than with funcBody: `start` takes
-     `opts = {}`, and a default parameter's braces come before the body's. */
-  const start = src.slice(src.indexOf('async function start(appRoot'));
+  /* A hosted core needs no local process; starting one would map the whole model
+     into memory to sit idle. Sliced by hand rather than with funcBody: `start`
+     takes `opts = {}`, and a default parameter's braces come before the body's. */
+  const start = src.slice(src.indexOf('async function start('));
   assert.match(start.slice(0, 400), /isLocalActive\(\)[\s\S]{0,200}skipped: true/);
 });
 
@@ -6462,7 +6462,7 @@ test('--no-spawn-llama declines to start a model, it does not refuse to boot', (
      machine -- and the window that changes the provider is inside the shell that
      refusing to boot would have withheld. */
   const src = read('main/llama.js');
-  const start = src.slice(src.indexOf('async function start(appRoot'));
+  const start = src.slice(src.indexOf('async function start('));
   const noSpawn = start.slice(start.indexOf('if (opts.noSpawn)'));
   assert.match(noSpawn.slice(0, 300), /return \{ attached: false, spawned: false, skipped: true, reason: 'no-spawn' \}/);
   assert.ok(!/throw/.test(noSpawn.slice(0, 300)), 'and it no longer throws');
@@ -6479,6 +6479,51 @@ test('--no-spawn-llama declines to start a model, it does not refuse to boot', (
   const ui = read('renderer/ui.js');
   assert.match(ui, /READY \(degraded: no core model -- 系統 → 核心模型\)/);
   assert.ok(!/start:nokernel/.test(ui), 'the self-contradicting hint is gone');
+});
+
+/**
+ * The local model host used to be started by one script with one name, in the
+ * folder above the project, with offload arguments tuned for one graphics card.
+ * None of that is true of anyone else's machine, so the launch is described by
+ * the environment instead -- and only by the environment, because whatever is
+ * named there gets executed.
+ */
+test('the local model launcher is described by the environment, never by a stored setting', () => {
+  const llama = require('../app/main/llama');
+
+  assert.equal(llama.launcher({}), null, 'unset means start nothing');
+  assert.equal(llama.launcher({ AIOS_LLAMA_LAUNCHER: '   ' }), null, 'blank is unset too');
+
+  const ps = llama.launcher({
+    AIOS_LLAMA_LAUNCHER: '"C:\\models\\start server.ps1"',
+    AIOS_LLAMA_ARGS: '-Port 8080'
+  });
+  assert.equal(ps.file, path.resolve('C:\\models\\start server.ps1'), 'a quoted path is still a path');
+  assert.deepEqual(ps.args, ['-Port', '8080']);
+
+  /* What start() runs comes from launcher() and nowhere else. The provider
+     window writes its settings through IPC; a launcher read from there would
+     let a compromised renderer choose what this process executes. */
+  const src = read('main/llama.js');
+  const start = src.slice(src.indexOf('async function start('), src.indexOf('function stop('));
+  assert.match(start, /const launch = launcher\(\);/);
+  assert.ok(!/confOf\(|conf\.local|conf\[/.test(start), 'start() reads nothing from the stored provider settings');
+  assert.match(start, /spawn\(\s*ps1 \? 'pwsh' : launch\.file/, 'and it runs exactly that file');
+
+  // And no particular script, model file or offload setting is named in the code.
+  assert.ok(!/Start-[A-Za-z0-9]+\.ps1|NCpuMoe|\.gguf'/.test(src), 'llama.js names a particular launch');
+});
+
+test('launcher arguments split on whitespace and keep quoted paths whole', () => {
+  const { splitArgs } = require('../app/main/llama');
+  assert.deepEqual(splitArgs(''), []);
+  assert.deepEqual(splitArgs(undefined), []);
+  assert.deepEqual(splitArgs('  -c 32768   --port 8080 '), ['-c', '32768', '--port', '8080']);
+  assert.deepEqual(splitArgs('-m "C:\\My Models\\a b.gguf" -ngl 99'),
+    ['-m', 'C:\\My Models\\a b.gguf', '-ngl', '99'], 'a path with spaces is one argument');
+  assert.deepEqual(splitArgs('--model="C:\\x y\\m.gguf"'), ['--model=C:\\x y\\m.gguf'],
+    'quotes in the middle of an argument join it, the way a shell would');
+  assert.deepEqual(splitArgs('--alias ""'), ['--alias', ''], 'an empty quoted argument survives');
 });
 
 /**

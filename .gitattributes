@@ -1,0 +1,17 @@
+# Every text file is stored and checked out with LF, whatever core.autocrlf says.
+#
+# Git for Windows defaults to autocrlf=true, and so do the Windows runners on
+# GitHub Actions. Without this file a fresh clone gets CRLF, and two tests fail
+# on the copy that never failed here: docs.test.js reads a carriage return as a
+# control character, and a source check in wiring.test.js matches `;\n` literally.
+* text=auto eol=lf
+
+# cmd.exe parses batch files line by line and is only reliable with CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.pdf binary

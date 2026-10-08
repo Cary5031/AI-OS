@@ -17,6 +17,9 @@
 #    -Version     直接指定版本，例如 -Version 1.2.0
 #    -Portable    只出免安裝版
 #    -Setup       只出安裝檔
+#    -WithPreset  帶上 app\preset\provider-preset.enc。裡面有 API 金鑰，拿到這一版
+#                 的人都還原得出來，所以只給信得過的人；沒加這個參數而檔案存在，
+#                 建置會在跑測試之前就停下來。
 # ===========================================================================
 
 [CmdletBinding()]
@@ -27,7 +30,8 @@ param(
   [switch]$Major,
   [string]$Version,
   [switch]$Portable,
-  [switch]$Setup
+  [switch]$Setup,
+  [switch]$WithPreset
 )
 
 # 從 IDE 終端啟動的子行程會帶著 ELECTRON_RUN_AS_NODE，而它會讓 require('electron')
@@ -81,7 +85,7 @@ Write-Host ''
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
-  Stop-Here '找不到 node。請先安裝 Node.js 18 以上：https://nodejs.org/'
+  Stop-Here '找不到 node。請先安裝 Node.js 24：https://nodejs.org/'
 }
 Say "node $(node -v)" 'ok'
 
@@ -92,6 +96,25 @@ if (-not (Test-Path 'node_modules\electron-builder')) {
   if ($LASTEXITCODE -ne 0) { Stop-Here 'npm install 失敗' }
 }
 Say '相依套件就緒' 'ok'
+
+# ------------------------------------------------------------ 內建模型預設檔
+
+# 預設檔裡有 API 金鑰，而拿到建置結果的人都還原得出來（原因見 app\main\preset.js）。
+# 真正擋住打包的是 electron-builder 的 beforePack（build\preset-guard.js），
+# npm run dist 也會經過它；這裡先查一次，免得跑完好幾分鐘的測試才在打包那一步停下來。
+# 只有 -WithPreset 會放行：環境裡剛好留著的 AIOS_SHIP_PRESET 不算數。
+$env:AIOS_SHIP_PRESET = $null
+$presetFile = 'app\preset\provider-preset.enc'
+if (Test-Path $presetFile) {
+  if ($WithPreset) {
+    $env:AIOS_SHIP_PRESET = '1'
+    Say '這一版會帶著內建模型預設檔（-WithPreset）：拿到它的人都還原得出裡面的金鑰' 'warn'
+  } else {
+    Stop-Here "$presetFile 存在，打包會把裡面的 API 金鑰一起帶進去。要公開發佈就先把它移走；只給信得過的人、確定要帶的話加 -WithPreset。"
+  }
+} elseif ($WithPreset) {
+  Say "-WithPreset：可是 $presetFile 不存在，這一版不會帶預設檔" 'warn'
+}
 
 # ---------------------------------------------------------------------- 測試
 

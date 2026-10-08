@@ -19,20 +19,24 @@
    the program holds everything the program needs to decrypt, because it has to
    decrypt without asking anyone. So:
 
-     - This stops the key being readable by opening the file, by `strings` on the
-       binary, or by anyone who copies the preset out of the install directory.
-     - It does NOT stop somebody who is willing to read the source or step
-       through the program. Treat a shipped key as recoverable by any determined
-       recipient.
+     - This stops the key being readable by opening the file or by `strings` on
+       the binary.
+     - It does NOT stop anyone who reads the source -- the default passphrase is
+       below, and the source is public -- so a copy of the preset or of the build
+       is enough. Treat a shipped key as already published.
 
    Ship a key you are willing to have recovered: one with a spending cap, scoped
    to what this application does, and rotatable. If the audience is the public
    rather than people you know, put a server you control between them and the
    provider instead, and ship its address rather than a key.
 
-   `AIOS_PRESET_SECRET` in the environment overrides the passphrase below, so a
-   build can use one that was never committed. Losing it only means old presets
-   stop opening -- make a new one.
+   `AIOS_PRESET_SECRET` in the environment overrides the passphrase below. It is
+   read when the preset is sealed *and* every time it is opened, so it has to be
+   set the same way on every machine that runs the build: a passphrase only the
+   build machine knows makes a preset nobody else can open. Losing it only means
+   old presets stop opening -- make a new one.
+
+   Packing a preset is refused unless asked for: see build/preset-guard.js.
    =========================================================================== */
 
 const crypto = require('node:crypto');

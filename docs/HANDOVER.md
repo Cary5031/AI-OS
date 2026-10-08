@@ -12,7 +12,23 @@ v1.0.21 由 `Build-AIOS.bat` 三關全過後建出
 `doc.extract`（剩十四個能力），只為它寫的頁面算繪器（`pdf.rasterize`）一起拿掉；第 91、92、108 項
 留著當時的記錄，開頭各註明了一行。
 
-`npm test` 從 362 → **854 個測試**；另外有一套 `npm run test:e2e`（**169 個**）會啟動
+2026-10-08：**開源前整理**。授權是 MIT（`LICENSE`）；README、這份交接記錄與 TODO 搬進 `docs/`，
+根目錄換成一份給第一次來的人看的短 README，另有 `CONTRIBUTING.md`、`SECURITY.md` 與在 Windows 上
+跑 `npm test` 的 CI。地端模型改由環境變數 `AIOS_LLAMA_LAUNCHER`／`AIOS_LLAMA_ARGS` 描述，
+程式碼不再寫死任何腳本、模型或顯卡。內建模型預設檔現在打包時會被擋下，要帶得加
+`Build-AIOS.bat -WithPreset`（`build/preset-guard.js`）。`.gitattributes` 讓每個 clone 都拿到 LF：
+之前一份預設 `autocrlf=true` 的乾淨 clone 會有兩個測試失敗，這台機器上卻看不到。
+`docs.test.js` 檢查文件提到的檔案時，改成以版控看得到的檔案為準，被 gitignore 的檔案不再
+因為剛好躺在這台機器上而過關。graphify-out 不再進版控。
+同一天從乾淨目錄建置時才發現：這一版的 Electron（43.4.0）不會在 `npm install` 時下載執行檔，
+而是等第一次 `require('electron')`。全新 clone 直接 `npm test`，七個行程同時去下載、解壓同一個
+資料夾，三個測試檔當場中斷、856 個只跑了 501 個；這台機器的 node_modules 裡早就有執行檔，
+所以從來看不到。`package.json` 加了 `postinstall: install-electron`。
+也是同一天：`e2e/specs/owa.mjs` 的假信日期寫死在 9/8～9/10，而第一次同步只回溯 `FIRST_DAYS`（30）天。
+10/8 那天最舊的一封掉出範圍，那一組 15 個測試連鎖失敗，程式碼一行都沒改；`Build-AIOS.bat`
+從那天起會停在 e2e 那一關。日期改成相對於現在。
+
+`npm test` 從 362 → **856 個測試**；另外有一套 `npm run test:e2e`（**169 個**）會啟動
 真的程式用 CDP 驅動它。兩套都全過，`Build-AIOS.bat` 三關（單元、e2e、打包版首次啟動）
 任何一關沒過就中止建置。
 
@@ -227,7 +243,7 @@ main 仍是唯一真相來源，renderer 不留副本。
 
 ### 12. 同一個生成程式開兩個視窗會互相吃掉資料 — `forge.js`
 
-`registerGenerated` 沒設 `singleton`，[registry.js](app/renderer/apps/registry.js) 預設 `false`，
+`registerGenerated` 沒設 `singleton`，[registry.js](../app/renderer/apps/registry.js) 預設 `false`，
 所以生成程式可以開第二個視窗。而生成程式的寫法一律是「整份清單放記憶體、每次變動整份存回
 `aios.app.<slug>`」，兩個視窗＝兩份會各自變舊的副本。
 
@@ -385,7 +401,7 @@ Electron 會快取第一次解析的結果，而 gate / memory / forge / session
 ```
 core model provider: 地端模型          ← 全新設定檔的預設
 starting model host ...
-boot failed: 找不到啟動腳本：...\resources\Start-OrnithA1.ps1
+boot failed: 找不到啟動腳本：...\resources\<地端模型的啟動腳本>.ps1
 ```
 
 `llama.start` 拋錯 → 被開機最外層的 catch 接住 → `return { ok: false }`，
@@ -739,7 +755,7 @@ os.page.pdf(path)    → 整頁存成 PDF
 
 ### 33. 按下建置就是授權，不再跳確認 — `forge.js`、`ipc.js`
 
-使用者的理由是對的，而且這台機器本來就這樣想（[ipc.js](app/main/ipc.js#L546) 的既有註解）：
+使用者的理由是對的，而且這台機器本來就這樣想（[ipc.js](../app/main/ipc.js#L546) 的既有註解）：
 把請求轉回給剛剛提出它的同一個人，不會產生第二個決定，只會養成閉眼點確定的習慣。
 
 `confirmInstall` 預設 **false**，存在 `apps-index.json`（跟索引同一個檔，一次寫入，
@@ -3983,11 +3999,10 @@ JS 生態沒有現成的：`node-pptx-parser`、`pptx-content-extractor`、`offi
 `AIOS.appshell.smokeTest()`，所以整套 e2e 是免費的。真的跑一次 Forge 建置要
 3–4 分鐘而且花錢（目前核心是雲端 OpenAI、reasoning=max）。要測完整建置流程，可以把思考模式調低。
 
-**切到地端模型現在不會成功**：`llama.js` 找的是 `<專案上一層>/Start-OrnithA1.ps1`，
-而這台機器上那支腳本在 `D:\WorkSpace\0719\`，專案在 `D:\WorkSpace\AI-OS\`，
-所以它會去找 `D:\WorkSpace\Start-OrnithA1.ps1` 並丟「找不到啟動腳本」。
-要用地端就先把腳本搬到 `D:\WorkSpace\`。（使用者說過地端模型的問題不用處理，
-所以這裡只記錄現況，沒有動任何檔案。）
+**地端模型怎麼啟動，2026-10-08 起由環境變數描述**：`AIOS_LLAMA_LAUNCHER` 指向啟動程式，
+`AIOS_LLAMA_ARGS` 放參數（見 README 的〈地端核心〉）。之前 `llama.js` 寫死的是專案上一層的
+某一支腳本，加上一組照某張顯卡調的參數，換一台機器就找不到。兩個都沒設、也沒有 llama-server
+在聽的話，開機只會印一行錯誤，其他照常。
 
 ---
 
@@ -4001,9 +4016,10 @@ JS 生態沒有現成的：`node-pptx-parser`、`pptx-content-extractor`、`offi
 > 不能當成現況。方法論的部分（社群標籤會錯位、孤島是事實、`label.py audit` 要先跑）
 > 才是還有效的那一半，下次重跑仍然照著走。
 
-`graphify-out/` 有修正過的知識圖譜與 `rebuild/`（七支可重現腳本 + README）。
-**預設 `/graphify` 流程對這個專案會產生結構錯誤的圖**，重跑要走
-`graphify-out/rebuild/README.md` 那一串，否則會退回錯誤版本。原因與修法都寫在那份 README。
+修正過的知識圖譜與 `rebuild/`（七支可重現腳本 + README）在 graphify-out 資料夾裡。
+**2026-10-08 起它不進版控**（產生出來的、好幾 MB，還記著產生它那台機器的路徑），只在跑過的
+那台機器上。**預設 `/graphify` 流程對這個專案會產生結構錯誤的圖**，重跑要走
+graphify-out/rebuild 底下那份 README 寫的步驟，否則會退回錯誤版本。原因與修法都寫在那份 README。
 
 累計：**1331 → 1384 → 1558 → 1561 → 1578 節點**、**3079 → 3169 → 3526 → 3535 → 3562 邊**。
 最後一次新進圖的是 `fs.find`（sandbox / ipc / preload / surfaces 四處）、

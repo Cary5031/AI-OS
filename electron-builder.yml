@@ -5,9 +5,12 @@
 # recognise -- including comment keys. The reasoning below is worth more than the
 # tidiness of one less file.
 
-appId: dev.aios.desktop
+# Reverse DNS under a name this project holds (its GitHub account). The Windows
+# installer derives its identity -- the uninstall entry -- from appId, so after a
+# change the next version installs beside the old one instead of over it.
+appId: io.github.cary5031.aios
 productName: AI-OS
-copyright: AI-OS
+copyright: Copyright © 2026 Cary
 
 directories:
   output: dist
@@ -27,6 +30,10 @@ files:
   - app/**/*
   - package.json
   - '!**/*.map'
+
+# app/** includes app/preset/provider-preset.enc when one has been made, and that
+# file carries API keys. The hook stops the pack unless it is wanted; see there.
+beforePack: build/preset-guard.js
 
 win:
   target:

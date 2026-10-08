@@ -14,3 +14,12 @@ secrets/
 # to anyone who can read the repo. It belongs in a build, not in history.
 # Remove this line only if the key inside is one you would publish.
 app/preset/provider-preset.enc
+
+# Code-analysis output (graphify). Regenerated from the source, several MB, and
+# it records the paths of whichever machine produced it.
+graphify-out/
+
+# Coding agents' local state: settings, locks, worktrees. Per machine, per user.
+.claude/
+.kilo/
+.kilocode/

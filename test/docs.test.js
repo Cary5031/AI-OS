@@ -32,15 +32,24 @@ const gate = require('../app/main/gate');
 
 const ROOT = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
-const README = read('README.md');
-const HANDOVER = read('HANDOVER.md');
-const TODO = read('TODO.md');
+
+/* `README` below is the long one, docs/README.md -- every claim about counts,
+   tables and the architecture tree is made there. The README.md at the root is
+   the short front page for a first visit, and only the checks that apply to
+   every document run over it. */
+const README = read('docs/README.md');
+const HANDOVER = read('docs/HANDOVER.md');
+const TODO = read('docs/TODO.md');
 
 /* The checks that are not about the README's own numbers run over every
    document here. A new document that nothing checks is exactly how the last
    round of rot started -- TODO.md names files and headings like the others do,
    so it decays like the others do. */
-const DOCS = [['README.md', README], ['HANDOVER.md', HANDOVER], ['TODO.md', TODO]];
+const DOCS = [
+  ['docs/README.md', README], ['docs/HANDOVER.md', HANDOVER], ['docs/TODO.md', TODO],
+  ['README.md', read('README.md')], ['CONTRIBUTING.md', read('CONTRIBUTING.md')],
+  ['SECURITY.md', read('SECURITY.md')]
+];
 
 /* --------------------------------------------------------------- counts */
 
@@ -124,23 +133,41 @@ test('every e2e spec is listed in the README', () => {
 
 /* ---------------------------------------------------------------- paths */
 
+/* What a clone of this repository has, rather than what this disk has: tracked
+   files plus new ones not yet added, minus anything .gitignore keeps out. Asking
+   the disk let a gitignored file that happened to exist here pass -- the shipped
+   provider preset did, on the one machine that had made one, and the check
+   failed on every fresh clone instead. Null outside a git checkout (a source
+   archive), where the disk is all there is. */
+function inRepository() {
+  try {
+    const out = require('node:child_process').execFileSync(
+      'git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(out.split('\0').filter(Boolean));
+  } catch (e) {
+    return null;
+  }
+}
+
 test('every file the documents name actually exists', () => {
-  /* Runtime files, which live in userData or are made by a generated app. They
-     are named in the prose as things you will find on a running machine, not as
-     things in this repository. */
+  /* Runtime files, which live in userData, are made by a generated app, or are
+     made by the person running the machine. They are named in the prose as
+     things you will find on a running machine, not as things in this
+     repository. */
   const RUNTIME = new Set([
     'policy.json', 'session.json', 'memory.json', 'model-provider.json',
     'apps-index.json', 'mail-account.json', 'app.js', 'manifest.json',
-    'Start-AIOS.bat', 'Start-OrnithA1.ps1', 'Benchmark-LlamaServer.ps1',
-    'origins.json', 'restore.json', 'index.json'
+    'provider-preset.enc', 'origins.json', 'restore.json', 'index.json'
   ]);
 
+  const repo = inRepository();
   const missing = [];
   for (const [name, doc] of DOCS) {
-    for (const m of doc.matchAll(/`((?:app|test|e2e|build|graphify-out)\/[A-Za-z0-9_./-]+\.[a-z]+)`/g)) {
+    for (const m of doc.matchAll(/`((?:app|test|e2e|build|docs|\.github)\/[A-Za-z0-9_./-]+\.[a-z]+)`/g)) {
       const p = m[1];
       if (RUNTIME.has(path.basename(p))) continue;
-      if (!fs.existsSync(path.join(ROOT, p))) missing.push(name + ' → ' + p);
+      if (!fs.existsSync(path.join(ROOT, p)) || (repo && !repo.has(p))) missing.push(name + ' → ' + p);
     }
   }
   assert.deepEqual([...new Set(missing)], [],

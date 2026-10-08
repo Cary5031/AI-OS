@@ -1,0 +1,30 @@
+# Unit tests on every push and pull request.
+#
+# Windows, because it is the only platform the application is built and tested
+# on. The end-to-end suite does not run here: it starts the real application
+# and needs a desktop session in the foreground.
+#
+# The Windows runners default to core.autocrlf=true. .gitattributes is what keeps
+# this checkout LF; without it two tests fail here and nowhere else.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      # Not --ignore-scripts: the package's own postinstall fetches the Electron
+      # binary, and several suites load modules that require('electron').
+      - run: npm ci
+      - run: npm test
