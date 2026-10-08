@@ -205,16 +205,13 @@ test('index.html loads every renderer script that exists', () => {
                         main/pdf.js and loaded as a module by pdfview.html
        pdfmd.js         the PDF-to-Markdown converter, imported by pdfview.js
                         and served on the same scheme as /convert.js
-       pdfraster.js     the page rasteriser, loaded by main/pdf.js into an
-                        offscreen window on that same scheme -- it is what a
-                        scanned document is read through
        pdflayout.js     the layout reader (PDF to Excel / Word), imported by
                         pdfview.js and served on the same scheme as /layout.js
-     Loading any of them in the shell would be a bug: the four pdf files are ES
+     Loading any of them in the shell would be a bug: the three pdf files are ES
      modules that import pdf.js, and they run in a different origin on purpose;
      the two dialog scripts expect a bridge the shell does not have. */
   const ownDocument = ['consent-view.js', 'askbox-view.js', 'pdfview.js', 'pdfmd.js',
-                       'pdfraster.js', 'pdflayout.js'];
+                       'pdflayout.js'];
   const expected = onDisk.filter((f) => !ownDocument.includes(f));
   const missing = expected.filter((f) => !loaded.includes(f));
   assert.deepEqual(missing, [], 'renderer files never loaded: ' + missing.join(', '));
@@ -7593,7 +7590,7 @@ test('a streamed reply is read only after its last frame has arrived', () => {
      frame, or arrived whole with no finish_reason, because the invoke's reply
      overtook the frames -- different channels, no ordering between them. */
   const ipc = read('main/ipc.js');
-  const handler = ipc.slice(ipc.indexOf("ipcMain.handle('model:chat'"), ipc.indexOf("/* ------------------------------------------------ document extraction"));
+  const handler = ipc.slice(ipc.indexOf("ipcMain.handle('model:chat'"), ipc.indexOf("/* ------------------------------------------------------ filesystem"));
   assert.match(handler, /const out = await llama\.chatActive\([\s\S]*?frame: \{ aiosDone: true \}[\s\S]*?return \{ ok: true, data: out \};/,
     'the end marker goes out on the frames\' channel after the last frame and before the reply');
   const kernel = read('renderer/kernel.js');
@@ -8017,7 +8014,7 @@ test('每一個內建程式都開了門：至少一個註記插槽、一個動�
     if (!/AIOS\.slots\.annotate\('/.test(src)) missing.push(id + '：宣告了註記插槽卻從來沒畫過');
   }
   assert.deepEqual(missing, [], '\n  ' + missing.join('\n  '));
-  assert.ok(hosts.length >= 14, '宿主數量不對：' + hosts.length);
+  assert.ok(hosts.length >= 13, '宿主數量不對：' + hosts.length);
 });
 
 test('開關做在框架層：每個視窗的選單都問過 slots.js，而開關存在主程序', () => {

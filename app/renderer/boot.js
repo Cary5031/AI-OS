@@ -1780,9 +1780,6 @@
     memoryApp: function () { AIOS.apps.launch('memory'); },
     forge: function () { AIOS.apps.launch('forge'); },
     schedule: function () { AIOS.apps.launch('schedule'); },
-    // Singleton: a second window would hold a second batch against the same
-    // profiles, and filing twice is the mistake this program exists to avoid.
-    extract: function () { AIOS.apps.launch('extract'); },
     import: function () { AIOS.userImport('/inbox'); },
     trash: function () { AIOS.openTrash(); },
     policy: function () {

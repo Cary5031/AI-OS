@@ -313,7 +313,6 @@
   <button class="dk" type="button" data-dock="memoryApp" title="長期記憶" data-i18n-title="dock.memory"><span>◉</span></button>
   <button class="dk" type="button" data-dock="forge" title="App Forge：讓核心寫程式" data-i18n-title="dock.forge"><span>⚒</span></button>
   <button class="dk" type="button" data-dock="schedule" title="排程：定時執行程式或意圖" data-i18n-title="dock.schedule"><span>⏱</span></button>
-  <button class="dk" type="button" data-dock="extract" title="文件萃取：PDF 依廠商設定變成表格再歸檔" data-i18n-title="dock.extract"><span>✇</span></button>
   <span class="dk-sep" aria-hidden="true"></span>
   <button class="dk" type="button" data-dock="import" title="從作業系統匯入檔案" data-i18n-title="dock.import"><span>⤓</span></button>
   <button class="dk" type="button" data-dock="trash" title="沙箱回收桶" data-i18n-title="dock.trash"><span>♻</span></button>
@@ -352,10 +351,6 @@
      programs; it reads the formula engine and the palette when a chart is
      drawn, not when it loads, so it sits with the other shared surfaces. -->
 <script src="charts.js"></script>
-<!-- The document extractor's half with no screen in it: profiles, prompts,
-     column alignment, the filing plan. Beside charts.js for the same reason —
-     shared, pure, and loaded before anything that mounts a window. -->
-<script src="extract.js"></script>
 <script src="apps/registry.js"></script>
 <script src="apps/chatpane.js"></script>
 <script src="apps/formula.js"></script>
@@ -387,7 +382,6 @@
 <script src="apps/sheets.js"></script>
 <script src="apps/docs.js"></script>
 <script src="apps/slides.js"></script>
-<script src="apps/extract.js"></script>
 <script src="apps/forge.js"></script>
 <script src="apps/schedule.js"></script>
 <script src="shell.js"></script>

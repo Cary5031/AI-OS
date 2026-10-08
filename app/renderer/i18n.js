@@ -191,7 +191,6 @@
     'dock.pdf': 'PDF viewer', 'dock.markdown': 'Markdown viewer', 'dock.photos': 'Image viewer',
     'dock.memory': 'Long-term memory', 'dock.forge': 'App Forge: the core writes programs',
     'dock.schedule': 'Scheduler: run programs or intents on a timer',
-    'dock.extract': 'Document extraction: PDFs into tables by vendor profile, then filed',
     'dock.import': 'Import files from the OS', 'dock.trash': 'Sandbox trash', 'dock.policy': 'Capability policy',
     'dock.hudLeft': 'Resource HUD', 'dock.hudRight': 'Trace HUD',
 
@@ -203,7 +202,7 @@
     'app.mailtodo': 'Mail to-do',
     'app.docs': 'Documents', 'app.sheets': 'Spreadsheet', 'app.slides': 'Slides', 'app.pdf': 'PDF viewer',
     'app.markdown': 'Markdown', 'app.memory': 'Memory', 'app.forge': 'App Forge', 'app.schedule': 'Scheduler',
-    'app.photos': 'Image viewer', 'app.extract': 'Document extraction',
+    'app.photos': 'Image viewer',
     'launcher.title': 'Applications',
     'launcher.intro': 'Every application runs inside the sandbox. The ✉ at the top right of each window opens that application\'s own AI chat panel, which can see what the application is showing.',
     'launcher.generated': 'made by the core',

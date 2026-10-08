@@ -8,7 +8,11 @@ v1.0.21 由 `Build-AIOS.bat` 三關全過後建出
 （v1.0.13 是第 73 項時的版本，v1.0.14 的打包測試抓到第 74 項末尾那個殭屍行程，v1.0.15 是排程器與
 意圖增強，v1.0.16 是版本說明，v1.0.17 是分享與匯入，v1.0.18 是核准跟著 manifest，v1.0.19 是應要求重建）。
 
-`npm test` 從 362 → **936 個測試**；另外有一套 `npm run test:e2e`（**183 個**）會啟動
+2026-10-07：**「文件萃取」整支程式移除**，使用者決定不再保留這個功能。Dock 少了 `✇`，能力閘門少了
+`doc.extract`（剩十四個能力），只為它寫的頁面算繪器（`pdf.rasterize`）一起拿掉；第 91、92、108 項
+留著當時的記錄，開頭各註明了一行。
+
+`npm test` 從 362 → **854 個測試**；另外有一套 `npm run test:e2e`（**169 個**）會啟動
 真的程式用 CDP 驅動它。兩套都全過，`Build-AIOS.bat` 三關（單元、e2e、打包版首次啟動）
 任何一關沒過就中止建置。
 
@@ -2477,7 +2481,9 @@ e2e 新增 6 條走完三個程式與四種格式；三種檔案用這台機器�
 
 ---
 
-### 91. 文件萃取：PDF 原檔直送模型，換成表格，再歸檔 — `main/extract.js`（新）、`renderer/extract.js`（新）、`apps/extract.js`（新）、`main/gate.js`、`main/ipc.js`、`main/index.js`、`preload/index.js`、`boot.js`、`i18n.js`、`os.css`、`index.html`、`test/extract.test.js`（新）、`e2e/specs/extract.mjs`（新）、`e2e/lib/dialog.mjs`（2026-09-12）
+### 91. 文件萃取：PDF 原檔直送模型，換成表格，再歸檔 — `main/extract.js`（新）、`renderer/extract.js`（新）、`apps/extract.js`（新）、`main/gate.js`、`main/ipc.js`、`main/index.js`、`preload/index.js`、`boot.js`、`i18n.js`、`os.css`、`index.html`、`extract.test.js`（新）、`extract.mjs`（新）、`e2e/lib/dialog.mjs`（2026-09-12）
+
+> **2026-10-07：這支程式已經整個移除**，使用者決定不再保留這個功能。這一項留著當時的記錄；文中的 `extract.js` 三個檔、`extract.test.js`、`extract.mjs`，以及只為它而寫的頁面算繪器 `pdfraster.js`／`pdf.rasterize`，都已經不在 repo 裡了。
 
 一批 PDF 進來，一張表格出去，文件自己歸檔。取代的是一支 Streamlit 操作台：
 選廠商 → 上傳 PDF → 解析 → 看結果 → 存 Excel → 交付。
@@ -2526,7 +2532,7 @@ base；模組裡沒有任何一個參數讓呼叫端指定主機，所以 render
   `\u0000-\u001f` 寫成了真的控制位元組），「原始碼不得含控制字元」那條測試會擋。
   改成用 `String.fromCharCode(92)` 組反斜線再寫檔才寫得對——Bash 這條路會把雙反斜線吃掉。
 
-**e2e 那端的模型是假的，但路是真的。** `e2e/specs/extract.mjs` 在 loopback 起一個
+**e2e 那端的模型是假的，但路是真的。** `extract.mjs` 在 loopback 起一個
 小 HTTP 服務回答 `generateContent`，兩份 PDF 給不同答案（一份完整、一份缺必填料號），
 於是兩個桶子都走得到。它同時檢查送出去的請求本身：金鑰在表頭不在網址、
 自訂表頭有送、`inline_data` 的位元組**就是檔案本身**、廠商的提示詞排在最前面、
@@ -2557,13 +2563,15 @@ base；模組裡沒有任何一個參數讓呼叫端指定主機，所以 render
 zip 下載（檔案本來就在沙箱裡，沒有理由繞一圈下載回來）、`/classify` 自動判別廠商、
 以及把結果回寫成不同版本的比對。
 
-驗證：單元 662 → **714**（新增 `test/extract.test.js` 52 條）；
+驗證：單元 662 → **714**（新增 `extract.test.js` 52 條）；
 e2e 新增 10 條，整條路在真的程式裡跑完，包含用機器自己的試算表讀取器把 `.xlsx` 讀回來
 確認前導零還在，以及閘門那一關真的按下去。
 
 ---
 
-### 92. 文件萃取：方向反了，端點才是預設，單機退成備援 — `main/extract.js`、`renderer/extract.js`、`apps/extract.js`、`main/ipc.js`、`preload/index.js`、`os.css`、`test/extract.test.js`、`e2e/specs/extract.mjs`（2026-09-12）
+### 92. 文件萃取：方向反了，端點才是預設，單機退成備援 — `main/extract.js`、`renderer/extract.js`、`apps/extract.js`、`main/ipc.js`、`preload/index.js`、`os.css`、`extract.test.js`、`extract.mjs`（2026-09-12）
+
+> **2026-10-07：這支程式已經整個移除**，使用者決定不再保留這個功能。這一項留著當時的記錄；文中的 `extract.js` 三個檔、`extract.test.js`、`extract.mjs`，以及只為它而寫的頁面算繪器 `pdfraster.js`／`pdf.rasterize`，都已經不在 repo 裡了。
 
 第 91 項做出來的是單機模式：清單自己維護、提示詞自己匯入。使用者看完之後指出
 那偏離了主軸——**清單與提示詞應該由提示詞工作室統一管理**，app 只負責呈現結果、
@@ -2648,7 +2656,7 @@ ELEVATED，而批次裡的文件早就武裝了汙染降級，寫在那裡會在
 **多一個來源欄 `_來源`**，跟著列一路進到儲存格。兩個引擎的欄位、必填與命名都不同，
 一個月後躺在別人信箱裡的試算表得自己說得出是誰做的。
 
-驗證：單元 714 → **740**（`test/extract.test.js` 52 → 78 條）；
+驗證：單元 714 → **740**（`extract.test.js` 52 → 78 條）；
 e2e 重寫成 12 條（多了「接回沒收尾的批次」與「一批只開一個工作」），端點那邊是 loopback 上的假工作室外加一台假的備援模型，
 整條路在真的程式裡跑完——包含 401 不降級、端點關掉才降級、沒有提示詞就拒絕、
 以及放上本機提示詞之後備援接得住且金鑰沒有跑錯邊。
@@ -3862,6 +3870,8 @@ JS 生態沒有現成的：`node-pptx-parser`、`pptx-content-extractor`、`offi
 
 ### 108. 本機萃取設定檔只在開窗時被看見一次 — `apps/extract.js`（2026-09-14）
 
+> **2026-10-07：這支程式已經整個移除**，使用者決定不再保留這個功能。這一項留著當時的記錄；文中的 `extract.js` 三個檔、`extract.test.js`、`extract.mjs`，以及只為它而寫的頁面算繪器 `pdfraster.js`／`pdf.rasterize`，都已經不在 repo 裡了。
+
 清完沙箱重跑 e2e 之後，只剩一條紅的：「放一份本機提示詞，備援就接得住」。
 它不是被沙箱配額打到的那一類，而且**把改動 stash 掉跑基準也一樣紅**，所以不是第 107 項造成的。
 
@@ -3934,7 +3944,7 @@ JS 生態沒有現成的：`node-pptx-parser`、`pptx-content-extractor`、`offi
 - **沒驗證過的，因為這裡驗不了**：真的 IMAP 同步與真的 SMTP 寄信。
   沒有設定 IMAP 帳號，而使用者的憑證從來沒被索取過，也不該索取。
   ~~`mail.send` 目前政策是 DENY。~~ **這句已經不對了**：`gate.js` 的
-  `DEFAULT_POLICY` 現在十五個能力**全部是 ALLOW**（見 README 的
+  `DEFAULT_POLICY` 現在十四個能力**全部是 ALLOW**（見 README 的
   [能力閘門](README.md#能力閘門與汙染降級)——那是第 19 項改的，摩擦改由
   汙染降級與安裝確認來給）。所以「寄信會不會真的寄出去」現在取決於有沒有設定
   SMTP 帳號，不取決於政策。
@@ -3985,8 +3995,7 @@ JS 生態沒有現成的：`node-pptx-parser`、`pptx-content-extractor`、`offi
 
 > **這一整節是 2026-08-30 當天的快照，之後沒有再重跑過。**
 > 節點數、邊數、betweenness、社群編號講的都是 v1.0.11 前後那份程式碼；
-> 那之後進來的東西——圖表（`charts.js` / `chartxml.js`）、文件萃取
-> （`main/extract.js` / `renderer/extract.js`）、郵件的第二個來源（`owa.js`）、
+> 那之後進來的東西——圖表（`charts.js` / `chartxml.js`）、郵件的第二個來源（`owa.js`）、
 > 郵件待辦（`mailtodo.js` / `mailask.js`）、自訂主題（`themer.js` / `themes.js`）
 > ——**一個都不在圖裡**。所以這裡的數字現在只能當成「那一次重跑學到了什麼」來讀，
 > 不能當成現況。方法論的部分（社群標籤會錯位、孤島是事實、`label.py audit` 要先跑）

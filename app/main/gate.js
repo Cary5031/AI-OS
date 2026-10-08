@@ -142,14 +142,7 @@ const INTERNAL_OPS = {
      planner has web.read for pages; this is an API call a program makes with
      its own arguments. Same capability, so the policy and the taint downgrade
      that govern the planner's requests govern the program's. */
-  'web.fetch': { cap: 'net.egress', desc: '讓生成的程式連上一個網址' },
-  /* Sending a document to the extraction model the user configured. Internal
-     because there is no address in the arguments -- the destination is the one
-     in that program's own settings, and a planner has nothing to say about it.
-     Its own capability rather than net.egress, so that "may this machine send my
-     documents to a cloud model" is a switch on its own and not a side effect of
-     letting the browser fetch a page. */
-  'extract.send': { cap: 'doc.extract', desc: '把文件送到你設定的萃取模型' }
+  'web.fetch': { cap: 'net.egress', desc: '讓生成的程式連上一個網址' }
 };
 
 /* Capabilities that can destroy data, move it off this machine, or introduce
@@ -165,22 +158,12 @@ const ELEVATED = ['fs.write', 'fs.delete', 'net.egress', 'mail.send', 'app.creat
    trash -- so a machine that asks before every write teaches people to click
    through prompts without reading them, which costs more than it buys.
 
-   Four of these are not sandbox-confined, and are granted here as a deliberate
+   Three of these are not sandbox-confined, and are granted here as a deliberate
    choice rather than because they are harmless: `net.egress` fetches from the
    internet, `mail.send` puts mail in front of a real recipient and cannot be
-   recalled, `doc.extract` sends a whole document to the extraction model that
-   program was configured with, and `proc.spawn` would start an operating-system
-   process (no syscall uses it today). They are named in every capability's
-   tooltip so the decision stays visible, and any of them can be set back to ASK
-   or DENY with one click.
-
-   `doc.extract` is deliberately not in ELEVATED, unlike the other three. The
-   taint downgrade exists to catch an elevated action reaching a target the user
-   never named, and there is no target to reach here: the destination is the one
-   address in that program's settings, the operation is invisible to the planner
-   (INTERNAL_OPS), and the documents sent are the ones a person picked in a
-   window. Degrading it would mean a consent dialog between every invoice in a
-   batch of fifty, which is the habit an injected instruction is counting on.
+   recalled, and `proc.spawn` would start an operating-system process (no syscall
+   uses it today). They are named in every capability's tooltip so the decision
+   stays visible, and any of them can be set back to ASK or DENY with one click.
 
    Two things still stand in front of them whatever this says: ELEVATED below
    drops the dangerous ones back to ASK for the rest of the session once
@@ -200,8 +183,7 @@ const DEFAULT_POLICY = {
   'net.egress': 'allow',
   'mail.read':  'allow',
   'mail.send':  'allow',
-  'proc.spawn': 'allow',
-  'doc.extract': 'allow'
+  'proc.spawn': 'allow'
 };
 
 /* What each capability actually permits, in the words someone deciding needs.
@@ -238,10 +220,7 @@ const CAP_NOTES = {
                 '⚠ 這是在這台機器上引入新的程式碼；' +
                 '會先過靜態檢查與冒煙測試，要求沙箱外能力時仍會另外詢問。',
   'proc.spawn': '啟動作業系統層級的行程。' +
-                '目前沒有任何 syscall 用到它 — 保留欄位，改成 ALLOW 也不會有任何效果。',
-  'doc.extract': '把整份文件送到「文件萃取」程式裡設定的萃取模型，換回表格資料。' +
-                '⚠ 這會離開這台機器：文件原檔會上傳到你設定的那個服務或雲端模型。' +
-                '只影響那一支程式，設成 DENY 之後它就不再送出任何文件，其他功能不受影響。'
+                '目前沒有任何 syscall 用到它 — 保留欄位，改成 ALLOW 也不會有任何效果。'
 };
 
 /* ------------------------------------------------------------------ state */
