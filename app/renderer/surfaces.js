@@ -3891,10 +3891,15 @@
         }).join('\n')
         : '（沒有符合的檔案）';
 
+      /* Lines from an untrusted file are that file's text; main armed the gate
+         for them, and the page is fenced the way a read of the file would be. */
+      var theirs = d.hits.some(function (h) { return h.untrusted; });
       K.page('data/find:' + q, {
         kind: 'data', label: 'find/' + q, priority: 45,
+        tainted: theirs, source: '搜尋「' + q + '」',
         text: '搜尋「' + q + '」在 ' + d.dir + ' 的結果：\n' + body
       });
+      if (theirs) await K.refreshTaint();
       AIOS.ui.renderContext(K.schedule());
 
       var note = '搜尋「' + q + '」：' + d.hits.length + ' 個檔案命中' +
@@ -4094,12 +4099,15 @@
       if (!res.ok) throw ipcFail(res, '收信失敗');
       await AIOS.apps.launch('mail');
       var d = res.data;
+      /* Every subject and sender name here was written by the sender. */
       K.page('ui/mail', {
         kind: 'ui', label: 'ui/mail', priority: 64,
+        tainted: d.messages.length > 0, source: '信件清單（' + d.folder + '）',
         text: '信件清單（' + d.folder + '）：\n' + d.messages.slice(0, 20).map(function (m) {
           return '  uid ' + m.uid + '　' + (m.seen ? '' : '[未讀] ') + m.from + '：' + m.subject;
         }).join('\n')
       });
+      if (d.messages.length) await K.refreshTaint();
       return { note: d.folder + ' 有 ' + d.total + ' 封，取回最近 ' + d.messages.length + ' 封' };
     },
 
@@ -4163,7 +4171,7 @@
       var key = 'data/mail-search:' + (what || 'all').slice(0, 60);
       K.page(key, {
         kind: 'data', label: 'mail-search/' + (a.text || a.from || '').slice(0, 24), priority: 46,
-        tainted: hits.some(function (h) { return h.where === 'body' || h.text; }),
+        tainted: hits.length > 0,
         source: '信件搜尋 ' + what,
         text: '信件搜尋結果（不可信來源）' + (what ? '：' + what : '') + '\n' +
           (hits.length ? hits.map(function (h, i) {
@@ -4183,15 +4191,15 @@
           '但是點下去什麼都不會發生。'
       });
       var readBodies = hits.some(function (h) { return h.where === 'body' || h.text; });
-      if (readBodies) {
+      if (hits.length) {
         await K.refreshTaint();
-        log('taint: 信件搜尋的內文進入 context，提權能力降級', 't-taint');
+        log('taint: 信件搜尋的' + (readBodies ? '內文' : '主旨與寄件人') + '進入 context，提權能力降級', 't-taint');
       }
       return {
         note: '找到 ' + hits.length + ' 封' + (what ? '（' + what + '）' : '') +
           '，掃過 ' + (res.data.scanned || 0) + ' 封' +
           (res.data.bodies ? '，帶回 ' + res.data.bodies + ' 封的內文' : ''),
-        tainted: readBodies,
+        tainted: hits.length > 0,
         undo: function () { K.drop(key); }
       };
     },

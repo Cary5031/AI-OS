@@ -103,11 +103,15 @@ Say '相依套件就緒' 'ok'
 # 真正擋住打包的是 electron-builder 的 beforePack（build\preset-guard.js），
 # npm run dist 也會經過它；這裡先查一次，免得跑完好幾分鐘的測試才在打包那一步停下來。
 # 只有 -WithPreset 會放行：環境裡剛好留著的 AIOS_SHIP_PRESET 不算數。
+# 放行的那個變數只在打包那一步設定、打包完就清掉（見「打包」）。直接在 pwsh 裡跑
+# 這支腳本的時候，環境變數會留在那個視窗裡；以前設了不清，同一個視窗之後再跑一次
+# npm run dist，就會在沒有人加 -WithPreset 的情況下把金鑰打包進去。
 $env:AIOS_SHIP_PRESET = $null
+$shipPreset = $false
 $presetFile = 'app\preset\provider-preset.enc'
 if (Test-Path $presetFile) {
   if ($WithPreset) {
-    $env:AIOS_SHIP_PRESET = '1'
+    $shipPreset = $true
     Say '這一版會帶著內建模型預設檔（-WithPreset）：拿到它的人都還原得出裡面的金鑰' 'warn'
   } else {
     Stop-Here "$presetFile 存在，打包會把裡面的 API 金鑰一起帶進去。要公開發佈就先把它移走；只給信得過的人、確定要帶的話加 -WithPreset。"
@@ -173,7 +177,12 @@ if ($Setup)    { $target = @('--win', 'nsis') }
 Write-Host ''
 Write-Host '  打包中（第一次會下載 Electron，約 144 MB）…'
 Write-Host ''
-npx electron-builder @target
+if ($shipPreset) { $env:AIOS_SHIP_PRESET = '1' }
+try {
+  npx electron-builder @target
+} finally {
+  $env:AIOS_SHIP_PRESET = $null
+}
 if ($LASTEXITCODE -ne 0) {
   if ($bumped) {
     Say "注意：版本已經遞增到 $appVersion 了。要重出這一版就加 -NoBump。" 'warn'

@@ -465,6 +465,7 @@ function wireBoot() {
         quota: sb.quota,
         ops: gate.OPS,
         elevated: gate.ELEVATED,
+        lasting: Object.keys(gate.LASTING),
         policy: pol,
         // What each capability permits, for the gate's tooltips. One source, in
         // the process that enforces the policy.

@@ -143,7 +143,7 @@
       if (res.policy) S.policy = res.policy;
       if (res.capNotes) S.capNotes = res.capNotes;
       if (res.taint) S.taint = res.taint;
-      if (res.ops) AIOS.setOps(res.ops, res.elevated);
+      if (res.ops) AIOS.setOps(res.ops, res.elevated, res.lasting);
       /* Language and text size, as the main process keeps them. The language
          layer may already have applied itself from prefs.get(); this is the
          same answer, and the menus read it from here. */

@@ -28,6 +28,12 @@ const store = require('./mailstore');
 const owa = require('./owa');
 const autoconfig = require('./mailautoconfig');
 
+/* The OS keychain, for the password at rest. Under plain node (the unit tests
+   load this module that way) `electron` is only a path string, so this is
+   undefined and reads as "no keychain". */
+let safeStorage = null;
+try { ({ safeStorage } = require('electron')); } catch { /* not under Electron */ }
+
 let ImapFlow = null;
 let nodemailer = null;
 try {
@@ -46,7 +52,7 @@ let credFile = null;
 /* { provider, email, login, label, source, imap, smtp, savedAt }
    password kept separately */
 let account = null;
-let password = null;       // in memory + on disk, never sent to the renderer
+let password = null;       // in memory; on disk only sealed (saveAccount); never sent to the renderer
 const cache = new Map();   // uid -> parsed message
 
 /* ------------------------------------------------------------------ account */
@@ -78,7 +84,27 @@ async function init(userDataDir) {
         syncSeen: raw.kind === 'owa' ? false : raw.syncSeen !== false,
         savedAt: raw.savedAt || 0
       };
-      password = raw.password || null;
+      password = null;
+      let plaintext = false;
+      if (raw.passwordSealed && keychain()) {
+        try {
+          password = safeStorage.decryptString(Buffer.from(raw.passwordSealed, 'base64'));
+        } catch {
+          /* Sealed under another Windows user, or on another machine -- the
+             portable build's folder copied elsewhere. Asking again is the
+             correct outcome; guessing is not. */
+          password = null;
+        }
+      } else if (raw.password) {
+        /* Written in the clear by a version from before the keychain. Taken
+           once, and the file rewritten below so the plaintext does not outlive
+           this launch. */
+        password = String(raw.password);
+        plaintext = true;
+      }
+      if (plaintext) {
+        try { await saveAccount(); } catch { /* sealed at the next save instead */ }
+      }
       if (account.kind === 'owa') owa.configure({ email: account.email, base: account.base });
       /* The mirror is opened here, for either kind, rather than by the first
          sync. A restart followed by a search used to throw on an index that was
@@ -145,12 +171,36 @@ function status() {
   };
 }
 
+function keychain() {
+  try { return !!(safeStorage && safeStorage.isEncryptionAvailable()); } catch { return false; }
+}
+
+/**
+ * Write the account, with the password sealed by the OS keychain the way the
+ * model keys are (llama.js saveProviders).
+ *
+ * It used to sit in this file as plain JSON. The portable build keeps the file
+ * beside the exe -- on a USB stick, in a synced folder -- and whoever copied the
+ * folder had the mailbox. Without a keychain the password is not written at all
+ * and lasts for this run only: a silent plaintext fallback would keep this
+ * promise only on the machines that did not need it.
+ */
+async function saveAccount() {
+  const out = { ...account };
+  if (password) {
+    if (keychain()) out.passwordSealed = safeStorage.encryptString(password).toString('base64');
+    else out.passwordRefused = '這台機器沒有作業系統金鑰圈，密碼只留在這次執行的記憶體裡';
+  }
+  await fs.mkdir(path.dirname(credFile), { recursive: true });
+  await fs.writeFile(credFile, JSON.stringify(out, null, 2), 'utf8');
+}
+
 /** Flip whether reading here also marks read on the server. */
 async function setSyncSeen(on) {
   if (isWeb()) throw readOnlyError();
   requireAccount();
   account.syncSeen = !!on;
-  await fs.writeFile(credFile, JSON.stringify({ ...account, password }, null, 2), 'utf8');
+  await saveAccount();
   return status();
 }
 
@@ -177,8 +227,7 @@ async function configure({ kind, provider, email, password: pw, imap, smtp, sync
     account = conf;
     password = null;
     owa.configure({ email: conf.email, base: conf.base });
-    await fs.mkdir(path.dirname(credFile), { recursive: true });
-    await fs.writeFile(credFile, JSON.stringify(conf, null, 2), 'utf8');
+    await saveAccount();
     cache.clear();
     if (!store.ready()) await store.init(conf.email);
     return status();
@@ -208,8 +257,7 @@ async function configure({ kind, provider, email, password: pw, imap, smtp, sync
   account = conf;
   password = String(pw);
 
-  await fs.mkdir(path.dirname(credFile), { recursive: true });
-  await fs.writeFile(credFile, JSON.stringify({ ...conf, password }, null, 2), 'utf8');
+  await saveAccount();
   cache.clear();
   return status();
 }
@@ -286,12 +334,19 @@ function loginName() {
 
 /* --------------------------------------------------------------------- IMAP */
 
+/* `secure: false` never means plaintext here: autoconfig refuses a plain socket
+   and every preset on port 587 is STARTTLS. Both libraries' default, though, is
+   "upgrade if the server offers to" -- and an attacker on the network answers
+   for the server, leaves STARTTLS out of the capability list, and receives the
+   login in the clear. So the upgrade is required, not offered. */
+
 async function withImap(fn) {
   requireAccount();
   const client = new ImapFlow({
     host: account.imap.host,
     port: account.imap.port,
     secure: account.imap.secure,
+    ...(account.imap.secure ? {} : { doSTARTTLS: true }),
     auth: { user: loginName(), pass: password },
     logger: false,
     emitLogs: false,
@@ -760,6 +815,18 @@ async function markSeen({ folder = 'INBOX', uid, seen = true } = {}) {
 
 /* --------------------------------------------------------------------- SMTP */
 
+/** Sending and the connection test have to connect the same way. STARTTLS is
+    required for the reason given above withImap. */
+function smtpTransport() {
+  return nodemailer.createTransport({
+    host: account.smtp.host,
+    port: account.smtp.port,
+    secure: account.smtp.secure,
+    requireTLS: !account.smtp.secure,
+    auth: { user: loginName(), pass: password }
+  });
+}
+
 /**
  * Send, and leave the evidence where a person would look for it.
  *
@@ -783,12 +850,7 @@ async function send({ to, cc, subject, body, inReplyTo, references } = {}) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r)) throw new Error('收件人格式不對：' + r);
   }
 
-  const transport = nodemailer.createTransport({
-    host: account.smtp.host,
-    port: account.smtp.port,
-    secure: account.smtp.secure,
-    auth: { user: loginName(), pass: password }
-  });
+  const transport = smtpTransport();
 
   try {
     const info = await transport.sendMail({
@@ -866,10 +928,7 @@ async function verify() {
     out.imap = { ok: false, error: e.message, code: e.code };
   }
   try {
-    const t = nodemailer.createTransport({
-      host: account.smtp.host, port: account.smtp.port, secure: account.smtp.secure,
-      auth: { user: loginName(), pass: password }
-    });
+    const t = smtpTransport();
     await t.verify();
     t.close();
     out.smtp = { ok: true };
