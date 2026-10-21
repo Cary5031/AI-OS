@@ -7,6 +7,10 @@
 IMAP/SMTP、產出的 `.docx`／`.xlsx`／`.pptx` 用 Word、Excel、PowerPoint 打得開，
 而且系統可以在執行期間自己寫出新的程式並安裝起來。
 
+**下載**：到 [Releases 的最新版本](https://github.com/Cary5031/AI-OS/releases/latest)，在頁面最下方的
+Assets 選 `AI-OS-<版本>-portable.exe`（免安裝，直接執行）或 `AI-OS-Setup-<版本>.exe`（安裝檔）。
+需要 Windows 10／11 x64；沒有程式碼簽章，第一次執行 SmartScreen 會擋一次，點「其他資訊」再按「仍要執行」。
+
 ![AI-OS 的桌面：上方選單列、左側注意力排程器與能力閘門、右側核心軌跡與動作日誌、下方意圖列與 Dock](manual/img/01-desktop.png)
 
 > 與其他名為 AIOS 的專案（例如 agiresearch/AIOS）無關。
