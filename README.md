@@ -37,7 +37,10 @@ IMAP/SMTP、產出的 `.docx`／`.xlsx`／`.pptx` 用 Word、Excel、PowerPoint 
 ## 需要什麼
 
 - Windows 10／11 x64（目前只在 Windows 上開發與測試）
-- 從原始碼執行：Node.js 24（開發與 CI 用的版本）
+- 從原始碼執行：Node.js 24（開發與 CI 用的版本）與 Git。第一次 `npm install` 與打包需要網路，
+  會下載約 450 MB（npm 套件、Electron 執行檔、打包工具），之後都從快取拿
+- 打包（`Build-AIOS.bat`）：有 PowerShell 7 就用它，沒有的話用 Windows 內建的 PowerShell 5.1，
+  兩種都實測過
 - 一個核心模型：雲端供應商的 API 金鑰，或自己準備的 llama.cpp `llama-server` 加一個
   GGUF 模型
 
