@@ -7592,6 +7592,20 @@ test('no source file carries a control character', () => {
   assert.deepEqual(offenders, [], 'control characters in source: ' + offenders.join(', '));
 });
 
+test('the build script starts with a byte-order mark, so Windows PowerShell can read it', () => {
+  /* Build-AIOS.bat runs pwsh when it is installed and falls back to Windows
+     PowerShell 5.1 when it is not, which is most Windows machines. 5.1 reads a
+     script without a BOM in the system code page (CP950 on a zh-TW machine), the
+     Chinese strings swallow their own quotes and braces, and the script fails to
+     parse before its first line runs: three errors, measured. pwsh 7 reads UTF-8
+     either way, so the machine that wrote the script never saw it. */
+  const root = path.join(__dirname, '..');
+  const ps1 = fs.readFileSync(path.join(root, 'Build-AIOS.ps1'));
+  assert.deepEqual([...ps1.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'Build-AIOS.ps1 must start with a UTF-8 BOM');
+  const bat = fs.readFileSync(path.join(root, 'Build-AIOS.bat'), 'latin1');
+  assert.match(bat, /where powershell/, 'and the fallback it exists for is still there');
+});
+
 test('every source file compiles', () => {
   /* The tests in this file read source and run pieces of it, and none of them
      loads every file the way the window does -- so a renderer script with a
