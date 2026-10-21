@@ -788,7 +788,7 @@ function register(getWindow) {
      whatever the program's verb does -- so this is not a second decision about
      that, only about whether this machine may set itself a clock. */
   ipcMain.handle('schedule:list', plain(async () => schedule.list()));
-  ipcMain.handle('schedule:add', guarded('schedule.set', async (args) => schedule.add(args)));
+  ipcMain.handle('schedule:add', guarded('schedule.set', async (args) => schedule.add(args), null, '新增一個排程'));
   /* Pausing or resuming a job answers to the capability that cancels one. It
      adds no sentence the user has not already approved, and since schedule.set
      asks once the session has read someone else's text (gate.js LASTING), the

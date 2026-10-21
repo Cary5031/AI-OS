@@ -301,6 +301,25 @@ test('the generated-app validator rejects the escapes it claims to', () => {
   assert.ok(v('function render(root, os) { return top.location; }').some((p) => /top/.test(p)));
 });
 
+test('in a generated app, hidden means hidden', () => {
+  /* The browser's rule for `hidden` is a default-stylesheet rule, so a
+     program's own `display` on the same element beats it. A model-built
+     pomodoro styled its error panel `display:grid`, toggled it with `hidden`,
+     and showed an empty 「重試載入」 box under the timer on every open. The frame
+     carries the rule itself, important, so the attribute does what it says. */
+  const vm = require('node:vm');
+  const AIOS = {};
+  const win = { AIOS, getComputedStyle: () => ({ getPropertyValue: () => '' }) };
+  vm.runInNewContext(read('renderer/apps/appshell.js'), {
+    window: win, AIOS, document: { documentElement: {} }, console
+  }, { filename: 'appshell.js' });
+  const html = AIOS.appshell.frameHtml('function render(root, os) {}', []);
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.match(style, /\[hidden\]\{display:none!important\}/, 'the frame stylesheet carries the rule');
+  assert.ok(html.indexOf('[hidden]') < html.indexOf('function render(root, os) {}'),
+    'and it is in place before the program runs');
+});
+
 test('a generated app has a legal way to evaluate arithmetic', () => {
   /* The prohibition on eval was a dead end rather than a rule: asked for a
      calculator, the model used eval, was refused, substituted new Function on the
@@ -6839,6 +6858,14 @@ test('schedules and memories written after untrusted content are asked about', a
     } finally {
       gate.setUnattended(false);
     }
+
+    /* The question is put in words a person reads. Without its own wording
+       the consent window fell back to schedule.set's description -- the
+       paragraph written for the planner ("every 是秒數或 5m…") -- and it pushed
+       the taint warning below the fold. Rarely seen while sys.timer never
+       asked; every tainted schedule asks now. */
+    assert.match(read('main/ipc.js'),
+      /ipcMain\.handle\('schedule:add', guarded\('schedule\.set', async \(args\) => schedule\.add\(args\), null, '新增一個排程'\)\)/);
 
     /* Lasting by op, not by capability: settles() reads ELEVATED to decide
        whether a round left a mark, and listing schedules does not. */

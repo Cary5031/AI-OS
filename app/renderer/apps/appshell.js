@@ -604,6 +604,16 @@
          surface it styles; in here we do not know which element the program
          decided to scroll, so the selector has to cover all of them. */
       '*{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--hair-2) transparent}',
+      /* `hidden` has to mean hidden. The browser's own rule for it sits in the
+         default stylesheet, so any rule of the program's that sets `display` on
+         the same element wins -- and generated programs do exactly that: a panel
+         styled `display:grid` and toggled with `el.hidden = !state.error` stays
+         on screen with nothing in it. Measured on a model-built pomodoro, whose
+         empty 「重試載入」 box sat under the timer on every open. The cost is a
+         program that sets `hidden` and then shows the element through
+         `style.display` instead of clearing it; none of the nineteen programs
+         in the development sandbox mixes the two. */
+      '[hidden]{display:none!important}',
       'html,body{margin:0;height:100%;background:transparent;color:var(--fg);',
       '  font-family:var(--sans);font-size:13px;line-height:1.55}',
       '#root{padding:12px;min-height:100%}',

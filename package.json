@@ -1,6 +1,6 @@
 {
   "name": "ai-os",
-  "version": "1.0.34",
+  "version": "1.0.35",
   "private": true,
   "description": "AI-OS: an intent-kernel desktop machine driven by a local llama.cpp model, with a real sandboxed filesystem.",
   "license": "MIT",
