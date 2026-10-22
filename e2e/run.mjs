@@ -40,8 +40,9 @@ import * as charts from './specs/charts.mjs';
 import * as owa from './specs/owa.mjs';
 import * as sheetmatch from './specs/sheetmatch.mjs';
 import * as pdflayout from './specs/pdflayout.mjs';
+import * as modelctx from './specs/modelctx.mjs';
 
-const SPECS = [boot, themes, windows, forge, chatpane, mail, mailtodo, bookmarks, extensions, office, schedule, photos, translate, webexport, pdfpages, charts, owa, sheetmatch, pdflayout];
+const SPECS = [boot, themes, windows, forge, chatpane, mail, mailtodo, bookmarks, extensions, office, schedule, photos, translate, webexport, pdfpages, charts, owa, sheetmatch, pdflayout, modelctx];
 
 /* An environment variable rather than a flag: `node --test file -- --packaged`
    does not reliably reach this process's argv through npm, and a switch that

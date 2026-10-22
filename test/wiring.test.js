@@ -6492,6 +6492,64 @@ test('the output cap belongs to the provider, not to the caller', () => {
   }
 });
 
+/**
+ * The machine said 「n_ctx 未知……可以在模型設定裡自己填」 and there was nothing to
+ * fill in. models.describe ranks the user's number above everything, but it was
+ * read from `conf.limits`, which no form wrote and configureProvider dropped --
+ * so a provider that reports nothing sat at the 32K fallback, 32,640 once the
+ * slider snapped it, whatever the user wanted. And a window learned after boot
+ * never reached the slider, because only boot refitted it.
+ */
+test('a context window the user types in is the one the machine uses', async () => {
+  const llama = require('../app/main/llama');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({ data: [{ id: 'house-model', owned_by: 'me' }] })
+  });
+  try {
+    await llama.configureProvider('custom', {
+      base: 'https://models.example.test/v1', model: 'house-model', auth: 'none', ctx: '200000'
+    });
+    await llama.selectProvider('custom');
+    let p = await llama.probeActive();
+    assert.equal(p.nCtx, 200000, 'the provider reports nothing, so the user\'s number is the answer');
+    assert.equal(p.nCtxSource, 'user');
+
+    await llama.configureProvider('custom', { ctx: '32' });
+    const custom = () => llama.providerState().providers.find((x) => x.id === 'custom');
+    assert.equal(custom().config.ctx, 4096, 'a typo is raised to the floor, not obeyed');
+
+    await llama.configureProvider('custom', { ctx: '0' });
+    p = await llama.probeActive();
+    assert.equal(p.nCtx, 0, 'and 0 hands the question back -- nothing else knows this model');
+  } finally {
+    globalThis.fetch = realFetch;
+    await llama.selectProvider('local');
+    await llama.configureProvider('custom', { base: '', model: '', auth: 'bearer', ctx: 0 });
+  }
+
+  const src = read('main/llama.js');
+  for (const id of ['local', 'openai', 'gemini', 'deepseek', 'custom']) {
+    const at = src.indexOf('\n  ' + id + ': {');
+    const block = src.slice(at, src.indexOf('\n  },', at));
+    assert.match(block, /'ctx'/, id + ' can set it');
+  }
+  assert.ok(!/\.limits\b/.test(codeOnly(src)), 'nothing reads the key no form writes');
+
+  // A field to type it into, and every handshake refits the slider.
+  const boot = read('renderer/boot.js');
+  const picker = funcBody(boot, 'paintModelPicker');
+  assert.match(picker, /上下文長度（context window）/);
+  assert.match(picker, /fields\.ctx = ctxIn/);
+  assert.match(picker, /if \(p\.id === st\.active\) await reconnect\(\)/, 'saving the core in use applies it at once');
+  assert.match(funcBody(boot, 'reconnect'), /await K\.probe\(\);[\s\S]{0,400}AIOS\.fitBudget\(\)/);
+  const probe = funcBody(read('renderer/kernel.js'), 'probe');
+  for (const k of ['nCtx', 'nCtxSource', 'nCtxSourceName', 'maxOut']) {
+    assert.match(probe, new RegExp('S\\.' + k + ' = info\\.' + k), 'probe keeps ' + k + ' the way boot does');
+  }
+});
+
 test('a column width is decided by one authority and actually applies', () => {
   /* Measured before the colgroup existed: dragging a column edge did set
      colWidths, did write width:178px onto the header cell, and the column stayed

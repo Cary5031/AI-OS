@@ -651,13 +651,18 @@
     UI.link('busy');
     try {
       var info = await K.probe();
+      /* Every way here -- a menu reconnect, switching cores, saving the one in
+         use -- can change the context window, and the budget slider is sized
+         from it. Only boot used to refit, so a window learned afterwards left the
+         slider at whatever boot had guessed. */
+      if (AIOS.fitBudget) AIOS.fitBudget();
       UI.link('up');
       UI.telemetry(null);
       UI.trace('連線成功：' + info.label + ' / ' + info.model +
         (info.nCtx ? '　n_ctx=' + Number(info.nCtx).toLocaleString() +
             (info.nCtxSourceName ? '（' + info.nCtxSourceName + '）' : '')
           : '　n_ctx 未知：這個供應商的 /models 只回 id 與擁有者，沒有上限欄位' +
-            '（可以在模型設定裡自己填）') +
+            '（可以在「系統 → 核心模型」的「上下文長度」自己填）') +
         (info.tokenizer ? '' : '　沒有 tokenizer，context 用量改為估算'),
         info.remote ? 't-warn' : 't-ok');
       if (info.remote) {
@@ -985,6 +990,23 @@
       }
     }
 
+    /* ---- how much the model can hold ------------------------------------ */
+    if (can('ctx')) {
+      form.appendChild(el('label', 'mp-label', '上下文長度（context window）'));
+      var ctxIn = el('input', 'mp-input');
+      ctxIn.type = 'number';
+      ctxIn.min = '0';
+      ctxIn.max = '10000000';
+      ctxIn.step = '1024';
+      ctxIn.value = String(p.config.ctx == null ? 0 : p.config.ctx);
+      ctxIn.setAttribute('aria-label', '上下文長度');
+      form.appendChild(ctxIn);
+      fields.ctx = ctxIn;
+      form.appendChild(el('p', 'micro',
+        '模型一次讀得進多少 token。供應商有回報、或內建資料表認得這個模型時可以不填；填了就以你填的為準，'
+        + '常駐預算的上限跟著它算。0 表示不指定——什麼都查不到時，預算上限會退回保守的 32K。'));
+    }
+
     /* ---- how much room the answer gets --------------------------------- */
     if (can('maxOut')) {
       form.appendChild(el('label', 'mp-label', '輸出上限（max tokens）'));
@@ -1153,6 +1175,10 @@
         await persist();
         status.textContent = '已儲存。';
         UI.trace('核心模型設定已儲存：' + p.label, 't-ok');
+        /* The context window and the output cap are read at the handshake, so a
+           change to the core in use means nothing until the next one. Do it now
+           rather than leave the budget sized for the old numbers. */
+        if (p.id === st.active) await reconnect();
       } catch (e) {
         status.textContent = '儲存失敗：' + (e.message || e);
         status.className = 'micro mp-bad';
@@ -1169,7 +1195,6 @@
         var sel = await window.aios.model.select(p.id);
         if (!sel || !sel.ok) throw new Error(sel && sel.error);
         var ok = await reconnect();
-        if (AIOS.fitBudget) AIOS.fitBudget();
         status.textContent = ok
           ? '已切換到 ' + p.label + '，' + (S.tokenizer ? '有 tokenizer。' : '沒有 tokenizer，排程器改用估算。')
           : '已切換到 ' + p.label + '，但連線沒有成功，看右邊的核心軌跡。';

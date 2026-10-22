@@ -384,7 +384,7 @@ const PROVIDERS = {
     // A chat template has a switch, not a dial: the two rungs are the two states.
     reasoningKind: 'template',
     efforts: ['none', 'high'],
-    editable: ['endpoint', 'model', 'reasoning', 'maxOut'],
+    editable: ['endpoint', 'model', 'reasoning', 'maxOut', 'ctx'],
     defaults: { endpoint: ENDPOINT, model: '', reasoning: 'default', maxOut: 0 }
   },
   openai: {
@@ -409,7 +409,7 @@ const PROVIDERS = {
        OpenAI rather than a change to the request everyone gets. */
     capField: 'max_completion_tokens',
     base: 'https://api.openai.com/v1',
-    editable: ['model', 'reasoning', 'maxOut'],
+    editable: ['model', 'reasoning', 'maxOut', 'ctx'],
     defaults: { model: 'gpt-4o-mini', reasoning: 'default', maxOut: 4096 }
   },
   gemini: {
@@ -426,7 +426,7 @@ const PROVIDERS = {
     reasoningKind: 'effort',
     efforts: ['none', 'low', 'medium', 'high'],
     base: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    editable: ['model', 'reasoning', 'maxOut'],
+    editable: ['model', 'reasoning', 'maxOut', 'ctx'],
     defaults: { model: 'gemini-2.5-flash', reasoning: 'default', maxOut: 4096 }
   },
   deepseek: {
@@ -451,7 +451,7 @@ const PROVIDERS = {
     reasoningKind: 'thinking',
     efforts: ['high', 'max'],
     base: 'https://api.deepseek.com/v1',
-    editable: ['model', 'reasoning', 'maxOut'],
+    editable: ['model', 'reasoning', 'maxOut', 'ctx'],
     defaults: { model: 'deepseek-chat', reasoning: 'default', maxOut: 4096 }
   },
   custom: {
@@ -467,7 +467,7 @@ const PROVIDERS = {
     json: 'object',
     reasoningKind: 'effort', // overridable, see reasoningKindOf()
     efforts: ['none', 'minimal', 'low', 'medium', 'high', 'max'],
-    editable: ['base', 'model', 'auth', 'json', 'tokenizer', 'reasoning', 'reasoningKind', 'capField', 'maxOut', 'headers'],
+    editable: ['base', 'model', 'auth', 'json', 'tokenizer', 'reasoning', 'reasoningKind', 'capField', 'maxOut', 'ctx', 'headers'],
     defaults: {
       base: '', model: '', auth: 'bearer', json: 'object',
       tokenizer: false, reasoning: 'default', reasoningKind: 'effort',
@@ -504,6 +504,15 @@ function checkBase(u) {
 
 function confOf(id) {
   return Object.assign({}, PROVIDERS[id].defaults, conf[id] || {});
+}
+
+/* What the user typed into the model settings, in the shape models.describe
+   ranks above everything else it knows. Both readers used to pass
+   `conf.limits`, a key no form wrote and configureProvider would have dropped,
+   so 「可以在模型設定裡自己填」 pointed at a field that did not exist and a
+   provider that reports nothing stayed at the 32K fallback whatever was set. */
+function userLimits(c) {
+  return { ctx: Number(c.ctx) || 0 };
 }
 
 function localEndpoint() {
@@ -807,6 +816,15 @@ async function configureProvider(id, patch) {
     var n = parseInt(next.maxOut, 10);
     next.maxOut = !n || n <= 0 ? 0 : Math.max(256, Math.min(200000, n));
   }
+  if (next.ctx !== undefined) {
+    /* The context window, for a provider that does not report one. 0 means
+       "not set" and hands the question back to the provider, the table and the
+       refusals. A window that cannot hold the system prompt is a typo, not a
+       choice -- 32 for 32K -- so it is raised to a floor instead of starving
+       every turn. */
+    var c = parseInt(next.ctx, 10);
+    next.ctx = !c || c <= 0 ? 0 : Math.max(4096, Math.min(10000000, c));
+  }
   conf[id] = next;
   var w = await saveProviders();
   return Object.assign(providerState(), { persisted: w });
@@ -958,7 +976,7 @@ async function probeActive() {
   var record = records.find(function (m) { return String(m && m.id) === model; }) || null;
   var known = models.describe(model, {
     reported: localCtx ? { n_ctx: localCtx } : record,
-    override: confOf(id).limits || null,
+    override: userLimits(confOf(id)),
     measured: measuredCtx[model] || 0,
     measuredOut: measuredOut[model] || 0
   });
@@ -1027,7 +1045,7 @@ function outCapFor(id) {
   var model = String(conf.model || '').trim();
   if (!model) return 0;
   var known = models.describe(model, {
-    override: conf.limits || null,
+    override: userLimits(conf),
     measuredOut: measuredOut[model] || 0
   });
   var cap = Number(known.out) || 0;

@@ -225,7 +225,7 @@
       if (S.connected) {
         this.trace('模型：' + S.model +
           (S.nCtx ? '　n_ctx=' + fmt(S.nCtx) + (S.nCtxSourceName ? '（' + S.nCtxSourceName + '）' : '')
-            : '　n_ctx 未知（這個供應商的 /models 沒有上限欄位，可在模型設定裡自己填）'), 't-info');
+            : '　n_ctx 未知（這個供應商的 /models 沒有上限欄位，可在「系統 → 核心模型」的「上下文長度」自己填）'), 't-info');
       }
       else this.trace('沒有連上模型伺服器，意圖解析會失敗', 't-err');
       return S.connected;

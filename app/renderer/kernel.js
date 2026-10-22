@@ -200,7 +200,12 @@ AIOS.kernel = (function () {
     S.remote = !!info.remote;
     S.tokenizer = !!info.tokenizer;
     S.model = info.model;
+    /* All four, the way boot sets them: the budget ceiling is computed from
+       nCtx and maxOut together, and the source is what the HUD says about it. */
     S.nCtx = info.nCtx || 0;
+    S.nCtxSource = info.nCtxSource || '';
+    S.nCtxSourceName = info.nCtxSourceName || '';
+    S.maxOut = info.maxOut || 0;
     S.connected = true;
     return info;
   }
