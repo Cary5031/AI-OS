@@ -53,6 +53,110 @@ function validateUrl(raw) {
   return u;
 }
 
+/* ------------------------------------------------------------------ transport
+
+   Every response this module fetches comes from a stranger, and it is decoded
+   -- gzip, Brotli, zstd -- before anything here gets to look at it. Node's own
+   fetch does that decoding inside this process, which holds the sandbox, the
+   gate and the mail password, so a flaw in a decoder has all of that within
+   reach. October 2026 brought one: CVE-2026-111497, an out-of-bounds write in
+   the Brotli decoder Node bundles, triggered by a response body. The same
+   release fixed six undici bugs, one of which crashed the process on a header
+   that listed too many encodings.
+
+   So requests go through Chromium's network service instead, the stack the
+   built-in browser already uses. It runs in a process of its own, its Brotli
+   already had that fix, and a malformed stream comes back as
+   ERR_CONTENT_DECODING_FAILED instead of a crash. The partition has no
+   "persist:" prefix, so it lives in memory and is gone at quit; credentials are
+   omitted, so a page read here never sees the browser's logins and leaves no
+   cookie behind.
+
+   Redirects are followed by hand so that each hop passes the caller's screen.
+   Checking only the first address let a public page bounce the request to the
+   loopback interface or the router. */
+const PARTITION = 'aios-fetch';
+
+function netError(message) {
+  return Object.assign(new Error(message), { code: 'ENET' });
+}
+
+/**
+ * One HTTP request through Chromium's network service. Resolves with the
+ * decoded body and the address it finally came from. Rejects with ENET for the
+ * network or the clock, EFBIG past `maxBytes`, or whatever `screen` throws for
+ * a redirect hop.
+ */
+function request(url, opts = {}) {
+  const { net } = require('electron');
+  const max = opts.maxBytes || MAX_BYTES;
+  return new Promise((resolve, reject) => {
+    let finalUrl = String(url);
+    let done = false;
+    const req = net.request({
+      url: finalUrl,
+      method: opts.method || 'GET',
+      partition: PARTITION,
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'manual'
+    });
+    const finish = (err, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (!err) return resolve(value);
+      req.abort();
+      reject(err);
+    };
+    // The whole exchange, body included: a server that sends headers and then
+    // trickles the body must not hold the caller forever.
+    const timer = setTimeout(() => finish(netError('連線逾時')), opts.timeoutMs || TIMEOUT_MS);
+
+    req.on('redirect', (_status, _method, location) => {
+      try {
+        if (opts.screen) opts.screen(location);
+      } catch (e) {
+        return finish(e);
+      }
+      finalUrl = location;
+      req.followRedirect();
+    });
+    req.on('response', (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > max) {
+          return finish(Object.assign(
+            new Error((opts.what || '回應') + '太大（超過 ' + Math.round(max / 1024) + ' KiB）'),
+            { code: 'EFBIG' }));
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => finish(null, {
+        url: finalUrl,
+        status: res.statusCode,
+        statusText: res.statusMessage,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        header: (name) => [].concat(res.headers[name.toLowerCase()] || []).join(', '),
+        body: Buffer.concat(chunks)
+      }));
+      res.on('aborted', () => finish(netError('連線中斷')));
+      res.on('error', (e) => finish(netError('連線失敗：' + e.message)));
+    });
+    req.on('error', (e) => finish(netError('連線失敗：' + e.message)));
+
+    try {
+      for (const [k, v] of Object.entries(opts.headers || {})) req.setHeader(k, v);
+      if (opts.body != null) req.write(opts.body);
+      req.end();
+    } catch (e) {
+      finish(Object.assign(new Error('請求無法送出：' + e.message), { code: 'EINVAL' }));
+    }
+  });
+}
+
 function decodeEntities(s) {
   const named = {
     amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '\u2014',
@@ -130,40 +234,25 @@ function collectLinks(html, base) {
  */
 async function read(rawUrl, opts = {}) {
   const url = validateUrl(rawUrl);
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), opts.timeoutMs || TIMEOUT_MS);
+  const res = await request(url.href, {
+    screen: validateUrl,
+    timeoutMs: opts.timeoutMs,
+    what: '頁面',
+    headers: {
+      'User-Agent': UA,
+      Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
+    }
+  });
 
-  let res;
-  try {
-    res = await fetch(url, {
-      signal: ctl.signal,
-      redirect: 'follow',
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
-      }
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    throw Object.assign(
-      new Error(e.name === 'AbortError' ? '連線逾時' : '連線失敗：' + e.message),
-      { code: 'ENET' }
-    );
-  }
-  clearTimeout(timer);
-
-  const finalUrl = res.url || url.toString();
-  const type = (res.headers.get('content-type') || '').toLowerCase();
+  const finalUrl = res.url;
+  const type = res.header('content-type').toLowerCase();
 
   if (!res.ok) {
     throw Object.assign(new Error(`HTTP ${res.status} ${res.statusText}`), { code: 'EHTTP', status: res.status });
   }
 
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length > MAX_BYTES) {
-    throw Object.assign(new Error('頁面太大（' + Math.round(buf.length / 1024) + ' KiB）'), { code: 'EFBIG' });
-  }
+  const buf = res.body;
 
   // Plain text and JSON need no extraction at all.
   if (/^(text\/plain|application\/json|text\/markdown)/.test(type)) {
@@ -234,37 +323,26 @@ async function fetchRaw(rawUrl, opts = {}) {
     }
   }
 
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), Math.min(60000, Number(opts.timeoutMs) || TIMEOUT_MS));
-  let res;
-  try {
-    res = await fetch(url, { method, headers, body, signal: ctl.signal, redirect: 'follow' });
-  } catch (e) {
-    clearTimeout(timer);
-    throw Object.assign(
-      new Error(e.name === 'AbortError' ? '連線逾時' : '連線失敗：' + e.message),
-      { code: 'ENET' }
-    );
-  }
-  clearTimeout(timer);
-
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length > MAX_BYTES) {
-    throw Object.assign(new Error('回應太大（' + Math.round(buf.length / 1024) + ' KiB）'), { code: 'EFBIG' });
-  }
+  const res = await request(url.href, {
+    method,
+    headers,
+    body,
+    screen: validateUrl,
+    timeoutMs: Math.min(60000, Number(opts.timeoutMs) || TIMEOUT_MS)
+  });
   const out = {};
   for (const name of ['content-type', 'content-length', 'etag', 'last-modified', 'cache-control', 'x-ratelimit-remaining']) {
-    const v = res.headers.get(name);
+    const v = res.header(name);
     if (v) out[name] = v;
   }
   return {
-    url: res.url || url.toString(),
+    url: res.url,
     status: res.status,
     ok: res.ok,
     headers: out,
-    bytes: buf.length,
-    text: buf.toString('utf8')
+    bytes: res.body.length,
+    text: res.body.toString('utf8')
   };
 }
 
-module.exports = { read, fetchRaw, validateUrl, toText, decodeEntities };
+module.exports = { read, fetchRaw, request, validateUrl, toText, decodeEntities };

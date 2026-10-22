@@ -1,6 +1,6 @@
 {
   "name": "ai-os",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "private": true,
   "description": "AI-OS: an intent-kernel desktop machine driven by a local llama.cpp model, with a real sandboxed filesystem.",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "_comment:build": "Packaging config lives in electron-builder.yml, which allows comments; the schema here rejects them.",
   "devDependencies": {
-    "electron": "43.7.7",
+    "electron": "43.8.3",
     "electron-builder": "^25.1.8"
   },
   "dependencies": {

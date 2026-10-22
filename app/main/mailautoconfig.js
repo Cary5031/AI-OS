@@ -42,6 +42,7 @@
    =========================================================================== */
 
 const dns = require('node:dns').promises;
+const web = require('./web');
 
 const TIMEOUT_MS = 6000;
 /* A ceiling on the whole lookup, not just on each request. Online, every
@@ -123,29 +124,22 @@ const MX_PROVIDERS = [
 /**
  * One config file over HTTPS. Bounded twice -- by a short timeout and by a size
  * cap -- because both endpoints are outside this program's control and a config
- * lookup that hangs is a form that never comes back.
+ * lookup that hangs is a form that never comes back. It goes through
+ * web.request for the same reason web.read does: the response is a stranger's,
+ * and Chromium decodes it rather than this process.
  */
 async function getXml(url, deadline) {
   const left = deadline ? deadline - Date.now() : TIMEOUT_MS;
   if (left <= 0) throw new Error('逾時');
 
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), Math.min(TIMEOUT_MS, left));
-  try {
-    const res = await fetch(url, {
-      signal: ctl.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': UA, Accept: 'application/xml, text/xml' }
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > MAX_BYTES) throw new Error('設定檔太大');
-    return buf.toString('utf8');
-  } catch (e) {
-    throw new Error(e.name === 'AbortError' ? '逾時' : String(e.message || e));
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await web.request(url, {
+    timeoutMs: Math.min(TIMEOUT_MS, left),
+    maxBytes: MAX_BYTES,
+    what: '設定檔',
+    headers: { 'User-Agent': UA, Accept: 'application/xml, text/xml' }
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.body.toString('utf8');
 }
 
 /* ------------------------------------------------------------- tiny XML */

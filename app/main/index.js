@@ -97,6 +97,10 @@ function dataHome() {
    actually self-contained rather than merely mostly so. */
 if (PORTABLE_DIR) app.setPath('userData', dataHome());
 
+/* Before any subsystem opens a socket: the roots Mozilla withdrew after the
+   eMudhra compromise, which this Electron's Node still ships. See tlsroots.js. */
+require('./tlsroots').dropDistrustedRoots();
+
 /* ---------------------------------------------------------------- terminal */
 
 /**

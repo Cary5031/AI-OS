@@ -3441,6 +3441,58 @@ test('a generated program may reach the network, through the gate and nothing el
 });
 
 /**
+ * A stranger's response gets decoded somewhere, and in October 2026 the Brotli
+ * decoder Node bundles had an out-of-bounds write (CVE-2026-111497). web.read,
+ * os.net.fetch and the mail autoconfig all fetch from strangers, so they go
+ * through Chromium's network service, which decodes in its own process. The
+ * partition lives in memory and sends no credentials, and every redirect hop
+ * is screened like the first address -- before this, a public page could
+ * bounce the request to the loopback interface.
+ */
+test('untrusted responses are fetched and decoded by Chromium, not by the main process', () => {
+  const web = read('main/web.js');
+  assert.ok(!/\bfetch\(/.test(codeOnly(web)), 'web.js no longer calls Node\'s fetch');
+  const req = funcBody(web, 'request');
+  assert.match(req, /net\.request\(\{/, 'the request is Chromium\'s');
+  assert.match(req, /credentials: 'omit'/, 'without the session\'s cookies or logins');
+  assert.match(req, /redirect: 'manual'/, 'redirects are followed by hand');
+  assert.match(req, /opts\.screen\(location\);[\s\S]{0,120}req\.followRedirect\(\)/,
+    'and each hop is screened before it is followed');
+  assert.match(req, /size > max/, 'the body is bounded while it arrives, not after');
+  const partition = /const PARTITION = '([^']*)';/.exec(web);
+  assert.ok(partition && !partition[1].startsWith('persist:'), 'the partition is in memory');
+  for (const fn of ['read', 'fetchRaw']) {
+    assert.match(funcBody(web, fn), /request\(url\.href, \{[\s\S]{0,80}screen: validateUrl/, fn + ' screens every hop');
+  }
+
+  const ac = read('main/mailautoconfig.js');
+  assert.ok(!/\bfetch\(/.test(codeOnly(ac)), 'the autoconfig lookup does not use Node\'s fetch either');
+  assert.match(funcBody(ac, 'getXml'), /web\.request\(url, \{/);
+});
+
+/**
+ * Mozilla withdrew three emSign roots after the eMudhra compromise, and Node
+ * 24.22.1 ships without them. The Node inside this Electron is older, so the
+ * main process -- IMAP, SMTP, the model providers -- drops them itself, before
+ * anything opens a socket.
+ */
+test('the main process stops trusting the roots Mozilla withdrew', () => {
+  const tls = require('node:tls');
+  const { X509Certificate } = require('node:crypto');
+  const { dropDistrustedRoots, DISTRUSTED } = require('../app/main/tlsroots');
+  assert.equal(DISTRUSTED.size, 3);
+  dropDistrustedRoots();
+  const left = tls.getCACertificates('default').map((pem) => new X509Certificate(pem).fingerprint256);
+  for (const [fp, name] of DISTRUSTED) assert.ok(!left.includes(fp), name + ' is still trusted');
+  assert.ok(left.length > 100, 'and only those go');
+  assert.equal(dropDistrustedRoots(), 0, 'a second call finds nothing left to drop');
+
+  const main = read('main/index.js');
+  const at = main.indexOf("require('./tlsroots').dropDistrustedRoots()");
+  assert.ok(at > 0 && at < main.indexOf('app.whenReady('), 'it runs at load, before the app is ready');
+});
+
+/**
  * The line a generated program may not cross. The sandbox enforces it anyway;
  * this is about honesty -- a request for the machine outside the sandbox is
  * refused with the reason at planning time, not built into something that
